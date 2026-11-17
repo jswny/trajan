@@ -2,6 +2,16 @@
 
 A persistent Pi Durable agent on Cloudflare Workers, with a React chat UI, SQLite-backed conversations and workspace, and sandboxed JavaScript execution.
 
+## Deployment
+
+- Live app: https://trajan.j1d.workers.dev
+- GitHub: https://github.com/jswny/trajan (private)
+- Local checkout: `/Users/joe/source/trajan`
+
+Pushes to `main` trigger Cloudflare Workers Builds. The build runs `npm run check && npm run build`, then `npm run deploy` publishes the output. The linked build uses the account's existing Workers Builds token; no deployment credential is stored in GitHub or this repository.
+
+`npm run smoke -- https://trajan.j1d.workers.dev` exercises real Workers AI, workspace write/read, conversation restoration after reconnect, and Dynamic Worker execution in a fresh isolated chat. It incurs normal Workers AI usage.
+
 ## Development
 
 Use Node 26.13.1 (see `.node-version`) or another version supported by `package.json`.
