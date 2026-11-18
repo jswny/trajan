@@ -10,7 +10,9 @@ A persistent Pi Durable agent on Cloudflare Workers, with a React chat UI, SQLit
 
 Pushes to `main` trigger Cloudflare Workers Builds. The build runs `npm run check && npm run build`, then `npm run deploy` publishes the output. The linked build uses the account's existing Workers Builds token; no deployment credential is stored in GitHub or this repository.
 
-`npm run smoke -- https://trajan.j1d.workers.dev` exercises real Workers AI, workspace write/read, conversation restoration after reconnect, and Dynamic Worker execution in a fresh isolated chat. It incurs normal Workers AI usage.
+The production hostname is protected by a Cloudflare Access self-hosted application named **Trajan**, linked to the existing reusable **Only me** policy shared with Concierge. Sign-in sessions last 24 hours. Preview URLs are disabled in `cloudflare.config.ts` to prevent an unprotected alternate entry point. Access configuration is managed in Cloudflare.
+
+`npm run smoke -- "$LOCAL_DEV_URL"` (using the URL printed by `npm run dev`) exercises real Workers AI, workspace write/read, conversation restoration after reconnect, and Dynamic Worker execution in a fresh isolated chat. It incurs normal Workers AI usage. The smoke script does not authenticate to Access; it cannot run directly against the protected production hostname. Use the signed-in browser UI to verify production chat.
 
 ## Development
 
@@ -27,7 +29,7 @@ Authenticate with `cf auth login`, or supply `CLOUDFLARE_API_TOKEN` in your envi
 npm run check
 npm run build
 npm run deploy
-npm run smoke -- https://YOUR-WORKER.workers.dev
+npm run smoke -- "$LOCAL_DEV_URL"
 ```
 
 Worker configuration lives in `cloudflare.config.ts`; the Worker is named `trajan`. `GET /api/health` checks HTTP availability. The default model is Workers AI `@cf/zai-org/glm-5.3-flash`.
@@ -40,7 +42,7 @@ Worker configuration lives in `cloudflare.config.ts`; the Worker is named `traja
 - `src/workspace.ts` adapts file tools. `exec` runs JavaScript ES modules in fresh Dynamic Workers, with workspace filesystem access and a host Git module. It is not a shell and cannot install npm packages. Reads, whole-file writes, and deletes are replay-safe; edits and arbitrary execution are not automatically replayed.
 - `src/tests` retains the upstream runtime tests for WebSocket recovery, transcript paging, reconnect deduplication, and workspace tool declarations.
 
-The starting UI is a playground without application authentication. Possession of a chat's object ID provides access to that chat; add authentication before sharing it with other users. Pi Durable currently has no built-in approval step for tools.
+Cloudflare Access authenticates requests at the production hostname. The app does not enforce per-user chat ownership: anyone allowed by the Access policy who knows a chat's object ID can access that chat. Review that boundary before expanding the policy to other users. Pi Durable currently has no built-in approval step for tools.
 
 ## Upstream
 

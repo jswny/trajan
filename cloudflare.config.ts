@@ -8,6 +8,7 @@ export default defineConfig({
     compatibilityDate: "2026-11-16",
     compatibilityFlags: ["nodejs_compat"],
     workersDev: true,
+    previewUrls: false,
     assets: {
       notFoundHandling: "single-page-application",
       runWorkerFirst: ["/api/*", "/agents/*"]
