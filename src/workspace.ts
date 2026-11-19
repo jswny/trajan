@@ -1,8 +1,8 @@
 import type { Workspace } from "@cloudflare/computer";
 import {
-  createPiTools,
-  type CreatePiToolsOptions,
-  type PiTool
+	createPiTools,
+	type CreatePiToolsOptions,
+	type PiTool,
 } from "@cloudflare/computer/tools/pi-ai";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 
@@ -62,26 +62,26 @@ export default async function () {
 Prefer the read, write and edit tools for plain file changes.`;
 
 const COMMAND_DESCRIPTION =
-  "ES module source to run. Default-export a function to receive `input` and return a result.";
+	"ES module source to run. Default-export a function to receive `input` and return a result.";
 
 /** `exec`'s declaration, described for the JavaScript backend. */
 function describeExec(tool: PiTool): PiTool {
-  const properties = tool.parameters.properties ?? {};
-  const command = properties.command;
-  return {
-    ...tool,
-    description: EXEC_DESCRIPTION,
-    parameters: {
-      ...tool.parameters,
-      properties: {
-        ...properties,
-        command:
-          typeof command === "object" && command !== null
-            ? { ...command, description: COMMAND_DESCRIPTION }
-            : command
-      }
-    }
-  };
+	const properties = tool.parameters.properties ?? {};
+	const command = properties.command;
+	return {
+		...tool,
+		description: EXEC_DESCRIPTION,
+		parameters: {
+			...tool.parameters,
+			properties: {
+				...properties,
+				command:
+					typeof command === "object" && command !== null
+						? { ...command, description: COMMAND_DESCRIPTION }
+						: command,
+			},
+		},
+	};
 }
 
 /**
@@ -95,41 +95,39 @@ function describeExec(tool: PiTool): PiTool {
  * reports failures as `isError` results rather than throwing.
  */
 export function createWorkspaceTools(
-  workspace: Workspace,
-  options: Omit<CreatePiToolsOptions, "workspace" | "exec" | "shell"> = {}
+	workspace: Workspace,
+	options: Omit<CreatePiToolsOptions, "workspace" | "exec" | "shell"> = {},
 ): ToolRegistration[] {
-  const { tools, execute } = createPiTools({
-    ...options,
-    workspace,
-    exec: {
-      backends: {
-        // The id `CodemodeBackend` registers under by default.
-        codemode: {
-          description: "Runs ES module source in a sandboxed isolate."
-        }
-      }
-    }
-  });
+	const { tools, execute } = createPiTools({
+		...options,
+		workspace,
+		exec: {
+			backends: {
+				// The id `CodemodeBackend` registers under by default.
+				codemode: {
+					description: "Runs ES module source in a sandboxed isolate.",
+				},
+			},
+		},
+	});
 
-  return tools.map((declared): ToolRegistration => {
-    const tool = declared.name === "exec" ? describeExec(declared) : declared;
-    return {
-      name: tool.name,
-      description: tool.description,
-      // Plain JSON Schema: pi validates it with pi-schema, but
-      // computer's schema type is untyped, so `args` is too.
-      parameters: tool.parameters,
-      ...(tool.constrainedSampling
-        ? { constrainedSampling: tool.constrainedSampling }
-        : {}),
-      replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
-      async execute(args, api, context) {
-        const { content, isError } = await execute(
-          { id: api.callId, name: tool.name, arguments: args },
-          { abortSignal: context.abortSignal }
-        );
-        return { output: content, isError };
-      }
-    };
-  });
+	return tools.map((declared): ToolRegistration => {
+		const tool = declared.name === "exec" ? describeExec(declared) : declared;
+		return {
+			name: tool.name,
+			description: tool.description,
+			// Plain JSON Schema: pi validates it with pi-schema, but
+			// computer's schema type is untyped, so `args` is too.
+			parameters: tool.parameters,
+			...(tool.constrainedSampling ? { constrainedSampling: tool.constrainedSampling } : {}),
+			replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
+			async execute(args, api, context) {
+				const { content, isError } = await execute(
+					{ id: api.callId, name: tool.name, arguments: args },
+					{ abortSignal: context.abortSignal },
+				);
+				return { output: content, isError };
+			},
+		};
+	});
 }

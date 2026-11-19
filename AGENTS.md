@@ -2,7 +2,7 @@
 
 Trajan uses Pi Durable through `agents/harness/pi` on Cloudflare Workers.
 
-- Use `cf` and `cloudflare.config.ts` for the app. The Wrangler file under `src/tests` is only a Vitest fixture.
+- Use `cf` and `cloudflare.config.ts` for the app. Vitest loads a separate `src/tests/cloudflare.config.ts` for the test Worker.
 - Use the Node version in `.node-version` and npm with `package-lock.json`.
 - Run `npm run check` and `npm run build` before publishing changes.
 - Keep `--force` in the deploy script so dashboard secret updates cannot block Workers Builds on false configuration conflicts ([cf#69](https://github.com/cloudflare/cf/issues/69), [cf#466](https://github.com/cloudflare/cf/issues/466)). Treat `cloudflare.config.ts` as the source of truth for Worker configuration.

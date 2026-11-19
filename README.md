@@ -8,7 +8,7 @@ A persistent Pi Durable agent on Cloudflare Workers, with a React chat UI, SQLit
 - GitHub: https://github.com/jswny/trajan (private)
 - Local checkout: `/Users/joe/source/trajan`
 
-Pushes to `main` trigger Cloudflare Workers Builds. The build runs `npm run check && npm run build`, then `npm run deploy` publishes the output. The linked build uses the account's existing Workers Builds token; no deployment credential is stored in GitHub or this repository.
+Pushes to `main` trigger Cloudflare Workers Builds. The build command runs `npm run check`, then `npm run deploy` builds and deploys the Worker. The linked build uses the account's existing Workers Builds token; no deployment credential is stored in GitHub or this repository.
 
 The production hostname is protected by a Cloudflare Access self-hosted application named **Trajan**, linked to the existing reusable **Only me** policy shared with Concierge. Sign-in sessions last 24 hours. Preview URLs are disabled in `cloudflare.config.ts` to prevent an unprotected alternate entry point. Access configuration is managed in Cloudflare.
 
@@ -25,9 +25,12 @@ npm run dev
 
 Authenticate with `cf auth login`, or supply `CLOUDFLARE_API_TOKEN` in your environment. The local Workers AI binding is remote and uses your Cloudflare account; no model API key is needed. Never commit credentials.
 
+`npm run check` generates Worker types, runs Vite+ format, lint, and type checks, and runs the Worker tests. Use `npm run format` to apply formatting.
+
+Use `npm run build` to verify the production bundle separately. `npm run deploy` builds the Worker itself.
+
 ```sh
 npm run check
-npm run build
 npm run deploy
 npm run smoke -- "$LOCAL_DEV_URL"
 ```

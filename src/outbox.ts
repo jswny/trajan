@@ -4,8 +4,8 @@ import type { PiClientMessage, PiServerMessage } from "./protocol";
 
 /** A submit as the outbox sends it: always named, by id and operation id. */
 export type PiOutboxSubmit = Extract<PiClientMessage, { type: "submit" }> & {
-  readonly id: string;
-  readonly operationId: string;
+	readonly id: string;
+	readonly operationId: string;
 };
 
 /**
@@ -19,40 +19,40 @@ export type PiOutboxSubmit = Extract<PiClientMessage, { type: "submit" }> & {
  * id arrives, and sends every pending one again when the socket opens.
  */
 export class PiCommandOutbox {
-  readonly #pending = new Map<string, PiOutboxSubmit>();
+	readonly #pending = new Map<string, PiOutboxSubmit>();
 
-  /** A new submit, kept until it is answered. */
-  submit(input: UserInput, whenBusy?: PiWhenBusy): PiOutboxSubmit {
-    const id = crypto.randomUUID();
-    const command: PiOutboxSubmit = {
-      type: "submit",
-      id,
-      operationId: id,
-      input,
-      ...(whenBusy === undefined ? {} : { whenBusy })
-    };
-    this.#pending.set(id, command);
-    return command;
-  }
+	/** A new submit, kept until it is answered. */
+	submit(input: UserInput, whenBusy?: PiWhenBusy): PiOutboxSubmit {
+		const id = crypto.randomUUID();
+		const command: PiOutboxSubmit = {
+			type: "submit",
+			id,
+			operationId: id,
+			input,
+			...(whenBusy === undefined ? {} : { whenBusy }),
+		};
+		this.#pending.set(id, command);
+		return command;
+	}
 
-  /** Unanswered submits, oldest first. */
-  pending(): PiOutboxSubmit[] {
-    return [...this.#pending.values()];
-  }
+	/** Unanswered submits, oldest first. */
+	pending(): PiOutboxSubmit[] {
+		return [...this.#pending.values()];
+	}
 
-  /** Send every unanswered submit again, as the socket opens. */
-  sendPending(send: (data: string) => void): void {
-    for (const command of this.#pending.values()) send(JSON.stringify(command));
-  }
+	/** Send every unanswered submit again, as the socket opens. */
+	sendPending(send: (data: string) => void): void {
+		for (const command of this.#pending.values()) send(JSON.stringify(command));
+	}
 
-  /** Forget every unanswered submit. */
-  clear(): void {
-    this.#pending.clear();
-  }
+	/** Forget every unanswered submit. */
+	clear(): void {
+		this.#pending.clear();
+	}
 
-  /** Drop the submit a `result` or `error` answers. */
-  receive(message: PiServerMessage): void {
-    if (message.type !== "result" && message.type !== "error") return;
-    if (message.id !== undefined) this.#pending.delete(message.id);
-  }
+	/** Drop the submit a `result` or `error` answers. */
+	receive(message: PiServerMessage): void {
+		if (message.type !== "result" && message.type !== "error") return;
+		if (message.id !== undefined) this.#pending.delete(message.id);
+	}
 }
