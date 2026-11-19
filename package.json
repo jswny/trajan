@@ -8,7 +8,7 @@
     "dev": "cf dev",
     "start": "cf dev",
     "build": "cf build",
-    "deploy": "cf deploy --prebuilt",
+    "deploy": "cf deploy --prebuilt --force",
     "types": "cf workers types",
     "typecheck": "cf workers types && tsc --noEmit",
     "test": "vitest run --config src/tests/vitest.config.ts",
