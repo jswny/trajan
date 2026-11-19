@@ -4,13 +4,13 @@ A persistent Pi Durable agent on Cloudflare Workers, with a React chat UI, SQLit
 
 ## Deployment
 
-- Live app: https://trajan.j1d.workers.dev
+- Live app: https://trajan.j1.io
 - GitHub: https://github.com/jswny/trajan (private)
 - Local checkout: `/Users/joe/source/trajan`
 
 Pushes to `main` trigger Cloudflare Workers Builds. The build command runs `npm run check`, then `npm run deploy` builds and deploys the Worker. The linked build uses the account's existing Workers Builds token; no deployment credential is stored in GitHub or this repository.
 
-The production hostname is protected by a Cloudflare Access self-hosted application named **Trajan**, linked to the existing reusable **Only me** policy shared with Concierge. Sign-in sessions last 24 hours. Preview URLs are disabled in `cloudflare.config.ts` to prevent an unprotected alternate entry point. Access configuration is managed in Cloudflare.
+Both `trajan.j1.io` and the legacy `trajan.j1d.workers.dev` address are protected by the **Trajan** Cloudflare Access application, which uses the reusable **Only me** policy shared with Concierge. Sign-in sessions last 24 hours. Chat IDs are saved in browser storage per hostname, so use the legacy address to reopen chats started there. Preview URLs are disabled in `cloudflare.config.ts`. Access configuration is managed in Cloudflare.
 
 `npm run smoke -- "$LOCAL_DEV_URL"` (using the URL printed by `npm run dev`) exercises real Workers AI, workspace write/read, conversation restoration after reconnect, and Dynamic Worker execution in a fresh isolated chat. It incurs normal Workers AI usage. The smoke script does not authenticate to Access; it cannot run directly against the protected production hostname. Use the signed-in browser UI to verify production chat.
 

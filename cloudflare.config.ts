@@ -9,6 +9,7 @@ export default defineConfig({
 		compatibilityFlags: ["nodejs_compat"],
 		workersDev: true,
 		previewUrls: false,
+		domains: ["trajan.j1.io"],
 		assets: {
 			notFoundHandling: "single-page-application",
 			runWorkerFirst: ["/api/*", "/agents/*"],
