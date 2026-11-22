@@ -10,10 +10,9 @@ import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
+import { migrateRetiredModel, MODEL_ID } from "./model";
 import { PiSessionSockets } from "./sockets";
 import { createWorkspaceTools } from "./workspace";
-
-const MODEL_ID = "@cf/zai-org/glm-5.3-flash";
 
 const PREAMBLE =
 	"You are Trajan, a concise and capable assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
@@ -22,6 +21,7 @@ const PREAMBLE =
 export class Trajan extends DurableObject<Env> {
 	// Workers AI and AI Gateway over the AI binding, as a pi-ai provider.
 	readonly ai = createAI({ binding: this.env.AI });
+	readonly model = this.ai(MODEL_ID);
 	// A durable filesystem on the object's SQLite, beside pi's own tables.
 	// `exec` runs JavaScript modules in a fresh Dynamic Worker per call, with
 	// no network of its own. `git` turns on `workspace.git`, which the `codemode:git`
@@ -49,7 +49,7 @@ export class Trajan extends DurableObject<Env> {
 			});
 			const models = createModels();
 			models.setProvider(this.ai.provider);
-			return Harness.open(
+			const pi = await Harness.open(
 				storage,
 				{
 					models,
@@ -64,8 +64,16 @@ export class Trajan extends DurableObject<Env> {
 				},
 				context,
 			);
+			try {
+				const { provider, id: modelId } = this.model;
+				await migrateRetiredModel(pi, { provider, modelId }, context);
+				return pi;
+			} catch (error) {
+				await pi.close(context).catch(() => {});
+				throw error;
+			}
 		},
-		defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" },
+		defaults: { model: this.model, thinkingLevel: "low" },
 	});
 
 	// App glue, not the harness: how this app puts sessions on a socket.

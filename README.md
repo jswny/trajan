@@ -35,7 +35,9 @@ npm run deploy
 npm run smoke -- "$LOCAL_DEV_URL"
 ```
 
-Worker configuration lives in `cloudflare.config.ts`; the Worker is named `trajan`. `GET /api/health` checks HTTP availability. The default model is Workers AI `@cf/zai-org/glm-5.3-flash`.
+Worker configuration lives in `cloudflare.config.ts`; the Worker is named `trajan`. `GET /api/health` checks HTTP availability. The default model is Workers AI `@cf/deepseek-ai/deepseek-v4.1-flash-1017`. Existing chats that used the retired GLM model switch when Pi opens them.
+
+After a conversation runs on Pi 1.6, roll forward to fix production issues. Pi 1.5 cannot run the newer model and tool tasks written by Pi 1.6. [Pi harness upgrade guidance](https://developers.cloudflare.com/agents/harnesses/pi/#install)
 
 ## Architecture
 
@@ -45,7 +47,7 @@ Worker configuration lives in `cloudflare.config.ts`; the Worker is named `traja
 - `src/workspace.ts` adapts file tools. `exec` runs JavaScript ES modules in fresh Dynamic Workers, with workspace filesystem access and a host Git module. It is not a shell and cannot install npm packages. Reads, whole-file writes, and deletes are replay-safe; edits and arbitrary execution are not automatically replayed.
 - `src/tests` retains the upstream runtime tests for WebSocket recovery, transcript paging, reconnect deduplication, and workspace tool declarations.
 
-Cloudflare Access authenticates requests at the production hostname. The app does not enforce per-user chat ownership: anyone allowed by the Access policy who knows a chat's object ID can access that chat. Review that boundary before expanding the policy to other users. Pi Durable currently has no built-in approval step for tools.
+Cloudflare Access authenticates requests at the production hostname. The app does not enforce per-user chat ownership: anyone allowed by the Access policy who knows a chat's object ID can access that chat. Review that boundary before expanding the policy to other users. Trajan runs tools without an approval step.
 
 ## Upstream
 
