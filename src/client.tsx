@@ -8,22 +8,23 @@ import {
 	Text,
 } from "@cloudflare/kumo";
 import {
-	ArrowUpIcon,
-	BrainIcon,
-	CheckCircleIcon,
-	CodeIcon,
-	FilePlusIcon,
-	GearIcon,
-	GitBranchIcon,
-	MoonIcon,
-	PaperPlaneRightIcon,
-	PlusIcon,
-	StopIcon,
-	SunIcon,
-	WrenchIcon,
-	XCircleIcon,
-	XIcon,
-} from "@phosphor-icons/react";
+	IconAgent,
+	IconAgentFill,
+	IconArrowShortUp,
+	IconArrowUpFill,
+	IconBranch,
+	IconCircleCheck,
+	IconCircleX,
+	IconCode,
+	IconColorModeDark,
+	IconColorModeLight,
+	IconFileBadgePlus,
+	IconGear,
+	IconLoader,
+	IconPlus,
+	IconSquircleFill,
+	IconX,
+} from "@pierre/icons/beta";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
@@ -42,17 +43,17 @@ type EntryMessage = Exclude<TranscriptMessage, { role: "gap" }>;
 
 const SUGGESTIONS = [
 	{
-		icon: <FilePlusIcon size={15} />,
+		icon: <IconFileBadgePlus aria-hidden="true" />,
 		label: "Write a file",
 		value: "Write a haiku about Durable Objects to /workspace/haiku.txt, then read it back.",
 	},
 	{
-		icon: <CodeIcon size={15} />,
+		icon: <IconCode aria-hidden="true" />,
 		label: "Run JavaScript",
 		value: "Use exec to run JavaScript that lists /workspace and returns the size of each file.",
 	},
 	{
-		icon: <GitBranchIcon size={15} />,
+		icon: <IconBranch aria-hidden="true" />,
 		label: "Clone a repo",
 		value:
 			"Clone https://github.com/octocat/Hello-World into /workspace/hello, then show its git log.",
@@ -82,7 +83,13 @@ function ModeToggle() {
 			shape="square"
 			aria-label="Toggle theme"
 			onClick={() => setMode((value) => (value === "light" ? "dark" : "light"))}
-			icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+			icon={
+				mode === "light" ? (
+					<IconColorModeDark aria-hidden="true" />
+				) : (
+					<IconColorModeLight aria-hidden="true" />
+				)
+			}
 		/>
 	);
 }
@@ -106,9 +113,14 @@ function ToolCallCard({
 		<details className="rounded-xl border border-kumo-line bg-kumo-base">
 			<summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
 				{running ? (
-					<GearIcon size={14} className="animate-spin text-kumo-inactive" />
+					<IconLoader
+						size={12}
+						aria-hidden="true"
+						className="motion-safe:animate-spin"
+						color="var(--color-kumo-inactive)"
+					/>
 				) : (
-					<CheckCircleIcon size={14} className="text-kumo-success" />
+					<IconCircleCheck size={12} aria-hidden="true" color="var(--color-kumo-success)" />
 				)}
 				<span className="min-w-0 flex-1 truncate text-xs font-semibold">{part.name}</span>
 				<Badge variant="secondary">{running ? "Running" : "Called"}</Badge>
@@ -133,9 +145,9 @@ function ToolResultCard({ part }: { part: Extract<TranscriptPart, { type: "tool-
 		<details className="rounded-xl border border-kumo-line bg-kumo-base">
 			<summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
 				{part.error ? (
-					<XCircleIcon size={14} className="text-kumo-danger" />
+					<IconCircleX size={12} aria-hidden="true" color="var(--color-kumo-danger)" />
 				) : (
-					<CheckCircleIcon size={14} className="text-kumo-success" />
+					<IconCircleCheck size={12} aria-hidden="true" color="var(--color-kumo-success)" />
 				)}
 				<span className="min-w-0 flex-1 truncate text-xs">
 					<span className="font-semibold">{part.name}</span>
@@ -242,7 +254,7 @@ function AssistantMessage({
 	return (
 		<div className="flex items-start gap-3">
 			<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
-				<BrainIcon size={17} weight="bold" />
+				<IconAgentFill aria-hidden="true" />
 			</div>
 			<div className="min-w-0 flex-1 space-y-3">
 				{message.parts.map((part, index) => (
@@ -331,7 +343,18 @@ function Message({
 			// Entries this tab missed while it was away.
 			return (
 				<div className="flex justify-center">
-					<Button variant="ghost" size="sm" loading={loading} onClick={() => onFillGap?.(message)}>
+					<Button
+						variant="ghost"
+						size="sm"
+						disabled={loading}
+						aria-busy={loading}
+						icon={
+							loading ? (
+								<IconLoader size={12} aria-hidden="true" className="motion-safe:animate-spin" />
+							) : undefined
+						}
+						onClick={() => onFillGap?.(message)}
+					>
 						Load missing messages
 					</Button>
 				</div>
@@ -362,7 +385,7 @@ function Sidebar({
 					shape="square"
 					aria-label="Close tools"
 					onClick={onClose}
-					icon={<XIcon size={16} />}
+					icon={<IconX aria-hidden="true" />}
 				/>
 			</div>
 			<div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
@@ -370,9 +393,14 @@ function Sidebar({
 					<Surface key={tool.name} className="rounded-lg p-3 ring ring-kumo-line">
 						<div className="flex items-center gap-2">
 							{activeTools.includes(tool.name) ? (
-								<GearIcon size={14} className="animate-spin text-kumo-accent" />
+								<IconLoader
+									size={12}
+									aria-hidden="true"
+									className="motion-safe:animate-spin"
+									color="var(--color-kumo-accent)"
+								/>
 							) : (
-								<WrenchIcon size={14} className="text-kumo-inactive" />
+								<IconGear size={12} aria-hidden="true" color="var(--color-kumo-inactive)" />
 							)}
 							<code className="text-xs font-semibold">{tool.name}</code>
 						</div>
@@ -487,7 +515,7 @@ function App() {
 					<div className="mx-auto flex h-[68px] max-w-3xl items-center justify-between gap-3 px-5">
 						<div className="flex min-w-0 items-center gap-3">
 							<div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-white">
-								<BrainIcon size={20} weight="bold" />
+								<IconAgentFill size={24} aria-hidden="true" />
 							</div>
 							<div className="min-w-0">
 								<h1 className="truncate text-base font-semibold">Trajan</h1>
@@ -509,14 +537,14 @@ function App() {
 								aria-label="Tools"
 								aria-expanded={toolsOpen}
 								onClick={() => setToolsOpen((open) => !open)}
-								icon={<WrenchIcon size={16} />}
+								icon={<IconGear aria-hidden="true" />}
 							/>
 							<Button
 								variant="ghost"
 								shape="square"
 								aria-label="New session"
 								onClick={newSession}
-								icon={<PlusIcon size={16} />}
+								icon={<IconPlus aria-hidden="true" />}
 							/>
 							<ModeToggle />
 						</div>
@@ -528,7 +556,7 @@ function App() {
 						{empty ? (
 							<div className="py-10 sm:py-16">
 								<Empty
-									icon={<BrainIcon size={32} />}
+									icon={<IconAgent size={24} aria-hidden="true" />}
 									title="Ask Trajan something that needs a tool"
 									description="Tool calls and results stream in as they happen."
 								/>
@@ -554,8 +582,19 @@ function App() {
 								<Button
 									variant="ghost"
 									size="sm"
-									icon={<ArrowUpIcon size={14} />}
-									loading={loading}
+									icon={
+										loading ? (
+											<IconLoader
+												size={12}
+												aria-hidden="true"
+												className="motion-safe:animate-spin"
+											/>
+										) : (
+											<IconArrowShortUp size={12} aria-hidden="true" />
+										)
+									}
+									disabled={loading}
+									aria-busy={loading}
 									onClick={showEarlier}
 								>
 									Load earlier messages
@@ -578,11 +617,11 @@ function App() {
 						{running && !live ? (
 							<div className="flex items-start gap-3">
 								<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
-									<BrainIcon size={17} weight="bold" />
+									<IconAgentFill aria-hidden="true" />
 								</div>
 								<Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
 									<div className="flex items-center gap-2 text-sm text-kumo-subtle">
-										<GearIcon size={15} className="animate-spin" />
+										<IconLoader aria-hidden="true" className="motion-safe:animate-spin" />
 										{retry
 											? `Retrying: ${retry.error}`
 											: runningTools.length > 0
@@ -667,7 +706,7 @@ function App() {
 										shape="square"
 										aria-label="Stop"
 										onClick={abort}
-										icon={<StopIcon size={18} weight="fill" />}
+										icon={<IconSquircleFill size={12} aria-hidden="true" />}
 									/>
 								</div>
 							) : (
@@ -677,7 +716,7 @@ function App() {
 									shape="square"
 									aria-label="Send message"
 									disabled={!connected || prompt.trim() === ""}
-									icon={<PaperPlaneRightIcon size={18} />}
+									icon={<IconArrowUpFill aria-hidden="true" />}
 									className="mb-0.5"
 								/>
 							)}
