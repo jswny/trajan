@@ -1,6 +1,6 @@
+import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import type {
 	ConversationView,
-	ConversationWatch,
 	ConversationWindow,
 	EntryId,
 	RegistryReader,
@@ -9,7 +9,7 @@ import type {
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 import { ROOT_SESSION, type PiHarness, type PiSessionId } from "agents/harness/pi";
-import { Result } from "effect";
+import { Effect, Exit, Result, Scope } from "effect";
 import {
 	decodeClientMessage,
 	decodeRequestId,
@@ -61,6 +61,14 @@ function send(socket: WebSocket, message: PiServerMessage): void {
 	}
 }
 
+async function closeWatchScope(scope: Scope.Closeable): Promise<void> {
+	try {
+		await Effect.runPromise(Scope.close(scope, Exit.void));
+	} catch (error) {
+		console.warn("pi session watch cleanup failed", error);
+	}
+}
+
 /**
  * App glue: this app's session protocol over the `WebSockets` capability,
  * built only on the harness's public API.
@@ -83,7 +91,7 @@ export class PiSessionSockets {
 	readonly #harness: PiHarness;
 	readonly #registry: RegistryReader;
 	readonly #getWebSockets: (tag?: string) => WebSocket[];
-	readonly #watches = new Map<WebSocket, ConversationWatch>();
+	readonly #watchScopes = new Map<WebSocket, Scope.Closeable>();
 	#closed = false;
 
 	constructor(
@@ -118,16 +126,16 @@ export class PiSessionSockets {
 		// and look up each one's tag.
 		for (const { id } of await this.#harness.sessions.list()) {
 			for (const socket of this.#getWebSockets(sessionTag(id))) {
-				await this.#watchOrClose(socket, id);
+				if (!this.#watchScopes.has(socket)) await this.#watchOrClose(socket, id);
 			}
 		}
 	}
 
 	async close(): Promise<void> {
 		this.#closed = true;
-		const watches = [...this.#watches.values()];
-		this.#watches.clear();
-		await Promise.all(watches.map((watch) => watch.stop()));
+		const scopes = [...this.#watchScopes.values()];
+		this.#watchScopes.clear();
+		await Promise.all(scopes.map(closeWatchScope));
 	}
 
 	async #onConnect(connection: Connection, ctx: ConnectionContext) {
@@ -143,39 +151,71 @@ export class PiSessionSockets {
 		// The client sends `watch` next, with where its transcript ends.
 	}
 
-	/**
-	 * Give `socket` a new watch of `session`, ending the one it had: send the
-	 * view, then pi's operations for each change.
-	 */
-	async #watch(
+	/** The newest request owns the socket from acquisition through its final frame. */
+	async #watchOrClose(
 		socket: WebSocket,
 		session: PiSessionId,
 		window: ConversationWindow = {},
 	): Promise<void> {
-		const watch = await this.#harness.session(session).watch(window);
-		if (this.#closed || socket.readyState !== OPEN) {
-			await watch.stop();
-			return;
-		}
-		// Stop the last watch before this one sends anything, so the client
-		// never gets its operations after this view. Two `#watch` calls for one
-		// socket can overlap, as `reattach()` and a client's `watch` do.
-		const previous = this.#watches.get(socket);
-		this.#watches.set(socket, watch);
-		void previous?.stop();
-		let last = watch.value;
-		send(socket, { type: "view", session, view: last });
-		watch.start(async (call) => {
-			// Pi ends a watch on failure instead of sending a `failed` call.
-			if (call.kind !== "value") return;
+		if (this.#closed || socket.readyState !== OPEN) return;
+		const scope = Scope.makeUnsafe();
+		const abort = new AbortController();
+		Effect.runSync(
+			Scope.addFinalizer(
+				scope,
+				Effect.sync(() => abort.abort()),
+			),
+		);
+		// Publish ownership before awaiting cleanup or asking Pi to open the watch.
+		const previous = this.#watchScopes.get(socket);
+		this.#watchScopes.set(socket, scope);
+		const ownsWatch = () => this.#watchScopes.get(socket) === scope;
+
+		try {
+			if (previous) await closeWatchScope(previous);
+			if (!ownsWatch()) return;
+			const watch = await Effect.runPromise(
+				Effect.acquireRelease(
+					Effect.tryPromise({
+						try: () =>
+							this.#harness
+								.session(session)
+								.watch(window, withAbortSignal(abort.signal, BACKGROUND_CONTEXT)),
+						catch: (error) => error,
+					}),
+					(watch) => Effect.promise(() => watch.stop()),
+				).pipe(Scope.provide(scope)),
+			);
+			// A late acquisition is released by its already closed scope.
+			if (!ownsWatch()) return;
 			if (socket.readyState !== OPEN) {
-				void this.#unwatch(socket);
+				await this.#unwatch(socket);
 				return;
 			}
-			last = call.value;
-			send(socket, { type: "ops", session, ops: call.ops });
-		});
-		void watch.closed.then((end) => this.#ended(socket, session, watch, end, last));
+
+			let last = watch.value;
+			send(socket, { type: "view", session, view: last });
+			watch.start(async (call) => {
+				if (call.kind !== "value" || !ownsWatch()) return;
+				if (socket.readyState !== OPEN) {
+					await this.#unwatch(socket);
+					return;
+				}
+				last = call.value;
+				send(socket, { type: "ops", session, ops: call.ops });
+			});
+			void watch.closed.then((end) => this.#ended(socket, session, scope, end, last));
+		} catch (error) {
+			if (!ownsWatch()) return;
+			console.warn("pi session watch lost", error);
+			// A failed current watch closes the socket so the client can reconnect.
+			try {
+				socket.close(1011, "Lost the session's watch");
+			} catch {
+				// Already closed.
+			}
+			await this.#unwatch(socket);
+		}
 	}
 
 	/**
@@ -186,44 +226,24 @@ export class PiSessionSockets {
 	async #ended(
 		socket: WebSocket,
 		session: PiSessionId,
-		watch: ConversationWatch,
+		scope: Scope.Closeable,
 		end: WatchEnd,
 		last: ConversationView,
 	): Promise<void> {
 		if (end.kind === "stopped" || end.kind === "aborted") return;
-		if (this.#watches.get(socket) !== watch) return;
-		this.#watches.delete(socket);
-		if (this.#closed || socket.readyState !== OPEN) return;
+		if (this.#watchScopes.get(socket) !== scope) return;
+		if (socket.readyState !== OPEN) {
+			await this.#unwatch(socket);
+			return;
+		}
 		await this.#watchOrClose(socket, session, resumeAfter(last));
 	}
 
-	/**
-	 * `#watch`, or, when pi does not open, close the socket with 1011. The
-	 * client reconnects, backing off, and its `watch` tries again. A socket
-	 * left open without a watch would never see the session change.
-	 */
-	async #watchOrClose(
-		socket: WebSocket,
-		session: PiSessionId,
-		window: ConversationWindow = {},
-	): Promise<void> {
-		try {
-			await this.#watch(socket, session, window);
-		} catch (error) {
-			console.warn("pi session watch lost", error);
-			try {
-				socket.close(1011, "Lost the session's watch");
-			} catch {
-				// Already closed.
-			}
-		}
-	}
-
 	async #unwatch(socket: WebSocket): Promise<void> {
-		const watch = this.#watches.get(socket);
-		if (!watch) return;
-		this.#watches.delete(socket);
-		await watch.stop();
+		const scope = this.#watchScopes.get(socket);
+		if (!scope) return;
+		this.#watchScopes.delete(socket);
+		await closeWatchScope(scope);
 	}
 
 	async #onMessage(connection: Connection, raw: WebSocketMessage) {

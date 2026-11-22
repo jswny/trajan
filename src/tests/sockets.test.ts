@@ -1,10 +1,21 @@
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { Watch } from "@earendil-works/chord/watch";
+import {
+	createRegistry,
+	type ConversationId,
+	type ConversationView,
+	type EntryId,
+} from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
+import { PiHarness, ROOT_SESSION } from "agents/harness/pi";
+import type { Connection } from "agents/lifecycle";
 import { Option } from "effect";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { PiSessionMirror } from "../mirror";
 import { decodeServerMessage, type PiServerMessage } from "../protocol";
+import { PiSessionSockets } from "../sockets";
 import type { PiMessage } from "../transcript";
 
 async function connect(name: string, query = ""): Promise<WebSocket> {
@@ -77,6 +88,80 @@ function numbered(prefix: string, count: number): string[] {
 }
 
 describe("the session WebSocket protocol", () => {
+	it.each(["resolves", "rejects"])(
+		"keeps a client's watch when an older wake-up watch %s late",
+		async (outcome) => {
+			const harness = new PiHarness({
+				harness: async () => {
+					throw new Error("Unexpected Pi open");
+				},
+			});
+			const session = harness.session(ROOT_SESSION);
+			vi.spyOn(harness, "session").mockReturnValue(session);
+			vi.spyOn(harness.sessions, "list").mockResolvedValue([{ id: ROOT_SESSION, busy: false }]);
+			const view = (before: number): ConversationView => ({
+				conversation: { id: 1 as ConversationId },
+				before: before as EntryId,
+				entries: [],
+				docs: {},
+			});
+			const stale = new Watch(view(5), vi.fn(), vi.fn());
+			const current = new Watch(view(10), vi.fn(), vi.fn());
+			const pending = Promise.withResolvers<typeof stale>();
+			const watch = vi
+				.spyOn(session, "watch")
+				.mockReturnValueOnce(pending.promise)
+				.mockResolvedValueOnce(current);
+			const { 0: client, 1: server } = new WebSocketPair();
+			const socket: Connection = Object.assign(server, {
+				id: "connection",
+				uri: null,
+				state: null,
+				setState: () => null,
+				tags: ["connection", "pi-session:" + ROOT_SESSION],
+			});
+			const frames: PiServerMessage[] = [];
+			client.addEventListener("message", (event) => {
+				frames.push(JSON.parse(event.data));
+			});
+			client.accept();
+			socket.accept();
+			const sockets = new PiSessionSockets(harness, createRegistry(), () => [socket]);
+			const handlers = sockets.options().handlers!;
+			const wake = sockets.reattach();
+
+			try {
+				await expect.poll(() => watch.mock.calls.length).toBe(1);
+				await handlers.onMessage!(socket, JSON.stringify({ type: "watch", from: 11 }));
+				if (outcome === "resolves") pending.resolve(stale);
+				else pending.reject(new Error("Superseded watch failed"));
+				await wake;
+
+				expect(socket.readyState).toBe(WebSocket.OPEN);
+				expect(watch.mock.calls[0]?.[1]?.abortSignal?.aborted).toBe(true);
+				if (outcome === "resolves") expect(await stale.closed).toEqual({ kind: "stopped" });
+				current.advance(
+					{ kind: "value", value: view(11), retired: false, ops: [["s", ["before"], 11]] },
+					BACKGROUND_CONTEXT,
+				);
+				await expect
+					.poll(() => frames)
+					.toEqual([
+						{ type: "view", session: ROOT_SESSION, view: view(10) },
+						{ type: "ops", session: ROOT_SESSION, ops: [["s", ["before"], 11]] },
+					]);
+				await handlers.onClose!(socket, 1000, "", true);
+				expect(await current.closed).toEqual({ kind: "stopped" });
+				expect(watch.mock.calls[1]?.[1]?.abortSignal?.aborted).toBe(true);
+			} finally {
+				await sockets.close();
+				pending.resolve(stale);
+				await wake;
+				client.close();
+			}
+		},
+	);
+
 	it("rejects invalid requests and continues to serve the socket", async () => {
 		const socket = await connect(crypto.randomUUID());
 		const client = follow(socket);
