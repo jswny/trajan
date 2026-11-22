@@ -37,6 +37,15 @@ npm run deploy
 npm run smoke -- "$LOCAL_DEV_URL"
 ```
 
+Run the browser recovery test with Playwright's headless Chromium.
+
+```sh
+npx playwright install chromium --only-shell
+npm run test:browser
+```
+
+The test starts a local Worker fixture with temporary storage and a faux model. It drops a submit receipt, reconnects the real chat UI, and checks replay, draft preservation, and the Worker watch logs. The fixture log is in `.cloudflare/browser-smoke.log`.
+
 Worker configuration lives in `cloudflare.config.ts`; the Worker is named `trajan`. `GET /api/health` checks HTTP availability. The default model is Workers AI `@cf/deepseek-ai/deepseek-v4.1-flash-1017`. Existing chats that used the retired GLM model switch when Pi opens them.
 
 After a conversation runs on Pi 1.6, roll forward to fix production issues. Pi 1.5 cannot run the newer model and tool tasks written by Pi 1.6. [Pi harness upgrade guidance](https://developers.cloudflare.com/agents/harnesses/pi/#install)

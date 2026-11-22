@@ -1,4 +1,5 @@
-import { cloudflare } from "@cloudflare/vite-plugin";
+import { fileURLToPath } from "node:url";
+import { cloudflare, type PluginConfig } from "@cloudflare/vite-plugin";
 import pierreDark from "@pierre/theme/pierre-dark";
 import pierreLight from "@pierre/theme/pierre-light";
 import tailwindcss from "@tailwindcss/vite";
@@ -21,11 +22,34 @@ const paletteRoles = {
 	danger: "gitDecoration.deletedResourceForeground",
 };
 
-export default defineConfig({
+async function browserSmokeWorker(): Promise<PluginConfig> {
+	const { loadAndParseConfig } = await import("@cloudflare/config");
+	const fixturePath = fileURLToPath(new URL("./src/tests/cloudflare.config.ts", import.meta.url));
+	const { result } = await loadAndParseConfig(fixturePath, {
+		isPreview: false,
+		mode: "development",
+	});
+	if (!result.success) throw result.error;
+	const worker = result.data.worker;
+	if (!worker) throw new Error("Missing browser smoke test Worker");
+	return {
+		config: () => ({
+			worker: { ...worker, assets: { runWorkerFirst: ["/agents/*", "/__browser-smoke/*"] } },
+		}),
+		persistState: false,
+		remoteBindings: false,
+		inspectorPort: false,
+		types: { generate: false },
+	};
+}
+
+export default defineConfig(async ({ command, mode }) => ({
 	plugins: [
 		agents(),
 		react(),
-		cloudflare(),
+		cloudflare(
+			command === "serve" && mode === "browser-smoke" ? await browserSmokeWorker() : undefined,
+		),
 		tailwindcss(),
 		{
 			name: "pierre-palette",
@@ -54,4 +78,4 @@ export default defineConfig({
 			"@earendil-works/pi-telemetry",
 		],
 	},
-});
+}));

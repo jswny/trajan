@@ -20,6 +20,7 @@ import {
 import { DurableObject } from "cloudflare:workers";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
 import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
+import { routeAgentRequest } from "agents";
 import {
 	PiHarness,
 	type PiOperationResult,
@@ -74,10 +75,13 @@ function script(context: TranscriptContext): AssistantMessage {
 			stopReason: "toolUse",
 		});
 	}
-	if (prompt === "gate" || prompt === "gate-unsafe") {
-		return fauxAssistantMessage([fauxToolCall(prompt === "gate" ? "gate" : "gate_unsafe", {})], {
-			stopReason: "toolUse",
-		});
+	if (prompt === "gate" || prompt === "gate browser recovery" || prompt === "gate-unsafe") {
+		return fauxAssistantMessage(
+			[fauxToolCall(prompt === "gate-unsafe" ? "gate_unsafe" : "gate", {})],
+			{
+				stopReason: "toolUse",
+			},
+		);
 	}
 	return fauxAssistantMessage([fauxText(`echo: ${prompt}`)]);
 }
@@ -190,6 +194,10 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 
 	async release(): Promise<void> {
 		await this.ctx.storage.put(RELEASE_KEY, true);
+	}
+
+	disconnect(): void {
+		for (const socket of this.ctx.getWebSockets()) socket.close(1012, "Lost submit receipt");
 	}
 
 	/** Watch the root session through one run: the view projected from its last value. */
@@ -326,4 +334,20 @@ function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
 	};
 }
 
-export default { fetch: () => new Response("Not found", { status: 404 }) };
+export default {
+	async fetch(request: Request, env: Env): Promise<Response> {
+		const { pathname } = new URL(request.url);
+		if (pathname === "/__browser-smoke/ready") return new Response("Trajan browser fixture");
+		const control = /^\/__browser-smoke\/([a-f0-9-]+)\/(disconnect|release)$/.exec(pathname);
+		if (control && request.method === "POST") {
+			const stub = env.PI_HARNESS_TEST.getByName(control[1]!);
+			if (control[2] === "disconnect") await stub.disconnect();
+			else await stub.release();
+			return new Response(null, { status: 204 });
+		}
+		return (
+			(await routeAgentRequest(request, { Trajan: env.PI_HARNESS_TEST })) ??
+			new Response("Not found", { status: 404 })
+		);
+	},
+};
