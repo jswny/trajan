@@ -1,10 +1,10 @@
-import githubDark from "@pierre/highlights/themes/github-dark";
-import githubLight from "@pierre/highlights/themes/github-light";
+import pierreDark from "@pierre/highlights/themes/pierre-dark";
+import pierreLight from "@pierre/highlights/themes/pierre-light";
 import { createHighlightsPlugin } from "@pierre/words/highlights";
 
 export const markdownPlugins = {
 	code: createHighlightsPlugin({
-		themes: { light: githubLight, dark: githubDark },
+		themes: { light: pierreLight, dark: pierreDark },
 		defaultColor: "light-dark()",
 	}),
 };

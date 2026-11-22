@@ -7,10 +7,14 @@
 		<title>Trajan</title>
 		<script>
 			(() => {
-				const stored = localStorage.getItem("theme");
-				const mode = stored || "light";
-				document.documentElement.setAttribute("data-mode", mode);
-				document.documentElement.style.colorScheme = mode;
+				try {
+					const stored = localStorage.getItem("trajan-theme");
+					if (stored === "light" || stored === "dark") {
+						document.documentElement.dataset.theme = stored;
+					}
+				} catch {
+					// The stylesheet follows the system when storage is unavailable.
+				}
 			})();
 		</script>
 	</head>

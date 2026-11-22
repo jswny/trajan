@@ -8,8 +8,6 @@ import {
 	IconCircleCheck,
 	IconCircleX,
 	IconCode,
-	IconColorModeDark,
-	IconColorModeLight,
 	IconFileBadgePlus,
 	IconGear,
 	IconLoader,
@@ -60,29 +58,34 @@ function getSession(): string {
 	return created;
 }
 
-function ModeToggle() {
-	const [mode, setMode] = useState(() => localStorage.getItem("theme") ?? "light");
+type ThemeMode = "auto" | "light" | "dark";
 
-	useEffect(() => {
-		document.documentElement.setAttribute("data-mode", mode);
-		document.documentElement.style.colorScheme = mode;
-		localStorage.setItem("theme", mode);
-	}, [mode]);
+function ThemeSwitcher() {
+	const [mode, setMode] = useState<ThemeMode>(() => {
+		const theme = document.documentElement.dataset.theme;
+		return theme === "light" || theme === "dark" ? theme : "auto";
+	});
 
 	return (
-		<Button
-			variant="ghost"
-			shape="square"
-			aria-label="Toggle theme"
-			onClick={() => setMode((value) => (value === "light" ? "dark" : "light"))}
-			icon={
-				mode === "light" ? (
-					<IconColorModeDark aria-hidden="true" />
-				) : (
-					<IconColorModeLight aria-hidden="true" />
-				)
-			}
-		/>
+		<select
+			aria-label="Color theme"
+			className="h-8 rounded-md border border-kumo-line bg-kumo-control px-1.5 text-xs text-kumo-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-focus"
+			value={mode}
+			onChange={(event) => {
+				const preference = event.currentTarget.value as ThemeMode;
+				document.documentElement.dataset.theme = preference;
+				setMode(preference);
+				try {
+					localStorage.setItem("trajan-theme", preference);
+				} catch {
+					// The selection still applies for this visit.
+				}
+			}}
+		>
+			<option value="auto">Auto</option>
+			<option value="light">Light</option>
+			<option value="dark">Dark</option>
+		</select>
 	);
 }
 
@@ -145,9 +148,7 @@ function ToolResultCard({ part }: { part: Extract<TranscriptPart, { type: "tool-
 					<span className="font-semibold">{part.name}</span>
 					{text ? <span className="ml-2 text-kumo-subtle">{text}</span> : null}
 				</span>
-				<Badge variant={part.error ? "destructive" : "secondary"}>
-					{part.error ? "Failed" : "Done"}
-				</Badge>
+				<Badge variant={part.error ? "error" : "secondary"}>{part.error ? "Failed" : "Done"}</Badge>
 			</summary>
 			<div className="space-y-3 border-t border-kumo-line px-3 py-3">
 				{text ? (
@@ -245,7 +246,7 @@ function AssistantMessage({
 }) {
 	return (
 		<div className="flex items-start gap-3">
-			<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
+			<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-(--pierre-on-accent)">
 				<IconAgentFill aria-hidden="true" />
 			</div>
 			<div className="min-w-0 flex-1 space-y-3">
@@ -506,7 +507,7 @@ function App() {
 				<header className="shrink-0 border-b border-kumo-line bg-kumo-base">
 					<div className="mx-auto flex h-[68px] max-w-3xl items-center justify-between gap-3 px-5">
 						<div className="flex min-w-0 items-center gap-3">
-							<div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-white">
+							<div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-(--pierre-on-accent)">
 								<IconAgentFill size={24} aria-hidden="true" />
 							</div>
 							<div className="min-w-0">
@@ -538,7 +539,7 @@ function App() {
 								onClick={newSession}
 								icon={<IconPlus aria-hidden="true" />}
 							/>
-							<ModeToggle />
+							<ThemeSwitcher />
 						</div>
 					</div>
 				</header>
@@ -608,7 +609,7 @@ function App() {
 
 						{running && !live ? (
 							<div className="flex items-start gap-3">
-								<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
+								<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-(--pierre-on-accent)">
 									<IconAgentFill aria-hidden="true" />
 								</div>
 								<Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
@@ -660,7 +661,7 @@ function App() {
 						}}
 						className="mx-auto max-w-3xl px-5 pt-4"
 					>
-						<div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
+						<div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-focus">
 							<InputArea
 								value={prompt}
 								onValueChange={setPrompt}
@@ -704,12 +705,12 @@ function App() {
 							) : (
 								<Button
 									type="submit"
-									variant="primary"
+									variant="ghost"
 									shape="square"
 									aria-label="Send message"
 									disabled={!connected || prompt.trim() === ""}
 									icon={<IconArrowUpFill aria-hidden="true" />}
-									className="mb-0.5"
+									className="send-button mb-0.5"
 								/>
 							)}
 						</div>

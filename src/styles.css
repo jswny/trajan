@@ -4,6 +4,52 @@
 /* Tailwind ignores node_modules by default, so source Kumo for class extraction. */
 @source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 
+:root {
+	color-scheme: light dark;
+	accent-color: var(--pierre-accent);
+
+	/* Use Pierre's colors for the existing Kumo components and utility classes. */
+	--text-color-kumo-default: var(--pierre-ink);
+	--text-color-kumo-strong: var(--pierre-ink);
+	--text-color-kumo-inverse: var(--pierre-canvas);
+	--text-color-kumo-subtle: var(--pierre-muted);
+	--text-color-kumo-inactive: var(--pierre-muted);
+	--text-color-kumo-placeholder: var(--pierre-muted);
+	--text-color-kumo-badge-neutral-subtle: var(--pierre-muted);
+	--text-color-kumo-success: var(--color-kumo-success);
+	--text-color-kumo-danger: var(--color-kumo-danger);
+
+	--color-kumo-base: var(--pierre-surface);
+	--color-kumo-elevated: var(--pierre-canvas);
+	--color-kumo-contrast: var(--pierre-ink);
+	--color-kumo-control: var(--pierre-control);
+	--color-kumo-fill: var(--pierre-control);
+	--color-kumo-tint: var(--pierre-hover);
+	--color-kumo-brand: var(--pierre-accent);
+	--color-kumo-accent: var(--pierre-accent);
+	--color-kumo-line: color-mix(in srgb, var(--pierre-line), var(--pierre-ink) 10%);
+	--color-kumo-hairline: var(--color-kumo-line);
+	--color-kumo-focus: color-mix(in srgb, var(--pierre-accent), var(--pierre-ink) 30%);
+	--color-kumo-success: color-mix(in srgb, var(--pierre-success), var(--pierre-ink) 36%);
+	--color-kumo-danger: color-mix(in srgb, var(--pierre-danger), var(--pierre-ink) 18%);
+	--color-kumo-success-tint: color-mix(in srgb, var(--pierre-success) 12%, var(--pierre-surface));
+	--color-kumo-danger-tint: color-mix(in srgb, var(--pierre-danger) 12%, var(--pierre-surface));
+	/* The same dark foreground stays readable on the shared blue accent in either mode. */
+	--pierre-on-accent: light-dark(var(--pierre-ink), var(--pierre-canvas));
+}
+
+:root[data-theme="light"] {
+	color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+	color-scheme: dark;
+}
+
+::selection {
+	background: var(--pierre-selection);
+}
+
 html,
 body,
 #root {
@@ -14,12 +60,42 @@ body,
 
 body {
 	min-height: 100vh;
+	background: var(--pierre-canvas);
+	color: var(--pierre-ink);
 }
 
-/* Keep code blocks in the same light and dark palette as the chat. */
-[data-markdown="code-block"] {
-	background: var(--color-kumo-elevated);
+.send-button {
+	background: var(--pierre-accent);
+	color: var(--pierre-on-accent);
+}
+.send-button:hover:not(:disabled) {
+	background: var(--pierre-accent-hover);
+}
+.send-button:disabled {
+	background: var(--pierre-control);
+	color: var(--pierre-muted);
+}
+
+[data-markdown="a"] {
+	color: var(--color-kumo-focus);
+}
+[data-markdown="blockquote"] {
 	border-color: var(--color-kumo-line);
+	color: var(--pierre-muted);
+	opacity: 1;
+}
+[data-markdown="root"] :is(th, td) {
+	border-color: var(--color-kumo-line);
+}
+[data-markdown="code"] {
+	background: var(--pierre-control);
+}
+[data-markdown="code-block"] {
+	background: var(--pierre-canvas);
+	border-color: var(--color-kumo-line);
+}
+[data-markdown="code-block"] pre code {
+	background: transparent;
 }
 [data-markdown="code-header"] {
 	display: none;

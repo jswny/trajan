@@ -1,11 +1,47 @@
 import { cloudflare } from "@cloudflare/vite-plugin";
+import pierreDark from "@pierre/theme/pierre-dark";
+import pierreLight from "@pierre/theme/pierre-light";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import agents from "agents/vite";
 import { defineConfig } from "vite-plus";
 
+const paletteRoles = {
+	canvas: "editor.background",
+	surface: "panel.background",
+	control: "input.background",
+	ink: "editor.foreground",
+	muted: "sideBar.foreground",
+	line: "input.border",
+	hover: "list.hoverBackground",
+	selection: "editor.selectionBackground",
+	accent: "button.background",
+	"accent-hover": "button.hoverBackground",
+	success: "gitDecoration.addedResourceForeground",
+	danger: "gitDecoration.deletedResourceForeground",
+};
+
 export default defineConfig({
-	plugins: [agents(), react(), cloudflare(), tailwindcss()],
+	plugins: [
+		agents(),
+		react(),
+		cloudflare(),
+		tailwindcss(),
+		{
+			name: "pierre-palette",
+			transformIndexHtml() {
+				const properties = Object.entries(paletteRoles).map(([role, key]) => {
+					const light = pierreLight.colors[key];
+					const dark = pierreDark.colors[key];
+					if (!light || !dark) throw new Error(`Pierre theme is missing ${key}`);
+					return `--pierre-${role}:${light === dark ? light : `light-dark(${light},${dark})`};`;
+				});
+				return [
+					{ tag: "style", children: `:root{${properties.join("")}}`, injectTo: "head-prepend" },
+				];
+			},
+		},
+	],
 	fmt: { useTabs: true },
 	lint: { options: { typeAware: true, typeCheck: true } },
 	resolve: {
