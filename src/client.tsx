@@ -24,11 +24,10 @@ import {
 	XCircleIcon,
 	XIcon,
 } from "@phosphor-icons/react";
-import { code } from "@streamdown/code";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { Streamdown } from "streamdown";
+import { ChatMarkdown } from "./chat-markdown";
 import { MODEL_ID } from "./model-id";
 import type { ToolInfo, TranscriptMessage, TranscriptPart } from "./protocol";
 import { usePiSession } from "./use-pi-session";
@@ -178,13 +177,21 @@ function ToolResultCard({ part }: { part: Extract<TranscriptPart, { type: "tool-
 	);
 }
 
-function AssistantPart({ part, running }: { part: TranscriptPart; running: boolean }) {
+function AssistantPart({
+	part,
+	running,
+	streaming,
+}: {
+	part: TranscriptPart;
+	running: boolean;
+	streaming: boolean;
+}) {
 	switch (part.type) {
 		case "text":
 			return (
-				<Streamdown className="sd-theme text-sm leading-6" plugins={{ code }} controls={false}>
+				<ChatMarkdown className="text-sm leading-6" isAnimating={streaming}>
 					{part.text}
-				</Streamdown>
+				</ChatMarkdown>
 			);
 		case "thinking":
 			return (
@@ -242,6 +249,7 @@ function AssistantMessage({
 					<AssistantPart
 						key={`${message.id}-${index}`}
 						part={part}
+						streaming={streaming && index === message.parts.length - 1}
 						running={streaming && part.type === "tool-call" && runningTools.includes(part.name)}
 					/>
 				))}
@@ -281,13 +289,9 @@ function SummaryNotice({ message }: { message: EntryMessage }) {
 				<span className="group-open:hidden"> · Show summary</span>
 			</summary>
 			<div className="mt-2 rounded-xl border border-kumo-line bg-kumo-base px-4 py-3 text-left">
-				<Streamdown
-					className="sd-theme sd-summary text-xs leading-5 text-kumo-subtle"
-					plugins={{ code }}
-					controls={false}
-				>
+				<ChatMarkdown className="chat-summary text-xs leading-5 text-kumo-subtle" mode="static">
 					{summary}
-				</Streamdown>
+				</ChatMarkdown>
 			</div>
 		</details>
 	);
