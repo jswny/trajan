@@ -1,8 +1,10 @@
 import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
-import { Effect, Exit, Scope, Stream } from "effect";
-import { describe, expect, it } from "vite-plus/test";
-import { openPiSession, type INITIAL_SESSION_STATE } from "../pi-session";
+import { Effect, Exit, Layer, Scope, Stream } from "effect";
+import { AtomRegistry } from "effect/reactivity";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { openPiSession, PiSession, type INITIAL_SESSION_STATE } from "../pi-session";
 import type { PiClientMessage, PiServerMessage } from "../protocol";
+import { makeActiveSessionAtom, selectedSessionId } from "../session-atoms";
 
 class TestSocket extends EventTarget {
 	readyState: number = WebSocket.CLOSED;
@@ -63,6 +65,55 @@ function pageRequest(socket: TestSocket, index: number) {
 }
 
 describe("the scoped browser session", () => {
+	it("restores the browser's saved session and releases its socket when the selection changes", async () => {
+		const saved = new Map([["trajan-session", "saved-session"]]);
+		vi.stubGlobal("localStorage", {
+			getItem: (key: string) => saved.get(key) ?? null,
+			setItem: (key: string, value: string) => saved.set(key, value),
+		});
+		const sockets = new Map<string, TestSocket>();
+		const active = makeActiveSessionAtom((id) =>
+			Layer.effect(
+				PiSession,
+				openPiSession(() => {
+					const socket = new TestSocket();
+					sockets.set(id, socket);
+					return socket;
+				}),
+			),
+		);
+		const registry = AtomRegistry.make();
+		const reloaded = AtomRegistry.make();
+		try {
+			registry.mount(active);
+			expect(registry.get(active).id).toBe("saved-session");
+			await expect.poll(() => sockets.get("saved-session")?.sent).toEqual([{ type: "watch" }]);
+			const oldSocket = sockets.get("saved-session")!;
+			oldSocket.receive(snapshot(5 as EntryId));
+			await expect
+				.poll(() => registry.get(active).session)
+				.toMatchObject({
+					value: { state: { messages: [{ parts: [{ text: "Note 5" }] }] } },
+				});
+
+			registry.set(selectedSessionId, undefined);
+			const currentId = registry.get(active).id;
+			expect(currentId).not.toBe("saved-session");
+			expect(reloaded.get(selectedSessionId)).toBe(currentId);
+			await expect.poll(() => oldSocket.readyState).toBe(WebSocket.CLOSED);
+			await expect.poll(() => sockets.get(currentId)?.sent).toEqual([{ type: "watch" }]);
+			await expect
+				.poll(() => registry.get(active).session)
+				.toMatchObject({
+					value: { state: { messages: [], status: "open" } },
+				});
+		} finally {
+			registry.dispose();
+			reloaded.dispose();
+			vi.unstubAllGlobals();
+		}
+	});
+
 	it("ignores invalid server messages and still applies the next snapshot", async () => {
 		const socket = new TestSocket();
 		await Effect.runPromise(

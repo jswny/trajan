@@ -24,7 +24,6 @@ import type { ToolInfo, TranscriptMessage, TranscriptPart } from "./protocol";
 import { usePiSession } from "./use-pi-session";
 import "./styles.css";
 
-const SESSION_KEY = "trajan-session";
 /** How close to the bottom (px) still counts as "at the bottom". */
 const BOTTOM_THRESHOLD = 32;
 
@@ -49,14 +48,6 @@ const SUGGESTIONS = [
 			"Clone https://github.com/octocat/Hello-World into /workspace/hello, then show its git log.",
 	},
 ] satisfies Array<{ icon: ReactNode; label: string; value: string }>;
-
-function getSession(): string {
-	const existing = localStorage.getItem(SESSION_KEY);
-	if (existing) return existing;
-	const created = crypto.randomUUID();
-	localStorage.setItem(SESSION_KEY, created);
-	return created;
-}
 
 type ThemeMode = "auto" | "light" | "dark";
 
@@ -406,7 +397,6 @@ function Sidebar({
 }
 
 function App() {
-	const [session, setSession] = useState(getSession);
 	const [prompt, setPrompt] = useState("");
 	const [toolsOpen, setToolsOpen] = useState(
 		() => window.matchMedia("(min-width: 1100px)").matches,
@@ -420,6 +410,8 @@ function App() {
 	const following = useRef(true);
 	const lastScrollTop = useRef(0);
 	const {
+		id: session,
+		newSession: startNewSession,
 		status,
 		messages,
 		earlier,
@@ -437,7 +429,7 @@ function App() {
 		abort,
 		loadEarlier,
 		fillGap,
-	} = usePiSession(session);
+	} = usePiSession();
 	const runningTools = running_.map((tool) => tool.name);
 	const newestId = messages.at(-1)?.id;
 	const oldestId = messages[0]?.id;
@@ -495,10 +487,8 @@ function App() {
 	};
 
 	const newSession = () => {
-		const next = crypto.randomUUID();
-		localStorage.setItem(SESSION_KEY, next);
 		following.current = true;
-		setSession(next);
+		startNewSession();
 	};
 
 	const empty = messages.length === 0 && !earlier && !live && !running;
