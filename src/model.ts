@@ -1,8 +1,6 @@
 import type { Context } from "@earendil-works/chord/context";
 import { ROOT_CONVERSATION_ID, type Harness, type ModelRef } from "@earendil-works/pi-durable";
 
-export const MODEL_ID = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
-
 const RETIRED_MODEL_ID = "@cf/zai-org/glm-5.3-flash";
 
 /** Pi persists the model on each conversation. Its defaults only apply when creating one. */

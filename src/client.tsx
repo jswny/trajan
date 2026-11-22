@@ -29,12 +29,12 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
+import { MODEL_ID } from "./model-id";
 import type { ToolInfo, TranscriptMessage, TranscriptPart } from "./protocol";
 import { usePiSession } from "./use-pi-session";
 import "./styles.css";
 
 const SESSION_KEY = "trajan-session";
-const MODEL = "@cf/zai-org/glm-5.3-flash";
 /** How close to the bottom (px) still counts as "at the bottom". */
 const BOTTOM_THRESHOLD = 32;
 
@@ -494,7 +494,7 @@ function App() {
 						</div>
 						<div className="flex shrink-0 items-center gap-1.5">
 							<Badge variant="secondary" className="hidden sm:inline-flex">
-								{MODEL.split("/").at(-1)}
+								{MODEL_ID.split("/").at(-1)}
 							</Badge>
 							<Badge variant={connected ? "success" : "secondary"}>
 								{connected ? "Live" : status === "connecting" ? "Connecting" : "Reconnecting"}

@@ -10,7 +10,8 @@ import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
-import { migrateRetiredModel, MODEL_ID } from "./model";
+import { migrateRetiredModel } from "./model";
+import { MODEL_ID } from "./model-id";
 import { PiSessionSockets } from "./sockets";
 import { createWorkspaceTools } from "./workspace";
 

@@ -23,7 +23,9 @@ npm ci
 npm run dev
 ```
 
-Authenticate with `cf auth login`, or supply `CLOUDFLARE_API_TOKEN` in your environment. The local Workers AI binding is remote and uses your Cloudflare account; no model API key is needed. Never commit credentials.
+If Cloudflare needs a login, run `npx cf auth login` and restart the dev server. You can also supply `CLOUDFLARE_API_TOKEN` in your environment. Never commit credentials.
+
+Open the local URL printed by Vite (usually `http://localhost:5173`) to use the chat UI. The dev server runs the Worker, Durable Objects, workspace, and WebSockets locally. Model calls go through your Cloudflare Workers AI binding and incur normal usage. The dev proxy uses the `trajan-local` Worker name to keep it separate from the production Access hostname.
 
 `npm run check` generates Worker types, runs Vite+ format, lint, and type checks, and runs the Worker tests. Use `npm run format` to apply formatting.
 
