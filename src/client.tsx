@@ -385,7 +385,6 @@ function Sidebar({
 }
 
 function App() {
-	const [prompt, setPrompt] = useState("");
 	const [toolsOpen, setToolsOpen] = useState(
 		() => window.matchMedia("(min-width: 1100px)").matches,
 	);
@@ -413,6 +412,8 @@ function App() {
 		error,
 		historyError,
 		submission,
+		composer: { text: prompt, canSubmit, submitting },
+		editPrompt: setPrompt,
 		submit: submitPrompt,
 		abort,
 		loadEarlier,
@@ -459,19 +460,13 @@ function App() {
 	};
 
 	const connected = status === "open";
-	const submitting = submission?.status === "pending" && submission.draft === prompt;
-	useEffect(() => {
-		if (submission?.status === "accepted") {
-			setPrompt((draft) => (draft === submission.draft ? "" : draft));
-		}
-	}, [submission]);
 
 	/** While a run is going, Enter queues a follow-up and Steer joins the run. */
 	const submit = (whenBusy: "followUp" | "steer" = "followUp") => {
-		if (!prompt.trim() || !connected || submitting) return;
+		if (!canSubmit) return;
 		// Sending a message always brings the conversation back to the bottom.
 		following.current = true;
-		submitPrompt(prompt, whenBusy);
+		submitPrompt(whenBusy);
 	};
 
 	const newSession = () => {
@@ -683,7 +678,7 @@ function App() {
 										variant="secondary"
 										size="sm"
 										aria-label="Steer"
-										disabled={!connected || submitting || prompt.trim() === ""}
+										disabled={!canSubmit}
 										onClick={() => submit("steer")}
 									>
 										Steer
@@ -703,7 +698,7 @@ function App() {
 									variant="ghost"
 									shape="square"
 									aria-label="Send message"
-									disabled={!connected || submitting || prompt.trim() === ""}
+									disabled={!canSubmit}
 									icon={<IconArrowUpFill aria-hidden="true" />}
 									className="send-button mb-0.5"
 								/>

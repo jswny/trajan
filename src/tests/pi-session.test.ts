@@ -4,7 +4,7 @@ import { AtomRegistry } from "effect/reactivity";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { openPiSession, PiSession, type INITIAL_SESSION_STATE } from "../pi-session";
 import type { PiClientMessage, PiServerMessage } from "../protocol";
-import { makeActiveSessionAtom, selectedSessionId } from "../session-atoms";
+import { makeSessionAtoms, selectedSessionId } from "../session-atoms";
 
 class TestSocket extends EventTarget {
 	readyState: number = WebSocket.CLOSED;
@@ -72,7 +72,7 @@ describe("the scoped browser session", () => {
 			setItem: (key: string, value: string) => saved.set(key, value),
 		});
 		const sockets = new Map<string, TestSocket>();
-		const active = makeActiveSessionAtom((id) =>
+		const { activeSessionAtom: active } = makeSessionAtoms((id) =>
 			Layer.effect(
 				PiSession,
 				openPiSession(() => {
@@ -114,6 +114,60 @@ describe("the scoped browser session", () => {
 		}
 	});
 
+	it("clears only the accepted draft revision and keeps rejected text available to retry", async () => {
+		const socket = new TestSocket();
+		const { activeSessionAtom: active, composerAtom: composer } = makeSessionAtoms(() =>
+			Layer.effect(
+				PiSession,
+				openPiSession(() => socket),
+			),
+		);
+		const registry = AtomRegistry.make();
+		const edit = (text: string) => registry.set(composer, { type: "edit", text });
+		const submit = () => registry.set(composer, { type: "submit", whenBusy: "followUp" });
+		const latestSubmit = () => socket.sent.filter((frame) => frame.type === "submit").at(-1)!;
+		try {
+			registry.mount(composer);
+			edit("same text");
+			await expect.poll(() => registry.get(composer).canSubmit).toBe(true);
+			submit();
+			await expect.poll(() => registry.get(composer).submitting).toBe(true);
+			const first = latestSubmit();
+
+			edit("new text");
+			edit("same text");
+			socket.receive({ type: "result", id: first.id, result: { accepted: true } });
+			await expect
+				.poll(() => registry.get(active).session)
+				.toMatchObject({
+					value: { state: { submission: { id: first.id, status: "accepted" } } },
+				});
+			expect(registry.get(composer)).toEqual({
+				text: "same text",
+				submitting: false,
+				canSubmit: true,
+			});
+
+			submit();
+			await expect.poll(() => registry.get(composer).submitting).toBe(true);
+			const second = latestSubmit();
+			expect(second.id).not.toBe(first.id);
+			socket.receive({ type: "error", id: second.id, message: "Rejected" });
+			await expect
+				.poll(() => registry.get(composer))
+				.toEqual({ text: "same text", submitting: false, canSubmit: true });
+
+			submit();
+			await expect.poll(() => registry.get(composer).submitting).toBe(true);
+			socket.receive({ type: "result", id: latestSubmit().id, result: { accepted: true } });
+			await expect
+				.poll(() => registry.get(composer))
+				.toEqual({ text: "", submitting: false, canSubmit: false });
+		} finally {
+			registry.dispose();
+		}
+	});
+
 	it("ignores invalid server messages and still applies the next snapshot", async () => {
 		const socket = new TestSocket();
 		await Effect.runPromise(
@@ -149,7 +203,7 @@ describe("the scoped browser session", () => {
 					yield* waitFor(session.changes, (state) => state.messages.length === 1);
 					expect(socket.sent).toEqual([{ type: "watch" }]);
 
-					session.dispatch({ type: "submit", text: "echo once" });
+					session.dispatch({ type: "submit", draft: { text: "echo once" } });
 					yield* waitFor(session.changes, (state) => state.submission?.status === "pending");
 					const submit = socket.sent.at(-1);
 					if (submit?.type !== "submit" || submit.id === undefined) {
@@ -192,10 +246,12 @@ describe("the scoped browser session", () => {
 					session.dispatch({ type: "loadEarlier" });
 					const page = yield* pageRequest(socket, 0);
 
-					session.dispatch({ type: "submit", text: "first draft" });
-					session.dispatch({ type: "submit", text: "first draft" });
-					session.dispatch({ type: "submit", text: " second draft ", whenBusy: "steer" });
-					yield* waitFor(session.changes, (state) => state.submission?.draft === " second draft ");
+					const firstDraft = { text: "first draft" };
+					const secondDraft = { text: " second draft " };
+					session.dispatch({ type: "submit", draft: firstDraft });
+					session.dispatch({ type: "submit", draft: firstDraft });
+					session.dispatch({ type: "submit", draft: secondDraft, whenBusy: "steer" });
+					yield* waitFor(session.changes, (state) => state.submission?.draft === secondDraft);
 					const submissions = socket.sent.filter((frame) => frame.type === "submit");
 					expect(submissions.map((frame) => frame.input)).toEqual(["first draft", "second draft"]);
 					expect(submissions[1]?.whenBusy).toBe("steer");
@@ -204,7 +260,7 @@ describe("the scoped browser session", () => {
 					socket.receive({ type: "result", id: page.id, result: { items: [] } });
 					const loaded = yield* waitFor(session.changes, (state) => !state.loading);
 					expect(loaded).toMatchObject({
-						value: { submission: { status: "pending", draft: " second draft " } },
+						value: { submission: { status: "pending", draft: secondDraft } },
 					});
 
 					socket.receive({ type: "error", id: submissions[1]!.id, message: "Prompt rejected" });
@@ -213,7 +269,7 @@ describe("the scoped browser session", () => {
 						(state) => state.submission?.status === "rejected",
 					);
 					expect(rejected).toMatchObject({
-						value: { submission: { draft: " second draft ", message: "Prompt rejected" } },
+						value: { submission: { draft: secondDraft, message: "Prompt rejected" } },
 					});
 				}),
 			),
@@ -339,7 +395,9 @@ describe("the scoped browser session", () => {
 					yield* pageRequest(oldSocket, 0);
 
 					yield* Scope.close(oldScope, Exit.void);
-					expect(oldSession.dispatch({ type: "submit", text: "old session" })).toBe(false);
+					expect(oldSession.dispatch({ type: "submit", draft: { text: "old session" } })).toBe(
+						false,
+					);
 					expect(oldSocket.readyState).toBe(WebSocket.CLOSED);
 
 					const newSocket = new TestSocket();

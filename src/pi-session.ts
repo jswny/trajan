@@ -26,7 +26,11 @@ import {
 } from "./protocol";
 import { EMPTY_VIEW } from "./view";
 
-type Submission = { readonly id: string; readonly draft: string } & (
+/** Each edit creates a new draft, so equal text can belong to different revisions. */
+export type PromptDraft = { readonly text: string };
+export type SubmitMode = "followUp" | "steer";
+
+type Submission = { readonly id: string; readonly draft: PromptDraft } & (
 	| { readonly status: "pending" | "accepted" }
 	| { readonly status: "rejected"; readonly message: string }
 );
@@ -51,7 +55,7 @@ export const INITIAL_SESSION_STATE: SessionState = {
 type Gap = { after: EntryId; upTo: EntryId };
 
 export type SessionCommand =
-	| { type: "submit"; text: string; whenBusy?: "followUp" | "steer" }
+	| { type: "submit"; draft: PromptDraft; whenBusy?: SubmitMode }
 	| { type: "abort" | "reset" }
 	| { type: "loadEarlier" }
 	| { type: "fillGap"; gap: Gap };
@@ -148,12 +152,12 @@ export const openPiSession = Effect.fn("openPiSession")(function* (
 			switch (command.type) {
 				case "submit": {
 					const { status, submission } = yield* SubscriptionRef.get(state);
-					const text = command.text.trim();
-					if (!text || (submission?.status === "pending" && submission.draft === command.text))
+					const text = command.draft.text.trim();
+					if (!text || (submission?.status === "pending" && submission.draft === command.draft))
 						return;
 					const submit = outbox.submit(text, command.whenBusy ?? "followUp");
 					if (status === "open") send(submit);
-					yield* update({ submission: { id: submit.id, draft: command.text, status: "pending" } });
+					yield* update({ submission: { id: submit.id, draft: command.draft, status: "pending" } });
 					return;
 				}
 				case "abort":
