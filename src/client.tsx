@@ -1,4 +1,5 @@
 import { Badge, Button, Empty, InputArea, Surface, Text } from "@cloudflare/kumo";
+import { useAtom } from "@effect/atom-react";
 import {
 	IconAgent,
 	IconAgentFill,
@@ -21,6 +22,7 @@ import { createRoot } from "react-dom/client";
 import { ChatMarkdown } from "./chat-markdown";
 import { MODEL_ID } from "./model-id";
 import type { ToolInfo, TranscriptMessage, TranscriptPart } from "./protocol";
+import { themePreference } from "./theme";
 import { usePiSession } from "./use-pi-session";
 import "./styles.css";
 
@@ -49,29 +51,15 @@ const SUGGESTIONS = [
 	},
 ] satisfies Array<{ icon: ReactNode; label: string; value: string }>;
 
-type ThemeMode = "auto" | "light" | "dark";
-
 function ThemeSwitcher() {
-	const [mode, setMode] = useState<ThemeMode>(() => {
-		const theme = document.documentElement.dataset.theme;
-		return theme === "light" || theme === "dark" ? theme : "auto";
-	});
+	const [mode, setMode] = useAtom(themePreference);
 
 	return (
 		<select
 			aria-label="Color theme"
 			className="h-8 rounded-md border border-kumo-line bg-kumo-control px-1.5 text-xs text-kumo-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-focus"
 			value={mode}
-			onChange={(event) => {
-				const preference = event.currentTarget.value as ThemeMode;
-				document.documentElement.dataset.theme = preference;
-				setMode(preference);
-				try {
-					localStorage.setItem("trajan-theme", preference);
-				} catch {
-					// The selection still applies for this visit.
-				}
-			}}
+			onChange={(event) => setMode(event.currentTarget.value)}
 		>
 			<option value="auto">Auto</option>
 			<option value="light">Light</option>
