@@ -87,52 +87,83 @@ function numbered(prefix: string, count: number): string[] {
 	return Array.from({ length: count }, (_, i) => `${prefix} ${i + 1}`);
 }
 
+function watchView(before: number): ConversationView {
+	return {
+		conversation: { id: 1 as ConversationId },
+		before: before as EntryId,
+		entries: [],
+		docs: {},
+	};
+}
+
+function watchFixture() {
+	const harness = new PiHarness({
+		harness: async () => {
+			throw new Error("Unexpected Pi open");
+		},
+	});
+	const session = harness.session(ROOT_SESSION);
+	vi.spyOn(harness, "session").mockReturnValue(session);
+	vi.spyOn(harness.sessions, "list").mockResolvedValue([{ id: ROOT_SESSION, busy: false }]);
+	const watch = vi.spyOn(session, "watch");
+	const { 0: client, 1: server } = new WebSocketPair();
+	const socket: Connection = Object.assign(server, {
+		id: "connection",
+		uri: null,
+		state: null,
+		setState: () => null,
+		tags: ["connection", "pi-session:" + ROOT_SESSION],
+	});
+	const frames: PiServerMessage[] = [];
+	client.addEventListener("message", (event) => {
+		frames.push(JSON.parse(event.data));
+	});
+	client.accept();
+	socket.accept();
+	const sockets = new PiSessionSockets(harness, createRegistry(), () => [socket]);
+	return { watch, client, socket, sockets, frames, handlers: sockets.options().handlers! };
+}
+
 describe("the session WebSocket protocol", () => {
 	it.each(["resolves", "rejects"])(
 		"keeps a client's watch when an older wake-up watch %s late",
 		async (outcome) => {
-			const harness = new PiHarness({
-				harness: async () => {
-					throw new Error("Unexpected Pi open");
-				},
-			});
-			const session = harness.session(ROOT_SESSION);
-			vi.spyOn(harness, "session").mockReturnValue(session);
-			vi.spyOn(harness.sessions, "list").mockResolvedValue([{ id: ROOT_SESSION, busy: false }]);
-			const view = (before: number): ConversationView => ({
-				conversation: { id: 1 as ConversationId },
-				before: before as EntryId,
-				entries: [],
-				docs: {},
-			});
-			const stale = new Watch(view(5), vi.fn(), vi.fn());
-			const current = new Watch(view(10), vi.fn(), vi.fn());
+			const { watch, client, socket, sockets, frames, handlers } = watchFixture();
+			const stale = new Watch(watchView(5), vi.fn(), vi.fn());
+			const current = new Watch(watchView(10), vi.fn(), vi.fn());
 			const pending = Promise.withResolvers<typeof stale>();
-			const watch = vi
-				.spyOn(session, "watch")
-				.mockReturnValueOnce(pending.promise)
-				.mockResolvedValueOnce(current);
-			const { 0: client, 1: server } = new WebSocketPair();
-			const socket: Connection = Object.assign(server, {
-				id: "connection",
-				uri: null,
-				state: null,
-				setState: () => null,
-				tags: ["connection", "pi-session:" + ROOT_SESSION],
-			});
-			const frames: PiServerMessage[] = [];
-			client.addEventListener("message", (event) => {
-				frames.push(JSON.parse(event.data));
-			});
-			client.accept();
-			socket.accept();
-			const sockets = new PiSessionSockets(harness, createRegistry(), () => [socket]);
-			const handlers = sockets.options().handlers!;
+			watch.mockReturnValueOnce(pending.promise).mockResolvedValueOnce(current);
+			const info = vi.spyOn(console, "info").mockImplementation(() => {});
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 			const wake = sockets.reattach();
 
 			try {
 				await expect.poll(() => watch.mock.calls.length).toBe(1);
 				await handlers.onMessage!(socket, JSON.stringify({ type: "watch", from: 11 }));
+				expect(info).toHaveBeenNthCalledWith(
+					1,
+					expect.objectContaining({
+						message: "pi_session_watch",
+						annotations: {
+							trigger: "hibernation_reattach",
+							outcome: "cancelled",
+							replaced: false,
+							elapsedMs: expect.any(Number),
+						},
+					}),
+				);
+				expect(info).toHaveBeenNthCalledWith(
+					2,
+					expect.objectContaining({
+						message: "pi_session_watch",
+						annotations: {
+							trigger: "client_request",
+							outcome: "started",
+							replaced: true,
+							elapsedMs: expect.any(Number),
+						},
+					}),
+				);
 				if (outcome === "resolves") pending.resolve(stale);
 				else pending.reject(new Error("Superseded watch failed"));
 				await wake;
@@ -141,26 +172,65 @@ describe("the session WebSocket protocol", () => {
 				expect(watch.mock.calls[0]?.[1]?.abortSignal?.aborted).toBe(true);
 				if (outcome === "resolves") expect(await stale.closed).toEqual({ kind: "stopped" });
 				current.advance(
-					{ kind: "value", value: view(11), retired: false, ops: [["s", ["before"], 11]] },
+					{ kind: "value", value: watchView(11), retired: false, ops: [["s", ["before"], 11]] },
 					BACKGROUND_CONTEXT,
 				);
 				await expect
 					.poll(() => frames)
 					.toEqual([
-						{ type: "view", session: ROOT_SESSION, view: view(10) },
+						{ type: "view", session: ROOT_SESSION, view: watchView(10) },
 						{ type: "ops", session: ROOT_SESSION, ops: [["s", ["before"], 11]] },
 					]);
 				await handlers.onClose!(socket, 1000, "", true);
 				expect(await current.closed).toEqual({ kind: "stopped" });
 				expect(watch.mock.calls[1]?.[1]?.abortSignal?.aborted).toBe(true);
+				expect(info).toHaveBeenCalledTimes(2);
+				expect(warn).not.toHaveBeenCalled();
 			} finally {
 				await sockets.close();
 				pending.resolve(stale);
 				await wake;
 				client.close();
+				info.mockRestore();
+				warn.mockRestore();
 			}
 		},
 	);
+
+	it("warns when recovery fails without logging error payloads", async () => {
+		const { watch, client, socket, sockets, handlers } = watchFixture();
+		const current = new Watch(watchView(10), vi.fn(), vi.fn());
+		watch.mockResolvedValueOnce(current).mockRejectedValueOnce(new Error("private test error"));
+		const info = vi.spyOn(console, "info").mockImplementation(() => {});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			await handlers.onMessage!(socket, JSON.stringify({ type: "watch" }));
+			const lost = closed(client);
+			current.end({ kind: "failed", error: new Error("private test watch end") });
+			expect(await lost).toBe(1011);
+			expect(warn.mock.calls).toEqual([
+				[
+					expect.objectContaining({
+						message: "pi_session_watch",
+						annotations: {
+							trigger: "recovery",
+							previousEnd: "failed",
+							outcome: "failed",
+							replaced: true,
+							elapsedMs: expect.any(Number),
+						},
+					}),
+				],
+			]);
+			expect(JSON.stringify(warn.mock.calls)).not.toContain("private test");
+			expect(info).toHaveBeenCalledTimes(1);
+		} finally {
+			await sockets.close();
+			client.close();
+			info.mockRestore();
+			warn.mockRestore();
+		}
+	});
 
 	it("rejects invalid requests and continues to serve the socket", async () => {
 		const socket = await connect(crypto.randomUUID());

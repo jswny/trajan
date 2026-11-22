@@ -9,7 +9,7 @@ import type {
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 import { ROOT_SESSION, type PiHarness, type PiSessionId } from "agents/harness/pi";
-import { Effect, Exit, Result, Scope } from "effect";
+import { Effect, Exit, Logger, Result, Scope } from "effect";
 import {
 	decodeClientMessage,
 	decodeRequestId,
@@ -24,6 +24,45 @@ const SESSION_QUERY = "session";
 const MAX_PAGE = 100;
 /** `WebSocket.OPEN`; the constant is not defined on every runtime's global. */
 const OPEN = 1;
+const watchLogger = Logger.layer([Logger.withLeveledConsole(Logger.formatStructured)]);
+
+type WatchTrigger =
+	| { readonly trigger: "client_request" | "hibernation_reattach" }
+	| {
+			readonly trigger: "recovery";
+			readonly previousEnd: Exclude<WatchEnd["kind"], "stopped" | "aborted">;
+	  };
+type WatchOutcome = "started" | "cancelled" | "failed";
+
+function watchLog(
+	event: "pi_session_watch" | "pi_session_watch_cleanup",
+	outcome: WatchOutcome,
+	startedAt: number,
+	annotations: Record<string, string | boolean> = {},
+) {
+	const log = outcome === "failed" ? Effect.logWarning : Effect.logInfo;
+	return log(event).pipe(
+		Effect.annotateLogs({
+			...annotations,
+			outcome,
+			elapsedMs: Math.round(performance.now() - startedAt),
+		}),
+		Effect.provide(watchLogger),
+		Effect.ignoreCause,
+	);
+}
+
+function watchReporter(trigger: WatchTrigger, replaced: boolean) {
+	const startedAt = performance.now();
+	// The scope finalizer reports cancellation only if setup had no outcome yet.
+	let reported = false;
+	return (outcome: WatchOutcome) =>
+		Effect.suspend(() => {
+			if (reported) return Effect.void;
+			reported = true;
+			return watchLog("pi_session_watch", outcome, startedAt, { ...trigger, replaced });
+		});
+}
 
 function sessionTag(session: PiSessionId): string {
 	return `${SESSION_TAG_PREFIX}${session}`;
@@ -62,10 +101,11 @@ function send(socket: WebSocket, message: PiServerMessage): void {
 }
 
 async function closeWatchScope(scope: Scope.Closeable): Promise<void> {
+	const startedAt = performance.now();
 	try {
 		await Effect.runPromise(Scope.close(scope, Exit.void));
-	} catch (error) {
-		console.warn("pi session watch cleanup failed", error);
+	} catch {
+		Effect.runSync(watchLog("pi_session_watch_cleanup", "failed", startedAt));
 	}
 }
 
@@ -126,7 +166,9 @@ export class PiSessionSockets {
 		// and look up each one's tag.
 		for (const { id } of await this.#harness.sessions.list()) {
 			for (const socket of this.#getWebSockets(sessionTag(id))) {
-				if (!this.#watchScopes.has(socket)) await this.#watchOrClose(socket, id);
+				if (!this.#watchScopes.has(socket)) {
+					await this.#watchOrClose(socket, id, { trigger: "hibernation_reattach" });
+				}
 			}
 		}
 	}
@@ -155,19 +197,21 @@ export class PiSessionSockets {
 	async #watchOrClose(
 		socket: WebSocket,
 		session: PiSessionId,
+		trigger: WatchTrigger,
 		window: ConversationWindow = {},
 	): Promise<void> {
 		if (this.#closed || socket.readyState !== OPEN) return;
 		const scope = Scope.makeUnsafe();
 		const abort = new AbortController();
+		const previous = this.#watchScopes.get(socket);
+		const report = watchReporter(trigger, previous !== undefined);
 		Effect.runSync(
 			Scope.addFinalizer(
 				scope,
-				Effect.sync(() => abort.abort()),
+				Effect.sync(() => abort.abort()).pipe(Effect.andThen(report("cancelled"))),
 			),
 		);
 		// Publish ownership before awaiting cleanup or asking Pi to open the watch.
-		const previous = this.#watchScopes.get(socket);
 		this.#watchScopes.set(socket, scope);
 		const ownsWatch = () => this.#watchScopes.get(socket) === scope;
 
@@ -205,9 +249,10 @@ export class PiSessionSockets {
 				send(socket, { type: "ops", session, ops: call.ops });
 			});
 			void watch.closed.then((end) => this.#ended(socket, session, scope, end, last));
-		} catch (error) {
+			Effect.runSync(report("started"));
+		} catch {
 			if (!ownsWatch()) return;
-			console.warn("pi session watch lost", error);
+			Effect.runSync(report("failed"));
 			// A failed current watch closes the socket so the client can reconnect.
 			try {
 				socket.close(1011, "Lost the session's watch");
@@ -236,7 +281,12 @@ export class PiSessionSockets {
 			await this.#unwatch(socket);
 			return;
 		}
-		await this.#watchOrClose(socket, session, resumeAfter(last));
+		await this.#watchOrClose(
+			socket,
+			session,
+			{ trigger: "recovery", previousEnd: end.kind },
+			resumeAfter(last),
+		);
 	}
 
 	async #unwatch(socket: WebSocket): Promise<void> {
@@ -303,6 +353,7 @@ export class PiSessionSockets {
 				await this.#watchOrClose(
 					connection,
 					session,
+					{ trigger: "client_request" },
 					message.from === undefined ? {} : { from: message.from },
 				);
 				return null;
