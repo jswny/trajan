@@ -1,9 +1,14 @@
 import type { EntryId } from "@earendil-works/pi-durable";
 import { AgentClient } from "agents/client";
-import { Context, Effect, Layer, Queue, Stream, SubscriptionRef } from "effect";
+import { Context, Effect, Layer, Option, Queue, Stream, SubscriptionRef } from "effect";
 import { PiSessionMirror } from "./mirror";
 import { PiCommandOutbox } from "./outbox";
-import type { ClientMessage, ServerMessage, SessionView, ToolInfo } from "./protocol";
+import {
+	decodeServerMessage,
+	type ClientMessage,
+	type SessionView,
+	type ToolInfo,
+} from "./protocol";
 import { EMPTY_VIEW } from "./view";
 
 type SessionState = SessionView & {
@@ -87,8 +92,9 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 						yield* update({ status: "closed" });
 						break;
 					case "message": {
-						const message = decodeMessage(event.data);
-						if (message === undefined) break;
+						const decoded = decodeServerMessage(event.data);
+						if (Option.isNone(decoded)) break;
+						const message = decoded.value;
 						outbox.receive(message);
 						mirror.receive(message);
 						if (message.type === "hello") yield* update({ catalog: message.tools });
@@ -160,14 +166,5 @@ export class PiSession extends Context.Service<PiSession>()("trajan/PiSession", 
 					}),
 			),
 		);
-	}
-}
-
-function decodeMessage(data: unknown): ServerMessage | undefined {
-	if (typeof data !== "string") return undefined;
-	try {
-		return JSON.parse(data) ?? undefined;
-	} catch {
-		return undefined;
 	}
 }

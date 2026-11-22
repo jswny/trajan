@@ -3,14 +3,20 @@ import type {
 	ConversationWatch,
 	ConversationWindow,
 	EntryId,
-	EntryQuery,
 	RegistryReader,
 	WatchEnd,
 } from "@earendil-works/pi-durable";
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 import { ROOT_SESSION, type PiHarness, type PiSessionId } from "agents/harness/pi";
-import type { PiClientMessage, PiCommandResult, PiServerMessage } from "./protocol";
+import { Result } from "effect";
+import {
+	decodeClientMessage,
+	decodeRequestId,
+	type PiClientMessage,
+	type PiCommandResult,
+	type PiServerMessage,
+} from "./protocol";
 
 const SESSION_TAG_PREFIX = "pi-session:";
 const SESSION_QUERY = "session";
@@ -35,29 +41,6 @@ function sessionFromRequest(request: Request, fallback: PiSessionId): string {
 function sessionOf(tags: readonly string[]): string | undefined {
 	const tag = tags.find((candidate) => candidate.startsWith(SESSION_TAG_PREFIX));
 	return tag?.slice(SESSION_TAG_PREFIX.length);
-}
-
-function isEntryId(value: unknown): value is EntryId {
-	return typeof value === "number" && Number.isSafeInteger(value);
-}
-
-/** The client's entry query, checked: only ID bounds and an order. */
-function entryQuery(query: unknown): Omit<EntryQuery, "conversationId"> {
-	const { minEntryId, maxEntryId, order } = (query ?? {}) as Record<string, unknown>;
-	if (minEntryId !== undefined && !isEntryId(minEntryId)) {
-		throw new Error("Invalid minEntryId");
-	}
-	if (maxEntryId !== undefined && !isEntryId(maxEntryId)) {
-		throw new Error("Invalid maxEntryId");
-	}
-	if (order !== undefined && order !== "ascending" && order !== "descending") {
-		throw new Error("Invalid order");
-	}
-	return {
-		...(minEntryId === undefined ? {} : { minEntryId }),
-		...(maxEntryId === undefined ? {} : { maxEntryId }),
-		...(order === undefined ? {} : { order }),
-	};
 }
 
 /**
@@ -245,13 +228,25 @@ export class PiSessionSockets {
 
 	async #onMessage(connection: Connection, raw: WebSocketMessage) {
 		if (typeof raw !== "string") return;
-		let message: PiClientMessage;
+		let parsed: unknown;
 		try {
-			message = JSON.parse(raw) as PiClientMessage;
+			parsed = JSON.parse(raw);
 		} catch {
 			send(connection, { type: "error", message: "Malformed JSON" });
 			return;
 		}
+		const decoded = decodeClientMessage(parsed);
+		if (Result.isFailure(decoded)) {
+			const request = decodeRequestId(parsed);
+			const id = Result.isSuccess(request) ? request.success.id : undefined;
+			send(connection, {
+				type: "error",
+				...(id === undefined ? {} : { id }),
+				message: "Invalid session message",
+			});
+			return;
+		}
+		const message = decoded.success;
 		const session = sessionOf(connection.tags) ?? ROOT_SESSION;
 		try {
 			const result = await this.#dispatch(connection, session, message);
@@ -285,25 +280,14 @@ export class PiSessionSockets {
 				await handle.reset(message.handoff);
 				return null;
 			case "watch":
-				if (message.from !== undefined && !isEntryId(message.from)) {
-					throw new Error("Invalid from");
-				}
 				await this.#watchOrClose(
 					connection,
 					session,
 					message.from === undefined ? {} : { from: message.from },
 				);
 				return null;
-			case "entries": {
-				if (!Number.isSafeInteger(message.limit) || message.limit < 1) {
-					throw new Error("Invalid limit");
-				}
-				return await handle.entries(entryQuery(message.query), Math.min(message.limit, MAX_PAGE));
-			}
-			default:
-				throw new Error(
-					`Unknown pi message type ${JSON.stringify((message as { type: string }).type)}`,
-				);
+			case "entries":
+				return await handle.entries(message.query ?? {}, Math.min(message.limit, MAX_PAGE));
 		}
 	}
 }

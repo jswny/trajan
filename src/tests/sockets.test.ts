@@ -1,9 +1,10 @@
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { routeAgentRequest } from "agents";
+import { Option } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 import { PiSessionMirror } from "../mirror";
-import type { PiServerMessage } from "../protocol";
+import { decodeServerMessage, type PiServerMessage } from "../protocol";
 import type { PiMessage } from "../transcript";
 
 async function connect(name: string, query = ""): Promise<WebSocket> {
@@ -34,10 +35,9 @@ function follow(socket: WebSocket) {
 	const waiters: Array<() => void> = [];
 	const attach = (next: WebSocket) => {
 		next.addEventListener("message", (event) => {
-			if (typeof event.data !== "string") return;
-			const message = JSON.parse(event.data) as PiServerMessage | { type: string };
-			if (!("type" in message)) return;
-			const frame = message as PiServerMessage;
+			const decoded = decodeServerMessage(event.data);
+			if (Option.isNone(decoded)) return;
+			const frame = decoded.value;
 			frames.push(frame);
 			mirror.receive(frame);
 			for (const waiter of waiters.splice(0)) waiter();
@@ -77,6 +77,34 @@ function numbered(prefix: string, count: number): string[] {
 }
 
 describe("the session WebSocket protocol", () => {
+	it("rejects invalid requests and continues to serve the socket", async () => {
+		const socket = await connect(crypto.randomUUID());
+		const client = follow(socket);
+		await client.until(() => client.views() > 0);
+		const invalid = [
+			{ type: "unknown", id: "unknown" },
+			{ type: "submit", id: "bad-input", input: [{ type: "text", text: 1 }] },
+			{ type: "submit", id: "bad-policy", input: "hello", whenBusy: "send" },
+			{ type: "entries", id: "bad-limit", limit: 0 },
+			{ type: "entries", id: "bad-query", query: { order: "up" }, limit: 1 },
+		];
+		socket.send("{");
+		socket.send("null");
+		for (const request of invalid) socket.send(JSON.stringify(request));
+		await client.until(() => client.frames.filter((frame) => frame.type === "error").length === 7);
+		expect(client.frames.filter((frame) => frame.type === "error")).toEqual([
+			{ type: "error", message: "Malformed JSON" },
+			{ type: "error", message: "Invalid session message" },
+			...invalid.map(({ id }) => ({ type: "error", id, message: "Invalid session message" })),
+		]);
+
+		socket.send(JSON.stringify({ type: "entries", id: "page", limit: 1 }));
+		await client.until(() =>
+			client.frames.some((frame) => frame.type === "result" && frame.id === "page"),
+		);
+		socket.close();
+	});
+
 	it("sends the view, then pi's operations for a run started over the socket", async () => {
 		const name = crypto.randomUUID();
 		const socket = await connect(name);

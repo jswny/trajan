@@ -1,93 +1,121 @@
-import type { Op } from "@earendil-works/chord/delta";
+import { assertValidOp, type Op } from "@earendil-works/chord/delta";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import type {
 	ConversationView,
 	Cursor,
 	EntryId,
-	EntryQuery,
 	EntryRecord,
 	Page,
-	UserInput,
 } from "@earendil-works/pi-durable";
-import type { PiSessionId, PiWhenBusy } from "agents/harness/pi";
+import { Schema } from "effect";
 
-/**
- * This app's WebSocket protocol, served by `sockets.ts`. The harness knows
- * nothing about it: it is one way to put `session.watch()`,
- * `session.entries()`, and `session.submit()` on a socket.
- */
+/** Trajan's WebSocket messages. Pi supplies the transcript and its deltas. */
+const requestId = Schema.Struct({ id: Schema.optionalKey(Schema.String) });
+const entryId = Schema.declare((value): value is EntryId => Number.isSafeInteger(value));
+const entryQuery = Schema.Struct({
+	minEntryId: Schema.optionalKey(entryId),
+	maxEntryId: Schema.optionalKey(entryId),
+	order: Schema.optionalKey(Schema.Literals(["ascending", "descending"])),
+});
+const userInput = Schema.Union([
+	Schema.String,
+	Schema.mutable(
+		Schema.Array(
+			Schema.Union([
+				Schema.Struct({
+					type: Schema.Literal("text"),
+					text: Schema.String,
+					textSignature: Schema.optionalKey(Schema.String),
+				}),
+				Schema.Struct({
+					type: Schema.Literal("image"),
+					data: Schema.String,
+					mimeType: Schema.String,
+				}),
+			]),
+		),
+	),
+]);
 
-export type PiToolInfo = {
-	readonly name: string;
-	readonly description: string;
-};
+const clientMessage = Schema.Union([
+	Schema.Struct({
+		type: Schema.Literal("submit"),
+		...requestId.fields,
+		input: userInput,
+		whenBusy: Schema.optionalKey(Schema.Literals(["followUp", "steer", "reject"])),
+		operationId: Schema.optionalKey(Schema.String),
+	}),
+	Schema.Struct({ type: Schema.Literal("abort"), ...requestId.fields }),
+	Schema.Struct({
+		type: Schema.Literal("reset"),
+		...requestId.fields,
+		handoff: Schema.optionalKey(Schema.String),
+	}),
+	Schema.Struct({
+		type: Schema.Literal("watch"),
+		...requestId.fields,
+		from: Schema.optionalKey(entryId),
+	}),
+	Schema.Struct({
+		type: Schema.Literal("entries"),
+		id: Schema.String,
+		query: Schema.optionalKey(Schema.NullOr(entryQuery)),
+		limit: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+	}),
+]);
 
-/** A page of the session's entries, as `session.entries()` returns it. */
+const toolInfo = Schema.Struct({ name: Schema.String, description: Schema.String });
+const entryShape = Schema.Struct({ id: entryId, conversationId: Schema.Int, kind: Schema.String });
+const hasPageShape = Schema.is(
+	Schema.Struct({
+		items: Schema.Array(entryShape),
+		next: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
+	}),
+);
+const hasViewShape = Schema.is(
+	Schema.Struct({
+		conversation: Schema.Struct({ id: Schema.Int }),
+		entries: Schema.Array(entryShape),
+		before: Schema.optionalKey(entryId),
+		docs: Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown)),
+	}),
+);
+
+// Check the shape needed by the client and preserve Pi's full payload.
+const view = Schema.declare((value): value is ConversationView => hasViewShape(value));
+const op = Schema.declare((value): value is Op => {
+	try {
+		assertValidOp(value);
+		return true;
+	} catch {
+		return false;
+	}
+});
+
+const serverMessage = Schema.Union([
+	Schema.Struct({
+		type: Schema.Literal("hello"),
+		session: Schema.String,
+		tools: Schema.Array(toolInfo),
+	}),
+	Schema.Struct({ type: Schema.Literal("view"), session: Schema.String, view }),
+	Schema.Struct({ type: Schema.Literal("ops"), session: Schema.String, ops: Schema.Array(op) }),
+	Schema.Struct({ type: Schema.Literal("result"), id: Schema.String, result: Schema.Unknown }),
+	Schema.Struct({ type: Schema.Literal("error"), ...requestId.fields, message: Schema.String }),
+]);
+
+export const decodeClientMessage = Schema.decodeUnknownResult(clientMessage);
+export const decodeRequestId = Schema.decodeUnknownResult(requestId);
+export const decodeServerMessage = Schema.decodeUnknownOption(Schema.fromJsonString(serverMessage));
+export const decodeEntriesPage = Schema.decodeUnknownOption(
+	Schema.declare((value): value is PiEntriesPage => hasPageShape(value)),
+);
+
+export type PiToolInfo = typeof toolInfo.Type;
+export type PiClientMessage = typeof clientMessage.Type;
+export type PiServerMessage = typeof serverMessage.Type;
 export type PiEntriesPage = Page<EntryRecord, Cursor>;
-
-/** What a command's `result` carries. */
 export type PiCommandResult = JsonValue | PiEntriesPage;
-
-/** Client → server. Commands with an `id` get a `result` or `error` back. */
-export type PiClientMessage =
-	| {
-			readonly type: "submit";
-			readonly id?: string;
-			readonly input: UserInput;
-			readonly whenBusy?: PiWhenBusy;
-			readonly operationId?: string;
-	  }
-	| { readonly type: "abort"; readonly id?: string }
-	| { readonly type: "reset"; readonly id?: string; readonly handoff?: string }
-	/**
-	 * Watch the session: the server answers with a `view`, then `ops`. Sent
-	 * each time the socket opens. `from` resumes a transcript the client
-	 * already has: the window starts right after its newest entry
-	 * (`ConversationTranscript.resume`).
-	 */
-	| { readonly type: "watch"; readonly id?: string; readonly from?: EntryId }
-	/**
-	 * A page of the session's entries, for `ConversationTranscript` to load
-	 * earlier entries and fill gaps. The `result` is a `PiEntriesPage`.
-	 */
-	| {
-			readonly type: "entries";
-			readonly id: string;
-			readonly query: Omit<EntryQuery, "conversationId">;
-			readonly limit: number;
-	  };
-
-/** Server → client. */
-export type PiServerMessage =
-	| {
-			readonly type: "hello";
-			readonly session: PiSessionId;
-			readonly tools: readonly PiToolInfo[];
-	  }
-	/**
-	 * pi's conversation view for the connection's session, from
-	 * `session.watch()`: sent whole when a watch starts, after a `watch`,
-	 * after the object restarts, and after pi reopens. Its window is a few
-	 * dozen entries; the client merges it into its transcript, and the
-	 * following `ops` apply to it.
-	 */
-	| {
-			readonly type: "view";
-			readonly session: PiSessionId;
-			readonly view: ConversationView;
-	  }
-	/** pi's operations for one change of the view, to apply to the last one. */
-	| {
-			readonly type: "ops";
-			readonly session: PiSessionId;
-			readonly ops: readonly Op[];
-	  }
-	| {
-			readonly type: "result";
-			readonly id: string;
-			readonly result: PiCommandResult;
-	  }
-	| { readonly type: "error"; readonly id?: string; readonly message: string };
 
 export type {
 	PiClientMessage as ClientMessage,

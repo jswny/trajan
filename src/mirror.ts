@@ -7,7 +7,13 @@ import {
 	type EntryQuery,
 	type TranscriptView,
 } from "@earendil-works/pi-durable";
-import type { PiClientMessage, PiEntriesPage, PiServerMessage } from "./protocol";
+import { Option } from "effect";
+import {
+	decodeEntriesPage,
+	type PiClientMessage,
+	type PiEntriesPage,
+	type PiServerMessage,
+} from "./protocol";
 import { EMPTY_VIEW, projectView, type PiSessionView } from "./view";
 
 /** Entries one "load earlier" or "load missing" asks the server for. */
@@ -129,7 +135,12 @@ export class PiSessionMirror {
 		const page = this.#pages.get(message.id);
 		if (page === undefined) return;
 		this.#pages.delete(message.id);
-		if (message.type === "error") page.reject(new Error(message.message));
-		else page.resolve(message.result as PiEntriesPage);
+		if (message.type === "error") {
+			page.reject(new Error(message.message));
+			return;
+		}
+		const decoded = decodeEntriesPage(message.result);
+		if (Option.isSome(decoded)) page.resolve(decoded.value);
+		else page.reject(new Error("Invalid history page"));
 	}
 }

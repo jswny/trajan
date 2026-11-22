@@ -22,7 +22,7 @@ class TestSocket extends EventTarget {
 		this.sent.push(JSON.parse(data));
 	}
 
-	receive(message: PiServerMessage) {
+	receive(message: unknown) {
 		this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(message) }));
 	}
 }
@@ -55,6 +55,31 @@ function waitFor(changes: Stream.Stream<State>, predicate: (state: State) => boo
 }
 
 describe("the scoped browser session", () => {
+	it("ignores invalid server messages and still applies the next snapshot", async () => {
+		const socket = new TestSocket();
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* openPiSession(() => socket);
+					socket.receive({ type: "hello", session: "1", tools: null });
+					socket.receive({ type: "view", session: "1", view: null });
+					socket.receive(snapshot(1 as EntryId));
+					socket.receive({ type: "ops", session: "1", ops: [["invalid"]] });
+					socket.receive({
+						type: "hello",
+						session: "1",
+						tools: [{ name: "test", description: "Test" }],
+					});
+					const state = yield* waitFor(session.changes, (state) => state.catalog.length === 1);
+					expect(state).toMatchObject({
+						_tag: "Some",
+						value: { messages: [{ parts: [{ text: "Note 1" }] }], error: null },
+					});
+				}),
+			),
+		);
+	});
+
 	it("resumes the transcript and replays only unanswered prompts on reconnect", async () => {
 		const socket = new TestSocket();
 		await Effect.runPromise(
