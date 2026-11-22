@@ -1,7 +1,22 @@
+import {
+	BACKGROUND_CONTEXT,
+	withAbortSignal,
+	type Context as ChordContext,
+} from "@earendil-works/chord/context";
 import type { EntryId } from "@earendil-works/pi-durable";
 import { AgentClient } from "agents/client";
-import { Context, Effect, Layer, Option, Queue, Stream, SubscriptionRef } from "effect";
-import { PiSessionMirror } from "./mirror";
+import {
+	Cause,
+	Context,
+	Effect,
+	Layer,
+	Option,
+	Queue,
+	Stream,
+	SubscriptionRef,
+	type Duration,
+} from "effect";
+import { HistoryDisconnected, isHistoryRequest, PiSessionMirror } from "./mirror";
 import { PiCommandOutbox } from "./outbox";
 import {
 	decodeServerMessage,
@@ -15,6 +30,7 @@ type SessionState = SessionView & {
 	readonly status: "connecting" | "open" | "closed";
 	readonly catalog: readonly ToolInfo[];
 	readonly loading: boolean;
+	readonly historyError: string | null;
 };
 
 export const INITIAL_SESSION_STATE: SessionState = {
@@ -22,6 +38,7 @@ export const INITIAL_SESSION_STATE: SessionState = {
 	status: "connecting",
 	catalog: [],
 	loading: false,
+	historyError: null,
 };
 
 type Gap = { after: EntryId; upTo: EntryId };
@@ -43,11 +60,14 @@ type Socket = {
 	removeEventListener(type: SocketEvent["type"], listener: EventListener): void;
 };
 
-export const openPiSession = Effect.fn("openPiSession")(function* (connect: () => Socket) {
+export const openPiSession = Effect.fn("openPiSession")(function* (
+	connect: () => Socket,
+	pageTimeout?: Duration.Input,
+) {
 	const state = yield* SubscriptionRef.make(INITIAL_SESSION_STATE);
 	const update = (patch: Partial<SessionState>) =>
 		SubscriptionRef.update(state, (current) => ({ ...current, ...patch }));
-	const mirror = new PiSessionMirror((view) => Effect.runSync(update(view)));
+	const mirror = new PiSessionMirror((view) => Effect.runSync(update(view)), pageTimeout);
 	const outbox = new PiCommandOutbox();
 	const events = yield* Queue.unbounded<SocketEvent>();
 
@@ -89,7 +109,7 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 						break;
 					case "close":
 						mirror.close();
-						yield* update({ status: "closed" });
+						yield* update({ status: "closed", historyError: null });
 						break;
 					case "message": {
 						const decoded = decodeServerMessage(event.data);
@@ -98,7 +118,9 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 						outbox.receive(message);
 						mirror.receive(message);
 						if (message.type === "hello") yield* update({ catalog: message.tools });
-						if (message.type === "error") yield* update({ error: message.message });
+						if (message.type === "error" && !isHistoryRequest(message.id)) {
+							yield* update({ error: message.message });
+						}
 						break;
 					}
 				}
@@ -113,21 +135,34 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 		socket.reconnect();
 	});
 
-	const load = (request: () => Promise<void>) =>
-		Effect.gen(function* () {
-			const started = yield* SubscriptionRef.modify(state, (current) =>
-				current.loading || current.status !== "open"
-					? [false, current]
-					: [true, { ...current, loading: true }],
-			);
-			if (!started) return;
+	const load = (request: (context: ChordContext) => Promise<void>) =>
+		Effect.uninterruptibleMask((restore) =>
+			Effect.gen(function* () {
+				const started = yield* SubscriptionRef.modify(state, (current) =>
+					current.loading || current.status !== "open"
+						? [false, current]
+						: [true, { ...current, loading: true, historyError: null }],
+				);
+				if (!started) return;
 
-			// The error frame or disconnect supplies the user-facing state.
-			yield* Effect.tryPromise(request).pipe(
-				Effect.ignore,
-				Effect.ensuring(update({ loading: false })),
-			);
-		});
+				yield* restore(
+					Effect.tryPromise({
+						try: (signal) => request(withAbortSignal(signal, BACKGROUND_CONTEXT)),
+						catch: (error) => error,
+					}).pipe(
+						Effect.catch((error) => {
+							if (error instanceof HistoryDisconnected) return Effect.void;
+							const historyError = Cause.isTimeoutError(error)
+								? "Loading messages timed out. Try again."
+								: error instanceof Error
+									? error.message
+									: "Could not load messages.";
+							return update({ historyError });
+						}),
+					),
+				).pipe(Effect.ensuring(update({ loading: false })));
+			}),
+		);
 
 	const run = (command: SessionCommand) =>
 		Effect.suspend(() => {
@@ -140,9 +175,9 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 				case "reset":
 					return Effect.sync(() => send({ type: command.type, id: crypto.randomUUID() }));
 				case "loadEarlier":
-					return load(() => mirror.loadEarlier());
+					return load((context) => mirror.loadEarlier(context));
 				case "fillGap":
-					return load(() => mirror.fillGap(command.gap));
+					return load((context) => mirror.fillGap(command.gap, context));
 			}
 		});
 

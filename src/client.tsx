@@ -431,6 +431,7 @@ function App() {
 		queued,
 		retry,
 		error,
+		historyError,
 		submit: submitPrompt,
 		abort,
 		loadEarlier,
@@ -586,7 +587,7 @@ function App() {
 											<IconArrowShortUp size={12} aria-hidden="true" />
 										)
 									}
-									disabled={loading}
+									disabled={loading || !connected}
 									aria-busy={loading}
 									onClick={showEarlier}
 								>
@@ -654,6 +655,11 @@ function App() {
 				</main>
 
 				<div className="shrink-0 border-t border-kumo-line bg-kumo-base">
+					{historyError ? (
+						<p role="alert" className="mx-auto max-w-3xl px-5 pt-3 text-sm text-kumo-danger">
+							{historyError}
+						</p>
+					) : null}
 					<form
 						onSubmit={(event) => {
 							event.preventDefault();

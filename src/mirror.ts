@@ -1,4 +1,4 @@
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { applyImmutable } from "@earendil-works/chord/delta";
 import {
 	ConversationTranscript,
@@ -7,7 +7,7 @@ import {
 	type EntryQuery,
 	type TranscriptView,
 } from "@earendil-works/pi-durable";
-import { Option } from "effect";
+import { Data, Deferred, Effect, Option, type Duration } from "effect";
 import {
 	decodeEntriesPage,
 	type PiClientMessage,
@@ -18,11 +18,14 @@ import { EMPTY_VIEW, projectView, type PiSessionView } from "./view";
 
 /** Entries one "load earlier" or "load missing" asks the server for. */
 const PAGE_SIZE = 50;
+const PAGE_TIMEOUT = "15 seconds";
+const HISTORY_REQUEST_PREFIX = "entries:";
 
-type PendingPage = {
-	readonly resolve: (page: PiEntriesPage) => void;
-	readonly reject: (error: Error) => void;
-};
+export class HistoryDisconnected extends Data.TaggedError("HistoryDisconnected") {}
+
+export function isHistoryRequest(id: string | undefined): boolean {
+	return id?.startsWith(HISTORY_REQUEST_PREFIX) ?? false;
+}
 
 /** Send a message on the socket. */
 export type PiSend = (message: PiClientMessage) => void;
@@ -41,17 +44,20 @@ export class PiSessionMirror {
 	/** The open socket's send, between `open()` and `close()`. */
 	#send: PiSend | undefined;
 	readonly #transcript: ConversationTranscript;
-	readonly #pages = new Map<string, PendingPage>();
+	readonly #pages = new Map<string, Deferred.Deferred<PiEntriesPage, Error>>();
+	readonly #pageTimeout: Duration.Input;
 	/** pi's view as the server last sent it; the operations apply to it. */
 	#view: ConversationView | null = null;
 	#projected: PiSessionView = EMPTY_VIEW;
 
 	/** `onChange`: the projected view changed. */
-	constructor(onChange: (view: PiSessionView) => void) {
+	constructor(onChange: (view: PiSessionView) => void, pageTimeout: Duration.Input = PAGE_TIMEOUT) {
 		this.#onChange = onChange;
-		this.#transcript = new ConversationTranscript((query) => this.#loadPage(query), {
-			pageSize: PAGE_SIZE,
-		});
+		this.#pageTimeout = pageTimeout;
+		this.#transcript = new ConversationTranscript(
+			(query, limit, context) => this.#loadPage(query, limit, context),
+			{ pageSize: PAGE_SIZE },
+		);
 	}
 
 	get view(): PiSessionView {
@@ -73,7 +79,7 @@ export class PiSessionMirror {
 		this.#send = undefined;
 		const pages = [...this.#pages.values()];
 		this.#pages.clear();
-		for (const page of pages) page.reject(new Error("Disconnected"));
+		for (const page of pages) Effect.runSync(Deferred.fail(page, new HistoryDisconnected()));
 	}
 
 	/** Take one server message. */
@@ -99,19 +105,22 @@ export class PiSessionMirror {
 	}
 
 	/** Load the page before the oldest message shown. */
-	async loadEarlier(): Promise<void> {
+	async loadEarlier(context = BACKGROUND_CONTEXT): Promise<void> {
 		if (!this.#projected.earlier) return;
-		this.#show(await this.#transcript.loadEarlier(BACKGROUND_CONTEXT));
+		const view = await this.#transcript.loadEarlier(context);
+		if (!context.abortSignal?.aborted) this.#show(view);
 	}
 
 	/** Load the next page of a gap, a `gap` message of the view. */
-	async fillGap(gap: { after: EntryId; upTo: EntryId }): Promise<void> {
-		this.#show(
-			await this.#transcript.fillGap(
-				{ kind: "gap", after: gap.after, upTo: gap.upTo },
-				BACKGROUND_CONTEXT,
-			),
+	async fillGap(
+		gap: { after: EntryId; upTo: EntryId },
+		context = BACKGROUND_CONTEXT,
+	): Promise<void> {
+		const view = await this.#transcript.fillGap(
+			{ kind: "gap", after: gap.after, upTo: gap.upTo },
+			context,
 		);
+		if (!context.abortSignal?.aborted) this.#show(view);
 	}
 
 	#show(view: TranscriptView): void {
@@ -120,27 +129,43 @@ export class PiSessionMirror {
 		this.#onChange(projected);
 	}
 
-	#loadPage(query: Omit<EntryQuery, "conversationId">): Promise<PiEntriesPage> {
-		const id = crypto.randomUUID();
-		const send = this.#send;
-		if (send === undefined) return Promise.reject(new Error("Disconnected"));
-		return new Promise((resolve, reject) => {
-			this.#pages.set(id, { resolve, reject });
-			send({ type: "entries", id, query, limit: PAGE_SIZE });
-		});
+	#loadPage(
+		query: Omit<EntryQuery, "conversationId">,
+		limit: number,
+		context: Context,
+	): Promise<PiEntriesPage> {
+		const id = `${HISTORY_REQUEST_PREFIX}${crypto.randomUUID()}`;
+		const request = Effect.gen({ self: this }, function* () {
+			const page = yield* Deferred.make<PiEntriesPage, Error>();
+			yield* Effect.try({
+				try: () => {
+					if (this.#send === undefined) throw new HistoryDisconnected();
+					this.#pages.set(id, page);
+					this.#send({ type: "entries", id, query, limit });
+				},
+				catch: () => new HistoryDisconnected(),
+			});
+			return yield* Deferred.await(page);
+		}).pipe(
+			Effect.timeout(this.#pageTimeout),
+			Effect.ensuring(Effect.sync(() => this.#pages.delete(id))),
+		);
+		return Effect.runPromise(request, { signal: context.abortSignal });
 	}
 
 	#settlePage(message: Extract<PiServerMessage, { type: "result" | "error" }>): void {
 		if (message.id === undefined) return;
 		const page = this.#pages.get(message.id);
 		if (page === undefined) return;
-		this.#pages.delete(message.id);
 		if (message.type === "error") {
-			page.reject(new Error(message.message));
+			Effect.runSync(Deferred.fail(page, new Error(message.message)));
 			return;
 		}
 		const decoded = decodeEntriesPage(message.result);
-		if (Option.isSome(decoded)) page.resolve(decoded.value);
-		else page.reject(new Error("Invalid history page"));
+		Effect.runSync(
+			Option.isSome(decoded)
+				? Deferred.succeed(page, decoded.value)
+				: Deferred.fail(page, new Error("Invalid history page")),
+		);
 	}
 }
