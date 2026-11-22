@@ -7,14 +7,9 @@ import { INITIAL_SESSION_STATE, PiSession, type SessionCommand } from "./pi-sess
 
 function sessionAtom(object: string) {
 	const changes = Stream.unwrap(
-		Effect.gen(function* () {
-			const session = yield* PiSession;
-			const scope = yield* Effect.scope;
-			const run = (command: SessionCommand) => {
-				Effect.runFork(Effect.forkIn(session.run(command), scope));
-			};
-			return Stream.map(session.changes, (state) => ({ state, run }));
-		}),
+		Effect.map(PiSession, ({ changes, dispatch }) =>
+			Stream.map(changes, (state) => ({ state, dispatch })),
+		),
 	);
 	return Atom.make(changes.pipe(Stream.provide(PiSession.live(object)))).pipe(Atom.setIdleTTL(0));
 }
@@ -22,15 +17,17 @@ function sessionAtom(object: string) {
 export function usePiSession(object: string) {
 	const atom = useMemo(() => sessionAtom(object), [object]);
 	const session = AsyncResult.getOrElse(useAtomValue(atom), () => undefined);
-	const run = (command: SessionCommand) => session?.run(command);
+	const dispatch = (command: SessionCommand) => {
+		session?.dispatch(command);
+	};
 
 	return {
 		...(session?.state ?? INITIAL_SESSION_STATE),
 		submit: (text: string, whenBusy?: "followUp" | "steer") =>
-			run({ type: "submit", text, whenBusy }),
-		abort: () => run({ type: "abort" }),
-		reset: () => run({ type: "reset" }),
-		loadEarlier: () => run({ type: "loadEarlier" }),
-		fillGap: (gap: { after: EntryId; upTo: EntryId }) => run({ type: "fillGap", gap }),
+			dispatch({ type: "submit", text, whenBusy }),
+		abort: () => dispatch({ type: "abort" }),
+		reset: () => dispatch({ type: "reset" }),
+		loadEarlier: () => dispatch({ type: "loadEarlier" }),
+		fillGap: (gap: { after: EntryId; upTo: EntryId }) => dispatch({ type: "fillGap", gap }),
 	};
 }

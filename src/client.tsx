@@ -432,6 +432,7 @@ function App() {
 		retry,
 		error,
 		historyError,
+		submission,
 		submit: submitPrompt,
 		abort,
 		loadEarlier,
@@ -478,15 +479,19 @@ function App() {
 	};
 
 	const connected = status === "open";
+	const submitting = submission?.status === "pending" && submission.draft === prompt;
+	useEffect(() => {
+		if (submission?.status === "accepted") {
+			setPrompt((draft) => (draft === submission.draft ? "" : draft));
+		}
+	}, [submission]);
 
 	/** While a run is going, Enter queues a follow-up and Steer joins the run. */
 	const submit = (whenBusy: "followUp" | "steer" = "followUp") => {
-		const text = prompt.trim();
-		if (!text || !connected) return;
-		setPrompt("");
+		if (!prompt.trim() || !connected || submitting) return;
 		// Sending a message always brings the conversation back to the bottom.
 		following.current = true;
-		submitPrompt(text, whenBusy);
+		submitPrompt(prompt, whenBusy);
 	};
 
 	const newSession = () => {
@@ -655,12 +660,18 @@ function App() {
 				</main>
 
 				<div className="shrink-0 border-t border-kumo-line bg-kumo-base">
+					{submission?.status === "rejected" ? (
+						<p role="alert" className="mx-auto max-w-3xl px-5 pt-3 text-sm text-kumo-danger">
+							{submission.message}
+						</p>
+					) : null}
 					{historyError ? (
 						<p role="alert" className="mx-auto max-w-3xl px-5 pt-3 text-sm text-kumo-danger">
 							{historyError}
 						</p>
 					) : null}
 					<form
+						aria-busy={submitting}
 						onSubmit={(event) => {
 							event.preventDefault();
 							submit();
@@ -694,7 +705,7 @@ function App() {
 										variant="secondary"
 										size="sm"
 										aria-label="Steer"
-										disabled={prompt.trim() === ""}
+										disabled={!connected || submitting || prompt.trim() === ""}
 										onClick={() => submit("steer")}
 									>
 										Steer
@@ -714,7 +725,7 @@ function App() {
 									variant="ghost"
 									shape="square"
 									aria-label="Send message"
-									disabled={!connected || prompt.trim() === ""}
+									disabled={!connected || submitting || prompt.trim() === ""}
 									icon={<IconArrowUpFill aria-hidden="true" />}
 									className="send-button mb-0.5"
 								/>

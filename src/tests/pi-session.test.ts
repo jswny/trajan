@@ -1,5 +1,5 @@
 import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
-import { Effect, Exit, Fiber, Scope, Stream } from "effect";
+import { Effect, Exit, Scope, Stream } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 import { openPiSession, type INITIAL_SESSION_STATE } from "../pi-session";
 import type { PiClientMessage, PiServerMessage } from "../protocol";
@@ -98,7 +98,8 @@ describe("the scoped browser session", () => {
 					yield* waitFor(session.changes, (state) => state.messages.length === 1);
 					expect(socket.sent).toEqual([{ type: "watch" }]);
 
-					yield* session.run({ type: "submit", text: "echo once" });
+					session.dispatch({ type: "submit", text: "echo once" });
+					yield* waitFor(session.changes, (state) => state.submission?.status === "pending");
 					const submit = socket.sent.at(-1);
 					if (submit?.type !== "submit" || submit.id === undefined) {
 						throw new Error("Expected an identified submit");
@@ -111,7 +112,13 @@ describe("the scoped browser session", () => {
 
 					socket.receive(snapshot(2 as EntryId, 1 as EntryId));
 					socket.receive({ type: "result", id: submit.id, result: { accepted: false } });
-					yield* waitFor(session.changes, (state) => state.messages.length === 2);
+					const acknowledged = yield* waitFor(
+						session.changes,
+						(state) => state.submission?.status === "accepted",
+					);
+					expect(acknowledged).toMatchObject({
+						value: { messages: [{}, {}], submission: { id: submit.id } },
+					});
 					socket.close();
 					yield* waitFor(session.changes, (state) => state.status === "closed");
 					socket.reconnect();
@@ -123,6 +130,45 @@ describe("the scoped browser session", () => {
 		expect(socket.readyState).toBe(WebSocket.CLOSED);
 	});
 
+	it("processes commands during paging and matches receipts to the latest draft", async () => {
+		const socket = new TestSocket();
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* openPiSession(() => socket);
+					socket.receive(snapshot(5 as EntryId, 4 as EntryId));
+					yield* waitFor(session.changes, (state) => state.earlier);
+					session.dispatch({ type: "loadEarlier" });
+					const page = yield* pageRequest(socket, 0);
+
+					session.dispatch({ type: "submit", text: "first draft" });
+					session.dispatch({ type: "submit", text: "first draft" });
+					session.dispatch({ type: "submit", text: " second draft ", whenBusy: "steer" });
+					yield* waitFor(session.changes, (state) => state.submission?.draft === " second draft ");
+					const submissions = socket.sent.filter((frame) => frame.type === "submit");
+					expect(submissions.map((frame) => frame.input)).toEqual(["first draft", "second draft"]);
+					expect(submissions[1]?.whenBusy).toBe("steer");
+
+					socket.receive({ type: "result", id: submissions[0]!.id, result: { accepted: true } });
+					socket.receive({ type: "result", id: page.id, result: { items: [] } });
+					const loaded = yield* waitFor(session.changes, (state) => !state.loading);
+					expect(loaded).toMatchObject({
+						value: { submission: { status: "pending", draft: " second draft " } },
+					});
+
+					socket.receive({ type: "error", id: submissions[1]!.id, message: "Prompt rejected" });
+					const rejected = yield* waitFor(
+						session.changes,
+						(state) => state.submission?.status === "rejected",
+					);
+					expect(rejected).toMatchObject({
+						value: { submission: { draft: " second draft ", message: "Prompt rejected" } },
+					});
+				}),
+			),
+		);
+	});
+
 	it("times out a history page and ignores its late replies during a retry", async () => {
 		const socket = new TestSocket();
 		await Effect.runPromise(
@@ -132,10 +178,13 @@ describe("the scoped browser session", () => {
 					socket.receive(snapshot(5 as EntryId, 4 as EntryId));
 					yield* waitFor(session.changes, (state) => state.earlier);
 
-					const first = yield* session.run({ type: "loadEarlier" }).pipe(Effect.forkChild);
+					session.dispatch({ type: "loadEarlier" });
 					const expired = yield* pageRequest(socket, 0);
-					yield* Fiber.join(first).pipe(Effect.timeout("3 seconds"));
-					expect(yield* Stream.runHead(session.changes)).toMatchObject({
+					const timedOut = yield* waitFor(
+						session.changes,
+						(state) => !state.loading && state.historyError !== null,
+					);
+					expect(timedOut).toMatchObject({
 						value: {
 							status: "open",
 							loading: false,
@@ -143,7 +192,7 @@ describe("the scoped browser session", () => {
 						},
 					});
 
-					const retry = yield* session.run({ type: "loadEarlier" }).pipe(Effect.forkChild);
+					session.dispatch({ type: "loadEarlier" });
 					const current = yield* pageRequest(socket, 1);
 					expect(current.id).not.toBe(expired.id);
 					socket.receive({
@@ -172,8 +221,11 @@ describe("the scoped browser session", () => {
 						id: current.id,
 						result: { items: snapshot(4 as EntryId).view.entries },
 					});
-					yield* Fiber.join(retry).pipe(Effect.timeout("3 seconds"));
-					expect(yield* Stream.runHead(session.changes)).toMatchObject({
+					const loaded = yield* waitFor(
+						session.changes,
+						(state) => !state.loading && state.messages.length === 2,
+					);
+					expect(loaded).toMatchObject({
 						value: {
 							loading: false,
 							historyError: null,
@@ -193,21 +245,27 @@ describe("the scoped browser session", () => {
 					const session = yield* openPiSession(() => socket);
 					socket.receive(snapshot(5 as EntryId, 4 as EntryId));
 					yield* waitFor(session.changes, (state) => state.earlier);
-					const first = yield* session.run({ type: "loadEarlier" }).pipe(Effect.forkChild);
+					session.dispatch({ type: "loadEarlier" });
 					yield* pageRequest(socket, 0);
 					socket.close();
-					yield* Fiber.join(first).pipe(Effect.timeout("3 seconds"));
-					expect(yield* Stream.runHead(session.changes)).toMatchObject({
+					const closed = yield* waitFor(
+						session.changes,
+						(state) => state.status === "closed" && !state.loading,
+					);
+					expect(closed).toMatchObject({
 						value: { status: "closed", loading: false, historyError: null },
 					});
 
 					socket.reconnect();
 					yield* waitFor(session.changes, (state) => state.status === "open");
-					const retry = yield* session.run({ type: "loadEarlier" }).pipe(Effect.forkChild);
+					session.dispatch({ type: "loadEarlier" });
 					const current = yield* pageRequest(socket, 1);
 					socket.receive({ type: "result", id: current.id, result: { items: null } });
-					yield* Fiber.join(retry).pipe(Effect.timeout("3 seconds"));
-					expect(yield* Stream.runHead(session.changes)).toMatchObject({
+					const failed = yield* waitFor(
+						session.changes,
+						(state) => !state.loading && state.historyError !== null,
+					);
+					expect(failed).toMatchObject({
 						value: { status: "open", loading: false, historyError: "Invalid history page" },
 					});
 				}),
@@ -225,12 +283,12 @@ describe("the scoped browser session", () => {
 					oldSocket.receive(snapshot(5 as EntryId, 4 as EntryId));
 					yield* waitFor(oldSession.changes, (state) => state.earlier);
 
-					const loadingPage = yield* oldSession.run({ type: "loadEarlier" }).pipe(Effect.forkChild);
+					oldSession.dispatch({ type: "loadEarlier" });
 					yield* waitFor(oldSession.changes, (state) => state.loading);
 					yield* pageRequest(oldSocket, 0);
 
 					yield* Scope.close(oldScope, Exit.void);
-					yield* Fiber.join(loadingPage).pipe(Effect.timeout("3 seconds"));
+					expect(oldSession.dispatch({ type: "submit", text: "old session" })).toBe(false);
 					expect(oldSocket.readyState).toBe(WebSocket.CLOSED);
 
 					const newSocket = new TestSocket();

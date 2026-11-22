@@ -26,11 +26,17 @@ import {
 } from "./protocol";
 import { EMPTY_VIEW } from "./view";
 
+type Submission = { readonly id: string; readonly draft: string } & (
+	| { readonly status: "pending" | "accepted" }
+	| { readonly status: "rejected"; readonly message: string }
+);
+
 type SessionState = SessionView & {
 	readonly status: "connecting" | "open" | "closed";
 	readonly catalog: readonly ToolInfo[];
 	readonly loading: boolean;
 	readonly historyError: string | null;
+	readonly submission: Submission | null;
 };
 
 export const INITIAL_SESSION_STATE: SessionState = {
@@ -39,6 +45,7 @@ export const INITIAL_SESSION_STATE: SessionState = {
 	catalog: [],
 	loading: false,
 	historyError: null,
+	submission: null,
 };
 
 type Gap = { after: EntryId; upTo: EntryId };
@@ -50,6 +57,7 @@ export type SessionCommand =
 	| { type: "fillGap"; gap: Gap };
 
 type SocketEvent = { type: "open" | "close" } | { type: "message"; data: unknown };
+type SessionEvent = SocketEvent | { type: "command"; command: SessionCommand };
 
 type Socket = {
 	readonly readyState: number;
@@ -69,9 +77,11 @@ export const openPiSession = Effect.fn("openPiSession")(function* (
 		SubscriptionRef.update(state, (current) => ({ ...current, ...patch }));
 	const mirror = new PiSessionMirror((view) => Effect.runSync(update(view)), pageTimeout);
 	const outbox = new PiCommandOutbox();
-	const events = yield* Queue.unbounded<SocketEvent>();
+	const scope = yield* Effect.scope;
+	const events = yield* Queue.unbounded<SessionEvent>();
+	yield* Effect.addFinalizer(() => Queue.shutdown(events));
 
-	// Keep open, close, and message events in socket order, including across reconnects.
+	// Process socket events and commands in the order they arrive.
 	const onOpen = () => {
 		Queue.offerUnsafe(events, { type: "open" });
 	};
@@ -94,46 +104,15 @@ export const openPiSession = Effect.fn("openPiSession")(function* (
 	);
 
 	const sendRaw = (data: string) => {
-		if (socket.readyState === WebSocket.OPEN) socket.send(data);
+		if (socket.readyState !== WebSocket.OPEN) return false;
+		try {
+			socket.send(data);
+			return true;
+		} catch {
+			return false;
+		}
 	};
 	const send = (message: ClientMessage) => sendRaw(JSON.stringify(message));
-
-	yield* Stream.fromQueue(events).pipe(
-		Stream.runForEach((event) =>
-			Effect.gen(function* () {
-				switch (event.type) {
-					case "open":
-						mirror.open(send);
-						outbox.sendPending(sendRaw);
-						yield* update({ status: "open" });
-						break;
-					case "close":
-						mirror.close();
-						yield* update({ status: "closed", historyError: null });
-						break;
-					case "message": {
-						const decoded = decodeServerMessage(event.data);
-						if (Option.isNone(decoded)) break;
-						const message = decoded.value;
-						outbox.receive(message);
-						mirror.receive(message);
-						if (message.type === "hello") yield* update({ catalog: message.tools });
-						if (message.type === "error" && !isHistoryRequest(message.id)) {
-							yield* update({ error: message.message });
-						}
-						break;
-					}
-				}
-			}),
-		),
-		Effect.forkScoped,
-	);
-	yield* Effect.sync(() => {
-		socket.addEventListener("open", onOpen);
-		socket.addEventListener("close", onClose);
-		socket.addEventListener("message", onMessage);
-		socket.reconnect();
-	});
 
 	const load = (request: (context: ChordContext) => Promise<void>) =>
 		Effect.uninterruptibleMask((restore) =>
@@ -164,24 +143,92 @@ export const openPiSession = Effect.fn("openPiSession")(function* (
 			}),
 		);
 
-	const run = (command: SessionCommand) =>
-		Effect.suspend(() => {
+	const handleCommand = (command: SessionCommand) =>
+		Effect.gen(function* () {
 			switch (command.type) {
-				case "submit":
-					return Effect.sync(() =>
-						send(outbox.submit(command.text, command.whenBusy ?? "followUp")),
-					);
+				case "submit": {
+					const { status, submission } = yield* SubscriptionRef.get(state);
+					const text = command.text.trim();
+					if (!text || (submission?.status === "pending" && submission.draft === command.text))
+						return;
+					const submit = outbox.submit(text, command.whenBusy ?? "followUp");
+					if (status === "open") send(submit);
+					yield* update({ submission: { id: submit.id, draft: command.text, status: "pending" } });
+					return;
+				}
 				case "abort":
 				case "reset":
-					return Effect.sync(() => send({ type: command.type, id: crypto.randomUUID() }));
+					if (!send({ type: command.type, id: crypto.randomUUID() })) {
+						yield* update({ error: "Connection lost. Try again when connected." });
+					}
+					return;
 				case "loadEarlier":
-					return load((context) => mirror.loadEarlier(context));
+					yield* Effect.forkIn(
+						load((context) => mirror.loadEarlier(context)),
+						scope,
+					);
+					return;
 				case "fillGap":
-					return load((context) => mirror.fillGap(command.gap, context));
+					yield* Effect.forkIn(
+						load((context) => mirror.fillGap(command.gap, context)),
+						scope,
+					);
+					return;
 			}
 		});
 
-	return { changes: SubscriptionRef.changes(state), run };
+	yield* Stream.fromQueue(events).pipe(
+		Stream.runForEach((event) =>
+			Effect.gen(function* () {
+				switch (event.type) {
+					case "command":
+						yield* handleCommand(event.command);
+						break;
+					case "open":
+						mirror.open(send);
+						outbox.sendPending(sendRaw);
+						yield* update({ status: "open" });
+						break;
+					case "close":
+						mirror.close();
+						yield* update({ status: "closed", historyError: null });
+						break;
+					case "message": {
+						const decoded = decodeServerMessage(event.data);
+						if (Option.isNone(decoded)) break;
+						const message = decoded.value;
+						outbox.receive(message);
+						mirror.receive(message);
+						if (message.type === "hello") yield* update({ catalog: message.tools });
+						if (message.type !== "result" && message.type !== "error") break;
+						const { submission } = yield* SubscriptionRef.get(state);
+						if (submission?.status === "pending" && submission.id === message.id) {
+							yield* update({
+								submission:
+									message.type === "result"
+										? { ...submission, status: "accepted" }
+										: { ...submission, status: "rejected", message: message.message },
+							});
+						} else if (message.type === "error" && !isHistoryRequest(message.id)) {
+							yield* update({ error: message.message });
+						}
+						break;
+					}
+				}
+			}),
+		),
+		Effect.forkScoped,
+	);
+	yield* Effect.sync(() => {
+		socket.addEventListener("open", onOpen);
+		socket.addEventListener("close", onClose);
+		socket.addEventListener("message", onMessage);
+		socket.reconnect();
+	});
+
+	const dispatch = (command: SessionCommand) =>
+		Queue.offerUnsafe(events, { type: "command", command });
+	return { changes: SubscriptionRef.changes(state), dispatch };
 });
 
 export class PiSession extends Context.Service<PiSession>()("trajan/PiSession", {
