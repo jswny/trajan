@@ -1,12 +1,4 @@
-import {
-	Badge,
-	Button,
-	Empty,
-	InputArea,
-	PoweredByCloudflare,
-	Surface,
-	Text,
-} from "@cloudflare/kumo";
+import { Badge, Button, Empty, InputArea, Surface, Text } from "@cloudflare/kumo";
 import {
 	IconAgent,
 	IconAgentFill,
@@ -722,12 +714,8 @@ function App() {
 							)}
 						</div>
 					</form>
-					<div className="flex items-center justify-center gap-2 px-5 py-3">
-						<span className="hidden text-[10px] text-kumo-inactive sm:inline">
-							Enter to send · Shift+Enter for a new line
-						</span>
-						<span className="hidden text-kumo-line sm:inline">·</span>
-						<PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
+					<div className="px-5 py-3 text-center text-[10px] text-kumo-inactive">
+						<span className="hidden sm:inline">Enter to send · Shift+Enter for a new line</span>
 					</div>
 				</div>
 			</section>
