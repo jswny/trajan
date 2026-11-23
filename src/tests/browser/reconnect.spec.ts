@@ -316,3 +316,21 @@ test("renders code while syntax highlighting loads and reuses it for later messa
 		release.resolve();
 	}
 });
+
+test("opens a fresh chat when the saved ID is invalid and restores it after reload", async ({
+	page,
+}) => {
+	await page.addInitScript(() => {
+		if (localStorage.getItem("trajan-session") === null) {
+			localStorage.setItem("trajan-session", "invalid-chat-id");
+		}
+	});
+	await page.goto("/");
+	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	const savedId = await page.evaluate(() => localStorage.getItem("trajan-session"));
+	expect(savedId).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
+
+	await page.reload();
+	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	expect(await page.evaluate(() => localStorage.getItem("trajan-session"))).toBe(savedId);
+});

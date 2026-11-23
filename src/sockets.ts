@@ -26,6 +26,11 @@ const MAX_PAGE = 100;
 const OPEN = 1;
 const watchLogger = Logger.layer([Logger.withLeveledConsole(Logger.formatStructured)]);
 const parseFrame = Schema.decodeUnknownResult(Schema.fromJsonString(Schema.Unknown));
+const decodePiSessionId = Schema.decodeUnknownResult(
+	Schema.String.check(Schema.isPattern(/^[1-9][0-9]{0,15}$/)).pipe(
+		Schema.decodeTo(Schema.NumberFromString.check(Schema.isInt())),
+	),
+);
 
 function callPi<A>(run: () => Promise<A>) {
 	return Effect.tryPromise({ try: run, catch: (error) => error });
@@ -76,7 +81,7 @@ function sessionTag(session: PiSessionId): string {
 function sessionFromRequest(request: Request, fallback: PiSessionId): string {
 	const session = new URL(request.url).searchParams.get(SESSION_QUERY);
 	if (session === null || session === "") return fallback;
-	if (!/^[1-9][0-9]{0,15}$/.test(session)) {
+	if (Result.isFailure(decodePiSessionId(session))) {
 		throw new Error(`Invalid pi session ${JSON.stringify(session)}`);
 	}
 	return session;

@@ -80,7 +80,8 @@ function pageRequest(socket: TestSocket, index: number) {
 
 describe("the scoped browser session", () => {
 	it("restores the browser's saved session and releases its socket when the selection changes", async () => {
-		const saved = new Map([["trajan-session", "saved-session"]]);
+		const savedId = crypto.randomUUID();
+		const saved = new Map<string, string>([["trajan-session", savedId]]);
 		vi.stubGlobal("localStorage", {
 			getItem: (key: string) => saved.get(key) ?? null,
 			setItem: (key: string, value: string) => saved.set(key, value),
@@ -100,9 +101,9 @@ describe("the scoped browser session", () => {
 		const reloaded = AtomRegistry.make();
 		try {
 			registry.mount(active);
-			expect(registry.get(active).id).toBe("saved-session");
-			await expect.poll(() => sockets.get("saved-session")?.sent).toEqual([{ type: "watch" }]);
-			const oldSocket = sockets.get("saved-session")!;
+			expect(registry.get(active).id).toBe(savedId);
+			await expect.poll(() => sockets.get(savedId)?.sent).toEqual([{ type: "watch" }]);
+			const oldSocket = sockets.get(savedId)!;
 			oldSocket.receive(snapshot(5 as EntryId));
 			await expect
 				.poll(() => registry.get(active).session)
@@ -112,7 +113,7 @@ describe("the scoped browser session", () => {
 
 			registry.set(selectedSessionId, undefined);
 			const currentId = registry.get(active).id;
-			expect(currentId).not.toBe("saved-session");
+			expect(currentId).not.toBe(savedId);
 			expect(reloaded.get(selectedSessionId)).toBe(currentId);
 			await expect.poll(() => oldSocket.readyState).toBe(WebSocket.CLOSED);
 			await expect.poll(() => sockets.get(currentId)?.sent).toEqual([{ type: "watch" }]);

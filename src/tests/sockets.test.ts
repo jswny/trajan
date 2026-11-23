@@ -129,6 +129,29 @@ function watchFixture() {
 }
 
 describe("the session WebSocket protocol", () => {
+	it("tags the root or a valid Pi session and rejects invalid URL session IDs", async () => {
+		const { client, socket, sockets } = watchFixture();
+		const getTags = sockets.options().getConnectionTags!;
+		const tagsFor = (session?: string) => {
+			const url = new URL("https://example.com/agents/pi-harness-test/chat");
+			if (session !== undefined) url.searchParams.set("session", session);
+			return getTags(socket, { request: new Request(url) });
+		};
+		try {
+			expect(tagsFor()).toEqual([`pi-session:${ROOT_SESSION}`]);
+			expect(tagsFor("")).toEqual([`pi-session:${ROOT_SESSION}`]);
+			expect(tagsFor(String(Number.MAX_SAFE_INTEGER))).toEqual([
+				`pi-session:${Number.MAX_SAFE_INTEGER}`,
+			]);
+			for (const invalid of ["0", "01", "1e3", "1\n", String(Number.MAX_SAFE_INTEGER + 1)]) {
+				expect(() => tagsFor(invalid)).toThrow("Invalid pi session");
+			}
+		} finally {
+			await sockets.close();
+			client.close();
+		}
+	});
+
 	it.each(["resolves", "rejects"])(
 		"keeps a client's watch when an older wake-up watch %s late",
 		async (outcome) => {

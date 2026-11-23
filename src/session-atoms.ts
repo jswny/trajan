@@ -1,9 +1,10 @@
-import { Effect, Stream } from "effect";
+import { Effect, Schema, Stream } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { readPreference, writePreference } from "./browser-storage";
 import { PiSession, type PromptDraft, type SubmitMode } from "./pi-session";
 
 const SESSION_KEY = "trajan-session";
+const isChatId = Schema.is(Schema.String.check(Schema.isUUID()));
 
 function createSessionId(): string {
 	const id = crypto.randomUUID();
@@ -12,7 +13,10 @@ function createSessionId(): string {
 }
 
 export const selectedSessionId = Atom.writable<string, void>(
-	() => readPreference(SESSION_KEY) || createSessionId(),
+	() => {
+		const saved = readPreference(SESSION_KEY);
+		return isChatId(saved) ? saved : createSessionId();
+	},
 	(ctx) => ctx.setSelf(createSessionId()),
 ).pipe(Atom.keepAlive);
 
