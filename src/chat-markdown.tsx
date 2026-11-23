@@ -1,30 +1,27 @@
+import { useAtomValue } from "@effect/atom-react";
 import { Markdown, type MarkdownProps } from "@pierre/words/react";
-import { useEffect, useState } from "react";
+import { Effect } from "effect";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 type ChatMarkdownProps = Pick<MarkdownProps, "className" | "isAnimating" | "mode"> & {
 	readonly children: string;
 };
 
+const plainMarkdown = Atom.make(AsyncResult.success<MarkdownProps["plugins"]>(undefined));
+const highlightedMarkdown = Atom.make(
+	Effect.tryPromise(() => import("./markdown-highlights")).pipe(
+		Effect.map(({ markdownPlugins }): MarkdownProps["plugins"] => markdownPlugins),
+		Effect.catch(() =>
+			Effect.logWarning("Could not load Markdown syntax highlighting").pipe(Effect.as(undefined)),
+		),
+	),
+).pipe(Atom.keepAlive);
+
 export function ChatMarkdown({ children, ...props }: ChatMarkdownProps) {
-	const [plugins, setPlugins] = useState<MarkdownProps["plugins"]>();
 	// Fence markers can appear inside lists and block quotes too.
 	const hasFence = children.includes("```") || children.includes("~~~");
-
-	useEffect(() => {
-		if (!hasFence) return;
-		let active = true;
-		void import("./markdown-highlights").then(
-			({ markdownPlugins }) => {
-				if (active) setPlugins(markdownPlugins);
-			},
-			(error: unknown) => {
-				if (active) console.warn("Could not load Markdown syntax highlighting", error);
-			},
-		);
-		return () => {
-			active = false;
-		};
-	}, [hasFence]);
+	const result = useAtomValue(hasFence ? highlightedMarkdown : plainMarkdown);
+	const plugins = AsyncResult.getOrElse(result, () => undefined);
 
 	return (
 		<Markdown {...props} controls={false} plugins={plugins}>

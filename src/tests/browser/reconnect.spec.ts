@@ -242,3 +242,36 @@ test("keeps the transcript and offers manual sync after two snapshots go missing
 	expect(watches[1]?.from).toBeDefined();
 	expect(watches.slice(2)).toEqual([watches[1], watches[1]]);
 });
+
+test("renders code while syntax highlighting loads and reuses it for later messages", async ({
+	page,
+}) => {
+	const release = Promise.withResolvers<void>();
+	let highlightRequests = 0;
+	await page.route("**/src/markdown-highlights.ts*", async (route) => {
+		highlightRequests += 1;
+		await release.promise;
+		await route.continue();
+	});
+	try {
+		await page.goto("/");
+		await expect(page.getByText("Live", { exact: true })).toBeVisible();
+		expect(highlightRequests).toBe(0);
+		const composer = page.getByRole("textbox", { name: "Message Trajan" });
+		await composer.fill("Code example\n\n```javascript\nconst answer = 42;\n```");
+		await composer.press("Enter");
+		const code = page.locator("pre code").filter({ hasText: "const answer = 42;" });
+		await expect(code).toBeVisible();
+		await expect.poll(() => highlightRequests).toBe(1);
+		release.resolve();
+		await expect(code.locator("span[style]").first()).toBeVisible();
+
+		await composer.fill("Another example\n\n```javascript\nconst next = 43;\n```");
+		await composer.press("Enter");
+		const next = page.locator("pre code").filter({ hasText: "const next = 43;" });
+		await expect(next.locator("span[style]").first()).toBeVisible();
+		expect(highlightRequests).toBe(1);
+	} finally {
+		release.resolve();
+	}
+});

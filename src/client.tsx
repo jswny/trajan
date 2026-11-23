@@ -16,7 +16,8 @@ import {
 	IconSquircleFill,
 	IconX,
 } from "@pierre/icons/beta";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Atom } from "effect/reactivity";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatMarkdown } from "./chat-markdown";
@@ -28,6 +29,10 @@ import "./styles.css";
 
 /** How close to the bottom (px) still counts as "at the bottom". */
 const BOTTOM_THRESHOLD = 32;
+const toolsOpenAtom = Atom.writable(
+	() => window.matchMedia("(min-width: 1100px)").matches,
+	(ctx, open: boolean) => ctx.setSelf(open),
+);
 
 /** A message projected from a pi entry: anything but a gap. */
 type EntryMessage = Exclude<TranscriptMessage, { role: "gap" }>;
@@ -385,9 +390,7 @@ function Sidebar({
 }
 
 function App() {
-	const [toolsOpen, setToolsOpen] = useState(
-		() => window.matchMedia("(min-width: 1100px)").matches,
-	);
+	const [toolsOpen, setToolsOpen] = useAtom(toolsOpenAtom);
 	const endRef = useRef<HTMLDivElement>(null);
 	const scrollRef = useRef<HTMLElement>(null);
 	// Distance from the bottom to keep while earlier messages load above.
