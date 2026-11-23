@@ -1,5 +1,5 @@
-import { Badge, Button, Empty, InputArea, Surface, Text } from "@cloudflare/kumo";
-import { useAtom } from "@effect/atom-react";
+import { Badge, Button, Dialog, Empty, InputArea, Surface, Text } from "@cloudflare/kumo";
+import { useAtom, useAtomValue } from "@effect/atom-react";
 import {
 	IconAgent,
 	IconAgentFill,
@@ -29,10 +29,21 @@ import "./styles.css";
 
 /** How close to the bottom (px) still counts as "at the bottom". */
 const BOTTOM_THRESHOLD = 32;
-const toolsOpenAtom = Atom.writable(
+const toolsSidebarOpenAtom = Atom.writable(
 	() => window.matchMedia("(min-width: 1100px)").matches,
 	(ctx, open: boolean) => ctx.setSelf(open),
 );
+const toolsDialogOpenAtom = Atom.make<boolean>(false);
+const toolsDockedAtom = Atom.make((get) => {
+	const query = window.matchMedia("(min-width: 64rem)");
+	const update = () => {
+		if (query.matches) get.set(toolsDialogOpenAtom, false);
+		get.setSelf(query.matches);
+	};
+	query.addEventListener("change", update);
+	get.addFinalizer(() => query.removeEventListener("change", update));
+	return query.matches;
+});
 
 /** A message projected from a pi entry: anything but a gap. */
 type EntryMessage = Exclude<TranscriptMessage, { role: "gap" }>;
@@ -62,7 +73,7 @@ function ThemeSwitcher() {
 	return (
 		<select
 			aria-label="Color theme"
-			className="h-8 rounded-md border border-kumo-line bg-kumo-control px-1.5 text-xs text-kumo-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-focus"
+			className="h-11 rounded-md border border-kumo-line bg-kumo-control px-1.5 text-xs text-kumo-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-focus"
 			value={mode}
 			onChange={(event) => setMode(event.currentTarget.value)}
 		>
@@ -212,7 +223,7 @@ function UserMessage({ message }: { message: EntryMessage }) {
 	const text = message.parts.map((part) => (part.type === "text" ? part.text : "")).join("");
 	return (
 		<div className="flex justify-end">
-			<div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-kumo-contrast px-4 py-2.5 text-sm leading-relaxed text-kumo-inverse">
+			<div className="min-w-0 max-w-[85%] whitespace-pre-wrap wrap-anywhere rounded-2xl rounded-br-md bg-kumo-contrast px-4 py-2.5 text-sm leading-relaxed text-kumo-inverse">
 				{text}
 			</div>
 		</div>
@@ -339,31 +350,19 @@ function Message({
 	}
 }
 
-function Sidebar({
+function ToolsPanel({
 	tools,
 	activeTools,
-	onClose,
+	header,
 }: {
 	tools: readonly ToolInfo[];
 	activeTools: readonly string[];
-	onClose: () => void;
+	header: ReactNode;
 }) {
 	return (
-		<aside
-			className="flex min-h-0 flex-col border-l border-kumo-line bg-kumo-base"
-			aria-label="Tools"
-		>
-			<div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
-				<Text size="sm" bold>
-					Tools
-				</Text>
-				<Button
-					variant="ghost"
-					shape="square"
-					aria-label="Close tools"
-					onClick={onClose}
-					icon={<IconX aria-hidden="true" />}
-				/>
+		<>
+			<div className="flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4 lg:h-[68px]">
+				{header}
 			</div>
 			<div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
 				{tools.map((tool) => (
@@ -385,12 +384,14 @@ function Sidebar({
 					</Surface>
 				))}
 			</div>
-		</aside>
+		</>
 	);
 }
 
 function App() {
-	const [toolsOpen, setToolsOpen] = useAtom(toolsOpenAtom);
+	const [toolsSidebarOpen, setToolsSidebarOpen] = useAtom(toolsSidebarOpenAtom);
+	const [toolsDialogOpen, setToolsDialogOpen] = useAtom(toolsDialogOpenAtom);
+	const toolsDocked = useAtomValue(toolsDockedAtom);
 	const endRef = useRef<HTMLDivElement>(null);
 	const scrollRef = useRef<HTMLElement>(null);
 	// Distance from the bottom to keep while earlier messages load above.
@@ -483,57 +484,90 @@ function App() {
 	};
 
 	const empty = messages.length === 0 && !earlier && !live && !running;
+	const connectionLabel = synced
+		? "Live"
+		: connected
+			? "Syncing"
+			: status === "connecting"
+				? "Connecting"
+				: "Reconnecting";
+	const toolsButton = (
+		<Button
+			variant="ghost"
+			shape="square"
+			className="size-11"
+			aria-label="Tools"
+			icon={<IconGear aria-hidden="true" />}
+		/>
+	);
+	const closeToolsButton = (
+		<Button
+			variant="ghost"
+			shape="square"
+			className="size-11"
+			aria-label="Close tools"
+			icon={<IconX aria-hidden="true" />}
+		/>
+	);
 
-	return (
+	const layout = (
 		<div
-			className={`grid h-dvh overflow-hidden bg-kumo-elevated text-kumo-default ${
-				toolsOpen ? "lg:grid-cols-[minmax(520px,1fr)_minmax(300px,26vw)]" : "grid-cols-1"
+			className={`chat-layout grid h-dvh grid-rows-[minmax(0,1fr)] overflow-hidden bg-kumo-elevated text-kumo-default ${
+				toolsDocked && toolsSidebarOpen
+					? "grid-cols-[minmax(0,1fr)_minmax(300px,26vw)]"
+					: "grid-cols-1"
 			}`}
 		>
 			<section className="flex min-h-0 min-w-0 flex-col" aria-label="Chat">
 				<header className="shrink-0 border-b border-kumo-line bg-kumo-base">
-					<div className="mx-auto flex h-[68px] max-w-3xl items-center justify-between gap-3 px-5">
-						<div className="flex min-w-0 items-center gap-3">
-							<div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-(--pierre-on-accent)">
+					<div className="mx-auto grid min-h-[68px] max-w-3xl grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:gap-x-3 sm:px-5">
+						<div className="col-start-1 row-start-1 flex min-w-0 items-center gap-2 sm:gap-3">
+							<div className="hidden size-8 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-(--pierre-on-accent) min-[23.4375rem]:flex sm:size-9">
 								<IconAgentFill size={24} aria-hidden="true" />
 							</div>
 							<div className="min-w-0">
-								<h1 className="truncate text-base font-semibold">Trajan</h1>
-								<p className="truncate text-xs text-kumo-subtle">
+								<h1 className="text-base font-semibold">Trajan</h1>
+								<p className="hidden truncate text-xs text-kumo-subtle min-[23.4375rem]:block">
 									Session <code>{session.slice(0, 8)}</code>
 								</p>
 							</div>
 						</div>
-						<div className="flex shrink-0 items-center gap-1.5">
+						<div className="col-start-1 row-start-2 flex min-w-0 items-center gap-1.5 min-[23.4375rem]:pl-10 sm:col-start-2 sm:row-start-1 sm:pl-0">
 							<Badge variant="secondary" className="hidden sm:inline-flex">
 								{MODEL_ID.split("/").at(-1)}
 							</Badge>
 							{connected && transcriptStatus === "failed" ? (
-								<Button type="button" variant="secondary" size="sm" onClick={retryWatch}>
+								<Button
+									type="button"
+									variant="secondary"
+									size="sm"
+									className="min-h-11"
+									onClick={retryWatch}
+								>
 									Retry sync
 								</Button>
 							) : (
-								<Badge variant={synced ? "success" : "secondary"}>
-									{connected
-										? synced
-											? "Live"
-											: "Syncing"
-										: status === "connecting"
-											? "Connecting"
-											: "Reconnecting"}
-								</Badge>
+								<Badge variant={synced ? "success" : "secondary"}>{connectionLabel}</Badge>
+							)}
+						</div>
+						<div className="col-start-2 row-start-1 row-span-2 flex items-center gap-1 sm:col-start-3 sm:row-span-1 sm:gap-1.5">
+							{toolsDocked ? (
+								<Button
+									variant="ghost"
+									shape="square"
+									className="size-11"
+									aria-label="Tools"
+									aria-expanded={toolsSidebarOpen}
+									onClick={() => setToolsSidebarOpen((open) => !open)}
+									icon={<IconGear aria-hidden="true" />}
+								/>
+							) : (
+								<Dialog.Trigger render={toolsButton} />
 							)}
 							<Button
 								variant="ghost"
 								shape="square"
-								aria-label="Tools"
-								aria-expanded={toolsOpen}
-								onClick={() => setToolsOpen((open) => !open)}
-								icon={<IconGear aria-hidden="true" />}
-							/>
-							<Button
-								variant="ghost"
-								shape="square"
+								className="size-11"
 								aria-label="New session"
 								onClick={newSession}
 								icon={<IconPlus aria-hidden="true" />}
@@ -662,6 +696,7 @@ function App() {
 								type="button"
 								variant="secondary"
 								size="sm"
+								className="min-h-11"
 								disabled={!connected}
 								onClick={() => retrySubmit(id)}
 							>
@@ -685,7 +720,7 @@ function App() {
 							event.preventDefault();
 							submit();
 						}}
-						className="mx-auto max-w-3xl px-5 pt-4"
+						className="mx-auto max-w-3xl px-5 pt-3 pb-3 sm:pt-4 sm:pb-0"
 					>
 						<div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-focus">
 							<InputArea
@@ -705,7 +740,7 @@ function App() {
 								aria-label="Message Trajan"
 								disabled={!connected}
 								rows={2}
-								className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
+								className="chat-composer min-w-0 flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
 							/>
 							{running ? (
 								<div className="mb-0.5 flex gap-1.5">
@@ -714,6 +749,7 @@ function App() {
 										variant="secondary"
 										size="sm"
 										aria-label="Steer"
+										className="min-h-11"
 										disabled={!canSubmit}
 										onClick={() => submit("steer")}
 									>
@@ -724,6 +760,7 @@ function App() {
 										variant="secondary"
 										shape="square"
 										aria-label="Stop"
+										className="size-11"
 										onClick={abort}
 										icon={<IconSquircleFill size={12} aria-hidden="true" />}
 									/>
@@ -736,21 +773,63 @@ function App() {
 									aria-label="Send message"
 									disabled={!canSubmit}
 									icon={<IconArrowUpFill aria-hidden="true" />}
-									className="send-button mb-0.5"
+									className="send-button mb-0.5 size-11"
 								/>
 							)}
 						</div>
 					</form>
-					<div className="px-5 py-3 text-center text-[10px] text-kumo-inactive">
-						<span className="hidden sm:inline">Enter to send · Shift+Enter for a new line</span>
+					<div className="hidden px-5 py-3 text-center text-[10px] text-kumo-inactive sm:block">
+						Enter to send · Shift+Enter for a new line
 					</div>
 				</div>
 			</section>
 
-			{toolsOpen ? (
-				<Sidebar tools={catalog} activeTools={runningTools} onClose={() => setToolsOpen(false)} />
+			{toolsDocked && toolsSidebarOpen ? (
+				<aside
+					className="flex min-h-0 flex-col border-l border-kumo-line bg-kumo-base"
+					aria-label="Tools"
+				>
+					<ToolsPanel
+						tools={catalog}
+						activeTools={runningTools}
+						header={
+							<>
+								<Text size="sm" bold>
+									Tools
+								</Text>
+								<Button
+									variant="ghost"
+									shape="square"
+									className="size-11"
+									aria-label="Close tools"
+									onClick={() => setToolsSidebarOpen(false)}
+									icon={<IconX aria-hidden="true" />}
+								/>
+							</>
+						}
+					/>
+				</aside>
 			) : null}
 		</div>
+	);
+	return (
+		<Dialog.Root open={!toolsDocked && toolsDialogOpen} onOpenChange={setToolsDialogOpen}>
+			{layout}
+			{!toolsDocked ? (
+				<Dialog className="tools-dialog z-20 flex flex-col overflow-hidden">
+					<ToolsPanel
+						tools={catalog}
+						activeTools={runningTools}
+						header={
+							<>
+								<Dialog.Title className="text-sm font-semibold">Tools</Dialog.Title>
+								<Dialog.Close render={closeToolsButton} />
+							</>
+						}
+					/>
+				</Dialog>
+			) : null}
+		</Dialog.Root>
 	);
 }
 

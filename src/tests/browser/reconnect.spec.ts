@@ -270,7 +270,13 @@ test("keeps the transcript and offers manual sync after two snapshots go missing
 	await expect.poll(() => snapshots.length).toBe(3);
 	await page.clock.fastForward(6_000);
 	const retry = page.getByRole("button", { name: "Retry sync" });
+	await page.setViewportSize({ width: 320, height: 568 });
 	await expect(retry).toBeVisible();
+	const title = page.getByRole("heading", { name: "Trajan", exact: true });
+	await expect.poll(() => title.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+	await expect
+		.poll(async () => (await retry.boundingBox())?.height ?? 0)
+		.toBeGreaterThanOrEqual(44);
 	await expect(page.getByText("Live", { exact: true })).toHaveCount(0);
 	await expect(answer).toBeVisible();
 	await page.clock.fastForward(12_000);
@@ -333,4 +339,46 @@ test("opens a fresh chat when the saved ID is invalid and restores it after relo
 	await page.reload();
 	await expect(page.getByText("Live", { exact: true })).toBeVisible();
 	expect(await page.evaluate(() => localStorage.getItem("trajan-session"))).toBe(savedId);
+});
+
+test("keeps the transcript height and restores focus when Tools closes on a short iPhone viewport", async ({
+	page,
+}) => {
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await page.goto("/");
+	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	const sidebar = page.getByRole("complementary", { name: "Tools" });
+	await expect(sidebar).toBeVisible();
+	await page.setViewportSize({ width: 402, height: 352 });
+	await expect(sidebar).toBeHidden();
+	const transcript = page.locator("main");
+	const height = await transcript.evaluate((el) => el.clientHeight);
+	const tools = page.getByRole("button", { name: "Tools", exact: true });
+	const dialog = page.getByRole("dialog", { name: "Tools" });
+	await expect(dialog).toBeHidden();
+	await tools.click();
+	await expect(dialog).toBeVisible();
+	await expect(dialog.getByText("multiply", { exact: true })).toBeVisible();
+	expect(await transcript.evaluate((el) => el.clientHeight)).toBe(height);
+	const close = dialog.getByRole("button", { name: "Close tools" });
+	await expect.poll(() => close.evaluate((el) => el.clientHeight)).toBeGreaterThanOrEqual(44);
+	await close.click();
+	await expect(dialog).toBeHidden();
+	await expect(tools).toBeFocused();
+});
+
+test("wraps a long prompt and keeps a wide code block scrollable inside the transcript", async ({
+	page,
+}) => {
+	await page.setViewportSize({ width: 402, height: 681 });
+	await page.goto("/");
+	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	const composer = page.getByRole("textbox", { name: "Message Trajan" });
+	await composer.fill(`Code\n\n\`\`\`javascript\nconst value = "${"x".repeat(170)}";\n\`\`\``);
+	await page.getByRole("button", { name: "Send message" }).click();
+	const block = page.locator('[data-markdown="code-block"] pre');
+	await expect.poll(() => block.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+	await expect
+		.poll(() => page.locator("main").evaluate((el) => el.scrollWidth - el.clientWidth))
+		.toBe(0);
 });

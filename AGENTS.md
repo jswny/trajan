@@ -9,6 +9,7 @@ Trajan uses Pi Durable through `agents/harness/pi` on Cloudflare Workers.
 - Scope subscriptions, timers, and in-flight work to the session, connection, or request that owns them. Distinguish transport connectivity from application readiness and make recovery explicit.
 - Validate external data at app boundaries with Effect Schema. Correlate replies before settling requests or clearing user input. Reuse the original operation ID when retrying the same operation. Mark tools replay-safe only when repeating them is harmless.
 - Test the failure and recovery paths of lifecycle changes. Exercise user-facing recovery in a real browser against a local Worker.
+- Prioritize a current standard-size iPhone viewport for UI changes. Verify affected flows in a real browser at that size, on narrower phones, and at tablet and desktop widths. Check iPhone safe areas and on-screen keyboard behavior when the change affects layout or text input.
 
 ## Development and release
 

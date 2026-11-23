@@ -59,9 +59,29 @@ body,
 }
 
 body {
-	min-height: 100vh;
+	min-height: 100dvh;
 	background: var(--pierre-canvas);
 	color: var(--pierre-ink);
+}
+
+.chat-layout {
+	padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+		env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
+@media (pointer: coarse) {
+	.chat-composer {
+		font-size: 1rem;
+	}
+}
+
+.tools-dialog {
+	--tools-top-gap: max(1rem, env(safe-area-inset-top, 0px));
+	--tools-bottom-gap: max(1rem, env(safe-area-inset-bottom, 0px));
+	--tools-side-gap: max(1rem, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
+	top: var(--tools-top-gap);
+	max-height: calc(100dvh - var(--tools-top-gap) - var(--tools-bottom-gap));
+	max-width: calc(100% - var(--tools-side-gap) - var(--tools-side-gap));
 }
 
 .send-button {
