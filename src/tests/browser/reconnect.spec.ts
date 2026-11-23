@@ -1,17 +1,20 @@
 import { readFile } from "node:fs/promises";
-import { expect, test, type Page } from "@playwright/test";
+import { devices, expect, test, type Page } from "@playwright/test";
+import { MAIN_CHAT_PATH } from "../../main-chat";
 import type { PiClientMessage, PiServerMessage } from "../../protocol";
 
 const workerLog = new URL("../../../.cloudflare/browser-smoke.log", import.meta.url);
 
-test("ignores invalid receipts, then replays the pending submit once", async ({
-	page,
-	request,
-}) => {
+test.beforeEach(async ({ context, baseURL }) => {
+	await context.addCookies([
+		{ name: "trajan-fixture", value: crypto.randomUUID(), url: baseURL!, httpOnly: true },
+	]);
+});
+
+test("ignores invalid receipts, then replays the pending submit once", async ({ page }) => {
 	const prompt = "gate browser recovery";
 	const submissions: Array<Extract<PiClientMessage, { type: "submit" }>> = [];
 	const receipts: Array<Extract<PiServerMessage, { type: "result" }>> = [];
-	let sessionId: string | undefined;
 
 	await page.routeWebSocket(/\/agents\/trajan\//, (client) => {
 		const server = client.connectToServer();
@@ -26,7 +29,6 @@ test("ignores invalid receipts, then replays the pending submit once", async ({
 				receipts.push(message);
 				if (receipts.length === 1) {
 					// Replace Pi's real receipt with invalid frames that carry the right request ID.
-					sessionId = new URL(client.url()).pathname.split("/").at(-1);
 					client.send(JSON.stringify({ ...message, result: null }));
 					client.send(
 						JSON.stringify({
@@ -55,21 +57,24 @@ test("ignores invalid receipts, then replays the pending submit once", async ({
 	await composer.fill(prompt);
 	await composer.press("Enter");
 	await expect.poll(() => receipts[0]?.result).toMatchObject({ accepted: true });
-	await expect(page.getByText("receipt-test-marker", { exact: true })).toBeVisible();
+	await page.getByRole("button", { name: "Tools", exact: true }).click();
+	const tools = page.getByRole("dialog", { name: "Tools" });
+	await expect(tools.getByText("receipt-test-marker", { exact: true })).toBeVisible();
+	await tools.getByRole("button", { name: "Close tools" }).click();
+	await expect(tools).toBeHidden();
 	await expect(page.locator("form")).toHaveAttribute("aria-busy", "true");
 	await expect(composer).toHaveValue(prompt);
 
 	// The newer revision deliberately ends up with the same text as the original.
 	await composer.fill("A newer draft");
 	await composer.fill(prompt);
-	if (!sessionId) throw new Error("Missing session for the intercepted receipt");
-	expect((await request.post(`/__browser-smoke/${sessionId}/disconnect`)).status()).toBe(204);
+	expect((await page.request.post("/__browser-smoke/disconnect")).status()).toBe(204);
 	await expect.poll(() => receipts[1]?.result).toMatchObject({ accepted: false });
 	expect(submissions).toHaveLength(2);
 	expect(submissions[1]).toEqual(submissions[0]);
 	expect(submissions[0]?.operationId).toBe(submissions[0]?.id);
 
-	const release = await request.post(`/__browser-smoke/${sessionId}/release`);
+	const release = await page.request.post("/__browser-smoke/release");
 	expect(release.status()).toBe(204);
 	const transcript = page.getByRole("main");
 	await expect(
@@ -94,7 +99,6 @@ test("ignores invalid receipts, then replays the pending submit once", async ({
 for (const lostReceipts of [1, 2]) {
 	test(`recovers on the same socket when ${lostReceipts === 1 ? "the first receipt is" : "both receipts are"} lost`, async ({
 		page,
-		request,
 	}) => {
 		const prompt = "gate browser recovery";
 		const submissions: Array<Extract<PiClientMessage, { type: "submit" }>> = [];
@@ -149,8 +153,7 @@ for (const lostReceipts of [1, 2]) {
 		expect(submissions).toEqual(Array.from({ length: lostReceipts + 1 }, () => submissions[0]));
 		expect(connections).toHaveLength(1);
 
-		const sessionId = new URL(connections[0]!).pathname.split("/").at(-1);
-		const release = await request.post(`/__browser-smoke/${sessionId}/release`);
+		const release = await page.request.post("/__browser-smoke/release");
 		expect(release.status()).toBe(204);
 		const transcript = page.getByRole("main");
 		await expect(
@@ -249,7 +252,6 @@ test("retries an invalid snapshot before making its transcript visible", async (
 
 test("keeps the transcript and offers manual sync after two snapshots go missing on reconnect", async ({
 	page,
-	request,
 }) => {
 	await page.clock.install();
 	const { connections, watches, snapshots } = await dropWatchSnapshots(page, [2, 3]);
@@ -261,8 +263,7 @@ test("keeps the transcript and offers manual sync after two snapshots go missing
 	const answer = page.getByText("echo: Keep this transcript", { exact: true });
 	await expect(answer).toBeVisible();
 
-	const sessionId = new URL(connections[0]!).pathname.split("/").at(-1);
-	expect((await request.post(`/__browser-smoke/${sessionId}/disconnect`)).status()).toBe(204);
+	expect((await page.request.post("/__browser-smoke/disconnect")).status()).toBe(204);
 	await expect.poll(() => snapshots.length).toBe(2);
 	await expect(page.getByText("Syncing", { exact: true })).toBeVisible();
 	await expect(answer).toBeVisible();
@@ -270,7 +271,6 @@ test("keeps the transcript and offers manual sync after two snapshots go missing
 	await expect.poll(() => snapshots.length).toBe(3);
 	await page.clock.fastForward(6_000);
 	const retry = page.getByRole("button", { name: "Retry sync" });
-	await page.setViewportSize({ width: 320, height: 568 });
 	await expect(retry).toBeVisible();
 	const title = page.getByRole("heading", { name: "Trajan", exact: true });
 	await expect.poll(() => title.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
@@ -323,44 +323,61 @@ test("renders code while syntax highlighting loads and reuses it for later messa
 	}
 });
 
-test("opens a fresh chat when the saved ID is invalid and restores it after reload", async ({
+test("opens the same main chat in separate browser contexts and after reload", async ({
 	page,
+	browser,
+	baseURL,
 }) => {
 	await page.addInitScript(() => {
-		if (localStorage.getItem("trajan-session") === null) {
-			localStorage.setItem("trajan-session", "invalid-chat-id");
-		}
+		localStorage.setItem("trajan-session", crypto.randomUUID());
 	});
-	await page.goto("/");
-	await expect(page.getByText("Live", { exact: true })).toBeVisible();
-	const savedId = await page.evaluate(() => localStorage.getItem("trajan-session"));
-	expect(savedId).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
+	const otherContext = await browser.newContext({ ...devices["iPhone 17 Pro"], baseURL });
+	try {
+		await otherContext.addCookies(await page.context().cookies());
+		const otherPage = await otherContext.newPage();
+		const sockets = [page, otherPage].map((client) =>
+			client.waitForEvent("websocket", (socket) =>
+				new URL(socket.url()).pathname.startsWith("/agents/"),
+			),
+		);
+		await Promise.all([page.goto("/"), otherPage.goto("/")]);
+		for (const socket of await Promise.all(sockets)) {
+			expect(new URL(socket.url()).pathname).toBe(MAIN_CHAT_PATH);
+		}
+		await expect(page.getByText("Live", { exact: true })).toBeVisible();
+		await expect(otherPage.getByText("Live", { exact: true })).toBeVisible();
+		await expect(page.getByText("What can I help with?", { exact: true })).toBeVisible();
+		await expect(page.getByRole("button", { name: "New session" })).toHaveCount(0);
+		const composer = page.getByRole("textbox", { name: "Message Trajan" });
+		await composer.fill("Hello from another device");
+		await composer.press("Enter");
+		const answer = otherPage.getByText("echo: Hello from another device", { exact: true });
+		await expect(answer).toBeVisible();
 
-	await page.reload();
-	await expect(page.getByText("Live", { exact: true })).toBeVisible();
-	expect(await page.evaluate(() => localStorage.getItem("trajan-session"))).toBe(savedId);
+		await otherPage.reload();
+		await expect(otherPage.getByText("Live", { exact: true })).toBeVisible();
+		await expect(answer).toBeVisible();
+	} finally {
+		await otherContext.close();
+	}
 });
 
 test("keeps the transcript height and restores focus when Tools closes on a short iPhone viewport", async ({
 	page,
 }) => {
-	await page.setViewportSize({ width: 1440, height: 900 });
+	await page.setViewportSize({ ...devices["iPhone 17 Pro"].viewport, height: 352 });
 	await page.goto("/");
 	await expect(page.getByText("Live", { exact: true })).toBeVisible();
-	const sidebar = page.getByRole("complementary", { name: "Tools" });
-	await expect(sidebar).toBeVisible();
-	await page.setViewportSize({ width: 402, height: 352 });
-	await expect(sidebar).toBeHidden();
-	const transcript = page.locator("main");
-	const height = await transcript.evaluate((el) => el.clientHeight);
 	const tools = page.getByRole("button", { name: "Tools", exact: true });
 	const dialog = page.getByRole("dialog", { name: "Tools" });
+	const close = dialog.getByRole("button", { name: "Close tools" });
+	const transcript = page.locator("main");
+	const height = await transcript.evaluate((el) => el.clientHeight);
 	await expect(dialog).toBeHidden();
 	await tools.click();
 	await expect(dialog).toBeVisible();
 	await expect(dialog.getByText("multiply", { exact: true })).toBeVisible();
 	expect(await transcript.evaluate((el) => el.clientHeight)).toBe(height);
-	const close = dialog.getByRole("button", { name: "Close tools" });
 	await expect.poll(() => close.evaluate((el) => el.clientHeight)).toBeGreaterThanOrEqual(44);
 	await close.click();
 	await expect(dialog).toBeHidden();
@@ -370,7 +387,6 @@ test("keeps the transcript height and restores focus when Tools closes on a shor
 test("wraps a long prompt and keeps a wide code block scrollable inside the transcript", async ({
 	page,
 }) => {
-	await page.setViewportSize({ width: 402, height: 681 });
 	await page.goto("/");
 	await expect(page.getByText("Live", { exact: true })).toBeVisible();
 	const composer = page.getByRole("textbox", { name: "Message Trajan" });

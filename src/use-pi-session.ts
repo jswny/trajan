@@ -1,13 +1,12 @@
-import { useAtom, useAtomSet, useAtomValue } from "@effect/atom-react";
+import { useAtom, useAtomValue } from "@effect/atom-react";
 import type { EntryId } from "@earendil-works/pi-durable";
 import { AsyncResult } from "effect/reactivity";
 import { INITIAL_SESSION_STATE, type SessionCommand, type SubmitMode } from "./pi-session";
-import { activeSessionAtom, composerAtom, selectedSessionId } from "./session-atoms";
+import { composerAtom, sessionAtom } from "./session-atoms";
 
 export function usePiSession() {
-	const { id, session: result } = useAtomValue(activeSessionAtom);
+	const result = useAtomValue(sessionAtom);
 	const [composer, updateComposer] = useAtom(composerAtom);
-	const newSession = useAtomSet(selectedSessionId);
 	const session = AsyncResult.getOrElse(result, () => undefined);
 	const dispatch = (command: SessionCommand) => {
 		session?.dispatch(command);
@@ -15,8 +14,6 @@ export function usePiSession() {
 
 	return {
 		...(session?.state ?? INITIAL_SESSION_STATE),
-		id,
-		newSession,
 		composer,
 		editPrompt: (text: string) => updateComposer({ type: "edit", text }),
 		submit: (whenBusy: SubmitMode) => updateComposer({ type: "submit", whenBusy }),

@@ -8,7 +8,7 @@ Keep this file focused on durable decisions that contributors cannot infer from 
 - Validate external data at app boundaries with Effect Schema. Correlate acknowledgments with their requests before settling the requests or clearing user input.
 - Reuse operation IDs when retrying the same action. Mark tools replay-safe only when repeating them is harmless.
 - Verify the failure and recovery paths of lifecycle changes. Exercise user-facing recovery in a real browser against a local Worker.
-- Prioritize a current standard-size iPhone viewport for UI changes. Verify affected flows in a real browser at that size, on narrower phones, and at tablet and desktop widths. Check iPhone safe areas and on-screen keyboard behavior when the change affects layout or text input.
+- Verify UI changes in a real browser using the iPhone 17 Pro as the reference viewport. Check safe areas and on-screen keyboard behavior when the change affects layout or text input.
 - Review per-chat authorization before widening Cloudflare Access.
 - Treat checked-in Worker configuration as authoritative.
 - Run the repository checks and verify the production bundle before publishing.

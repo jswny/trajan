@@ -29,6 +29,7 @@ import {
 } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
+import { isMainChatUrl } from "../main-chat";
 import { PiSessionSockets } from "../sockets";
 import { projectView } from "../view";
 import { createWorkspaceTools } from "../workspace";
@@ -336,12 +337,24 @@ function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
-		const { pathname } = new URL(request.url);
+		const url = new URL(request.url);
+		const { pathname } = url;
 		if (pathname === "/__browser-smoke/ready") return new Response("Trajan browser fixture");
-		const control = /^\/__browser-smoke\/([a-f0-9-]+)\/(disconnect|release)$/.exec(pathname);
-		if (control && request.method === "POST") {
-			const stub = env.PI_HARNESS_TEST.getByName(control[1]!);
-			if (control[2] === "disconnect") await stub.disconnect();
+		// Give each browser test a fresh main chat while keeping the app URL fixed.
+		const fixture = /(?:^|;\s*)trajan-fixture=([a-f0-9-]+)(?:;|$)/.exec(
+			request.headers.get("Cookie") ?? "",
+		)?.[1];
+		if (pathname.startsWith("/agents/trajan/")) {
+			if (!isMainChatUrl(url)) return new Response("Not found", { status: 404 });
+			if (fixture) {
+				url.pathname = `/agents/trajan/${fixture}`;
+				request = new Request(url, request);
+			}
+		}
+		const control = /^\/__browser-smoke\/(disconnect|release)$/.exec(pathname)?.[1];
+		if (control && fixture && request.method === "POST") {
+			const stub = env.PI_HARNESS_TEST.getByName(fixture);
+			if (control === "disconnect") await stub.disconnect();
 			else await stub.release();
 			return new Response(null, { status: 204 });
 		}

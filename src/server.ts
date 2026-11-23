@@ -12,6 +12,7 @@ import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
 import { Effect, Exit } from "effect";
+import { isMainChatUrl } from "./main-chat";
 import { migrateRetiredModel } from "./model";
 import { MODEL_ID } from "./model-id";
 import { PiSessionSockets } from "./sockets";
@@ -104,17 +105,18 @@ export class Trajan extends DurableObject<Env> {
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
-		const { pathname } = new URL(request.url);
-		if (pathname === "/api/health") {
+		const url = new URL(request.url);
+		if (url.pathname === "/api/health") {
 			return Response.json({ ok: true, service: "trajan" });
 		}
-		if (pathname === "/api/session") {
-			// A fresh session id for the client to open its WebSocket against.
-			return Response.json({ session: crypto.randomUUID() });
+		if (!isMainChatUrl(url)) return new Response("Not found", { status: 404 });
+		const origin = request.headers.get("Origin");
+		if (origin !== null && origin !== url.origin) {
+			return new Response("Forbidden", { status: 403 });
 		}
 		return Effect.runPromise(
 			Effect.tryPromise({
-				try: () => routeAgentRequest(request, env, { cors: true }),
+				try: () => routeAgentRequest(request, env),
 				catch: (error) => error,
 			}).pipe(
 				Effect.map((response) => response ?? new Response("Not found", { status: 404 })),

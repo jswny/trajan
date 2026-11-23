@@ -1,62 +1,33 @@
-import { Effect, Schema, Stream } from "effect";
+import { Effect, Stream } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { readPreference, writePreference } from "./browser-storage";
 import { PiSession, type PromptDraft, type SubmitMode } from "./pi-session";
-
-const SESSION_KEY = "trajan-session";
-const isChatId = Schema.is(Schema.String.check(Schema.isUUID()));
-
-function createSessionId(): string {
-	const id = crypto.randomUUID();
-	writePreference(SESSION_KEY, id);
-	return id;
-}
-
-export const selectedSessionId = Atom.writable<string, void>(
-	() => {
-		const saved = readPreference(SESSION_KEY);
-		return isChatId(saved) ? saved : createSessionId();
-	},
-	(ctx) => ctx.setSelf(createSessionId()),
-).pipe(Atom.keepAlive);
 
 type ComposerAction = { type: "edit"; text: string } | { type: "submit"; whenBusy: SubmitMode };
 type ComposerView = { text: string; submitting: boolean; canSubmit: boolean };
 const EMPTY_DRAFT: PromptDraft = { text: "" };
 
-export function makeSessionAtoms(live: typeof PiSession.live = (id) => PiSession.live(id)) {
+export function makeSessionAtoms(live = PiSession.live()) {
 	const draftAtom = Atom.make(EMPTY_DRAFT).pipe(Atom.keepAlive);
-	const sessionFor = Atom.family((id: string) => {
-		const updates = Stream.unwrap(
+	const sessionAtom = Atom.make(({ registry }) =>
+		Stream.unwrap(
 			Effect.map(PiSession, ({ changes, dispatch }) =>
 				Stream.map(changes, (state) => ({ state, dispatch })),
 			),
-		);
-		return Atom.make(({ registry }) =>
-			updates.pipe(
-				Stream.provide(live(id)),
-				Stream.tap(({ state: { submission } }) =>
-					Effect.sync(() => {
-						if (
-							submission?.status === "accepted" &&
-							registry.get(selectedSessionId) === id &&
-							registry.get(draftAtom) === submission.draft
-						) {
-							registry.set(draftAtom, EMPTY_DRAFT);
-						}
-					}),
-				),
+		).pipe(
+			Stream.provide(live),
+			Stream.tap(({ state: { submission } }) =>
+				Effect.sync(() => {
+					if (submission?.status === "accepted" && registry.get(draftAtom) === submission.draft) {
+						registry.set(draftAtom, EMPTY_DRAFT);
+					}
+				}),
 			),
-		).pipe(Atom.setIdleTTL(0));
-	});
-	const activeSessionAtom = Atom.make((get) => {
-		const id = get(selectedSessionId);
-		return { id, session: get(sessionFor(id)) };
-	}).pipe(Atom.setIdleTTL(0));
+		),
+	).pipe(Atom.setIdleTTL(0));
 	const composerAtom = Atom.writable<ComposerView, ComposerAction>(
 		(get) => {
 			const draft = get(draftAtom);
-			const session = AsyncResult.getOrElse(get(activeSessionAtom).session, () => undefined);
+			const session = AsyncResult.getOrElse(get(sessionAtom), () => undefined);
 			const submission = session?.state.submission;
 			const currentSubmission = submission?.draft === draft ? submission.status : undefined;
 			return {
@@ -76,11 +47,11 @@ export function makeSessionAtoms(live: typeof PiSession.live = (id) => PiSession
 				return;
 			}
 			if (!ctx.get(composerAtom).canSubmit) return;
-			const session = AsyncResult.getOrElse(ctx.get(activeSessionAtom).session, () => undefined);
+			const session = AsyncResult.getOrElse(ctx.get(sessionAtom), () => undefined);
 			session?.dispatch({ type: "submit", draft: ctx.get(draftAtom), whenBusy: action.whenBusy });
 		},
 	);
-	return { activeSessionAtom, composerAtom };
+	return { sessionAtom, composerAtom };
 }
 
-export const { activeSessionAtom, composerAtom } = makeSessionAtoms();
+export const { sessionAtom, composerAtom } = makeSessionAtoms();

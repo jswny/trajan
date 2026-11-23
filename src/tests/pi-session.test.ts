@@ -10,7 +10,7 @@ import {
 	type PiClientMessage,
 	type PiServerMessage,
 } from "../protocol";
-import { makeSessionAtoms, selectedSessionId } from "../session-atoms";
+import { makeSessionAtoms } from "../session-atoms";
 
 class TestSocket extends EventTarget {
 	readyState: number = WebSocket.CLOSED;
@@ -79,59 +79,36 @@ function pageRequest(socket: TestSocket, index: number) {
 }
 
 describe("the scoped browser session", () => {
-	it("restores the browser's saved session and releases its socket when the selection changes", async () => {
-		const savedId = crypto.randomUUID();
-		const saved = new Map<string, string>([["trajan-session", savedId]]);
-		vi.stubGlobal("localStorage", {
-			getItem: (key: string) => saved.get(key) ?? null,
-			setItem: (key: string, value: string) => saved.set(key, value),
-		});
-		const sockets = new Map<string, TestSocket>();
-		const { activeSessionAtom: active } = makeSessionAtoms((id) =>
-			Layer.effect(
-				PiSession,
-				openPiSession(() => {
-					const socket = new TestSocket();
-					sockets.set(id, socket);
-					return socket;
-				}),
-			),
+	it("shares one socket between the chat and composer and closes it when they are released", async () => {
+		const openSocket = vi.fn(() => new TestSocket());
+		const { sessionAtom, composerAtom } = makeSessionAtoms(
+			Layer.effect(PiSession, openPiSession(openSocket)),
 		);
 		const registry = AtomRegistry.make();
-		const reloaded = AtomRegistry.make();
 		try {
-			registry.mount(active);
-			expect(registry.get(active).id).toBe(savedId);
-			await expect.poll(() => sockets.get(savedId)?.sent).toEqual([{ type: "watch" }]);
-			const oldSocket = sockets.get(savedId)!;
-			oldSocket.receive(snapshot(5 as EntryId));
+			const unmountSession = registry.mount(sessionAtom);
+			const unmountComposer = registry.mount(composerAtom);
+			await expect.poll(() => openSocket.mock.results[0]?.value?.sent).toEqual([{ type: "watch" }]);
+			const socket = openSocket.mock.results[0]!.value!;
+			socket.receive(snapshot(5 as EntryId));
 			await expect
-				.poll(() => registry.get(active).session)
+				.poll(() => registry.get(sessionAtom))
 				.toMatchObject({
 					value: { state: { messages: [{ parts: [{ text: "Note 5" }] }] } },
 				});
-
-			registry.set(selectedSessionId, undefined);
-			const currentId = registry.get(active).id;
-			expect(currentId).not.toBe(savedId);
-			expect(reloaded.get(selectedSessionId)).toBe(currentId);
-			await expect.poll(() => oldSocket.readyState).toBe(WebSocket.CLOSED);
-			await expect.poll(() => sockets.get(currentId)?.sent).toEqual([{ type: "watch" }]);
-			await expect
-				.poll(() => registry.get(active).session)
-				.toMatchObject({
-					value: { state: { messages: [], status: "open" } },
-				});
+			expect(openSocket).toHaveBeenCalledTimes(1);
+			unmountSession();
+			expect(socket.readyState).toBe(WebSocket.OPEN);
+			unmountComposer();
+			await expect.poll(() => socket.readyState).toBe(WebSocket.CLOSED);
 		} finally {
 			registry.dispose();
-			reloaded.dispose();
-			vi.unstubAllGlobals();
 		}
 	});
 
 	it("clears only the accepted draft revision and keeps rejected text available to retry", async () => {
 		const socket = new TestSocket();
-		const { activeSessionAtom: active, composerAtom: composer } = makeSessionAtoms(() =>
+		const { sessionAtom, composerAtom: composer } = makeSessionAtoms(
 			Layer.effect(
 				PiSession,
 				openPiSession(() => socket),
@@ -156,7 +133,7 @@ describe("the scoped browser session", () => {
 			edit("same text");
 			socket.acknowledge(first);
 			await expect
-				.poll(() => registry.get(active).session)
+				.poll(() => registry.get(sessionAtom))
 				.toMatchObject({
 					value: { state: { submission: { id: first.id, status: "accepted" } } },
 				});

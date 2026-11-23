@@ -12,6 +12,7 @@ import {
 	Stream,
 	SubscriptionRef,
 } from "effect";
+import { MAIN_CHAT_NAME } from "./main-chat";
 import { HistoryDisconnected, isHistoryRequest, PiSessionMirror } from "./mirror";
 import { PiCommandOutbox, type PiOutboxSubmit } from "./outbox";
 import {
@@ -359,14 +360,14 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 export class PiSession extends Context.Service<PiSession>()("trajan/PiSession", {
 	make: openPiSession,
 }) {
-	static live(object: string) {
+	static live() {
 		return Layer.effect(
 			PiSession,
 			openPiSession(
 				() =>
 					new AgentClient({
 						agent: "trajan",
-						name: object,
+						name: MAIN_CHAT_NAME,
 						host: window.location.host,
 						protocol: window.location.protocol === "https:" ? "wss" : "ws",
 						startClosed: true,

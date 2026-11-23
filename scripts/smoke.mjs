@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { applyImmutable } from "@earendil-works/chord/delta";
+import { MAIN_CHAT_PATH } from "../src/main-chat.ts";
 
 const base = new URL(process.argv[2]);
 const health = await fetch(new URL("/api/health", base));
 assert.equal(health.status, 200);
 assert.deepEqual(await health.json(), { ok: true, service: "trajan" });
 const marker = `trajan-smoke-${crypto.randomUUID()}`;
-const url = new URL(`/agents/trajan/${crypto.randomUUID()}`, base);
+// Use isolated local state. The smoke prompts become part of its main chat.
+const url = new URL(MAIN_CHAT_PATH, base);
+const file = `/workspace/${marker}.txt`;
 url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
 
 function connect(prompt, expectedTools) {
@@ -62,14 +65,14 @@ function connect(prompt, expectedTools) {
 }
 
 await connect(
-	`Use write to save exactly ${marker} to /workspace/smoke.txt, then use read to read that file back. Reply only with the file contents.`,
+	`Use write to save exactly ${marker} to ${file}, then use read to read that file back. Reply only with the file contents.`,
 	["write", "read"],
 );
 console.log("Passed: Workers AI, Pi tool loop, durable workspace write/read");
 await connect(undefined, ["write", "read"]);
 console.log("Passed: WebSocket reconnect restores the conversation");
 await connect(
-	'Use exec to run this JavaScript ES module: import { readFile } from "node:fs/promises"; export default async function () { return await readFile("/workspace/smoke.txt", "utf8"); } Reply only with its result.',
+	`Use exec to run this JavaScript ES module: import { readFile } from "node:fs/promises"; export default async function () { return await readFile(${JSON.stringify(file)}, "utf8"); } Reply only with its result.`,
 	["exec"],
 );
 console.log("Passed: Dynamic Worker JavaScript execution");
