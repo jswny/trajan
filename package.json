@@ -8,7 +8,7 @@
 		"dev": "cf dev",
 		"start": "cf dev",
 		"build": "cf build",
-		"deploy": "cf build && cf deploy --prebuilt --worker trajan-codemode --force && cf deploy --prebuilt --force",
+		"deploy": "cf build && CLOUDFLARE_CI_OVERRIDE_WORKER_NAME= cf deploy --prebuilt --worker trajan-codemode --force && cf deploy --prebuilt --force",
 		"types": "cf workers types",
 		"typecheck": "cf workers types && vp check --no-fmt --no-lint",
 		"format": "vp fmt",
