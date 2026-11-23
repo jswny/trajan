@@ -53,7 +53,11 @@ function follow(socket: WebSocket) {
 			mirror.receive(frame);
 			for (const waiter of waiters.splice(0)) waiter();
 		});
-		mirror.open((message) => next.send(JSON.stringify(message)));
+		mirror.open((message) => {
+			if (next.readyState !== WebSocket.OPEN) return false;
+			next.send(JSON.stringify(message));
+			return true;
+		});
 	};
 	attach(socket);
 	/** The socket dropped; follow on `next`, as a reconnect does. */

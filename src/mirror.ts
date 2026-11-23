@@ -7,7 +7,7 @@ import {
 	type EntryQuery,
 	type TranscriptView,
 } from "@earendil-works/pi-durable";
-import { Data, Deferred, Effect, Option, type Duration } from "effect";
+import { Data, Deferred, Effect, Option } from "effect";
 import {
 	decodeEntriesPage,
 	type PiClientMessage,
@@ -27,8 +27,8 @@ export function isHistoryRequest(id: string | undefined): boolean {
 	return id?.startsWith(HISTORY_REQUEST_PREFIX) ?? false;
 }
 
-/** Send a message on the socket. */
-export type PiSend = (message: PiClientMessage) => void;
+/** Whether the message was sent on the socket. */
+type PiSend = (message: PiClientMessage) => boolean;
 
 /**
  * The client's copy of one session, over this app's socket protocol: pi's
@@ -45,15 +45,14 @@ export class PiSessionMirror {
 	#send: PiSend | undefined;
 	readonly #transcript: ConversationTranscript;
 	readonly #pages = new Map<string, Deferred.Deferred<PiEntriesPage, Error>>();
-	readonly #pageTimeout: Duration.Input;
+	readonly #runPage: typeof Effect.runPromise;
 	/** pi's view as the server last sent it; the operations apply to it. */
 	#view: ConversationView | null = null;
 	#projected: PiSessionView = EMPTY_VIEW;
 
-	/** `onChange`: the projected view changed. */
-	constructor(onChange: (view: PiSessionView) => void, pageTimeout: Duration.Input = PAGE_TIMEOUT) {
+	constructor(onChange: (view: PiSessionView) => void, runPage = Effect.runPromise) {
 		this.#onChange = onChange;
-		this.#pageTimeout = pageTimeout;
+		this.#runPage = runPage;
 		this.#transcript = new ConversationTranscript(
 			(query, limit, context) => this.#loadPage(query, limit, context),
 			{ pageSize: PAGE_SIZE },
@@ -136,21 +135,19 @@ export class PiSessionMirror {
 	): Promise<PiEntriesPage> {
 		const id = `${HISTORY_REQUEST_PREFIX}${crypto.randomUUID()}`;
 		const request = Effect.gen({ self: this }, function* () {
+			const send = this.#send;
+			if (send === undefined) return yield* new HistoryDisconnected();
 			const page = yield* Deferred.make<PiEntriesPage, Error>();
-			yield* Effect.try({
-				try: () => {
-					if (this.#send === undefined) throw new HistoryDisconnected();
-					this.#pages.set(id, page);
-					this.#send({ type: "entries", id, query, limit });
-				},
-				catch: () => new HistoryDisconnected(),
-			});
+			this.#pages.set(id, page);
+			if (!send({ type: "entries", id, query, limit })) {
+				return yield* Effect.fail(new Error("Could not request messages. Try again."));
+			}
 			return yield* Deferred.await(page);
 		}).pipe(
-			Effect.timeout(this.#pageTimeout),
+			Effect.timeout(PAGE_TIMEOUT),
 			Effect.ensuring(Effect.sync(() => this.#pages.delete(id))),
 		);
-		return Effect.runPromise(request, { signal: context.abortSignal });
+		return this.#runPage(request, { signal: context.abortSignal });
 	}
 
 	#settlePage(message: Extract<PiServerMessage, { type: "result" | "error" }>): void {

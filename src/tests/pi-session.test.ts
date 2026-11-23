@@ -324,20 +324,64 @@ describe("the scoped browser session", () => {
 		);
 	});
 
-	it("times out a history page and ignores its late replies during a retry", async () => {
+	it("clears loading when sending a history request fails, then loads the page on retry", async () => {
 		const socket = new TestSocket();
 		await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
-					const session = yield* openPiSession(() => socket, "350 millis");
+					const session = yield* openPiSession(() => socket);
+					socket.receive(snapshot(5 as EntryId, 4 as EntryId));
+					yield* waitFor(session.changes, (state) => state.earlier);
+					vi.spyOn(socket, "send").mockImplementationOnce(() => {
+						throw new Error("Socket send failed");
+					});
+
+					session.dispatch({ type: "loadEarlier" });
+					const failed = yield* waitFor(
+						session.changes,
+						(state) => !state.loading && state.historyError !== null,
+					);
+					expect(failed).toMatchObject({
+						value: { status: "open", historyError: "Could not request messages. Try again." },
+					});
+
+					session.dispatch({ type: "loadEarlier" });
+					const current = yield* pageRequest(socket, 0);
+					socket.receive({
+						type: "result",
+						id: current.id,
+						result: { items: snapshot(4 as EntryId).view.entries },
+					});
+					const loaded = yield* waitFor(session.changes, (state) => !state.loading);
+					expect(loaded).toMatchObject({
+						value: {
+							historyError: null,
+							messages: [{ parts: [{ text: "Note 4" }] }, { parts: [{ text: "Note 5" }] }],
+						},
+					});
+				}),
+			),
+		);
+	});
+
+	it("times out a history page on the session clock and ignores its late replies during a retry", async () => {
+		const socket = new TestSocket();
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* openPiSession(() => socket);
 					socket.receive(snapshot(5 as EntryId, 4 as EntryId));
 					yield* waitFor(session.changes, (state) => state.earlier);
 
 					session.dispatch({ type: "loadEarlier" });
 					const expired = yield* pageRequest(socket, 0);
-					const timedOut = yield* waitFor(
-						session.changes,
-						(state) => !state.loading && state.historyError !== null,
+					yield* TestClock.adjust("14 seconds");
+					expect(yield* Stream.runHead(session.changes)).toMatchObject({
+						value: { loading: true, historyError: null },
+					});
+					yield* TestClock.adjust("1 second");
+					const timedOut = yield* TestClock.withLive(
+						waitFor(session.changes, (state) => !state.loading && state.historyError !== null),
 					);
 					expect(timedOut).toMatchObject({
 						value: {
@@ -388,7 +432,7 @@ describe("the scoped browser session", () => {
 						},
 					});
 				}),
-			),
+			).pipe(Effect.provide(TestClock.layer())),
 		);
 	});
 

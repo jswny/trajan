@@ -15,7 +15,6 @@ import {
 	Queue,
 	Stream,
 	SubscriptionRef,
-	type Duration,
 } from "effect";
 import { HistoryDisconnected, isHistoryRequest, PiSessionMirror } from "./mirror";
 import { PiCommandOutbox, type PiOutboxSubmit } from "./outbox";
@@ -79,14 +78,13 @@ type Socket = {
 	removeEventListener(type: SocketEvent["type"], listener: EventListener): void;
 };
 
-export const openPiSession = Effect.fn("openPiSession")(function* (
-	connect: () => Socket,
-	pageTimeout?: Duration.Input,
-) {
+export const openPiSession = Effect.fn("openPiSession")(function* (connect: () => Socket) {
 	const state = yield* SubscriptionRef.make(INITIAL_SESSION_STATE);
 	const update = (patch: Partial<SessionState>) =>
 		SubscriptionRef.update(state, (current) => ({ ...current, ...patch }));
-	const mirror = new PiSessionMirror((view) => Effect.runSync(update(view)), pageTimeout);
+	// Pi calls the page loader through a Promise. Keep the session clock across that boundary.
+	const runPage = Effect.runPromiseWith(yield* Effect.context());
+	const mirror = new PiSessionMirror((view) => Effect.runSync(update(view)), runPage);
 	const outbox = new PiCommandOutbox();
 	const scope = yield* Effect.scope;
 	const events = yield* Queue.unbounded<SessionEvent>();
