@@ -37,7 +37,7 @@ function replay(socket: WebSocket, outbox: PiCommandOutbox, id: string): Promise
 }
 
 describe("the client command outbox", () => {
-	it("names each submit with an operation id and keeps it until a result", () => {
+	it("names each submit with an operation id and keeps it until a matching receipt", () => {
 		const outbox = new PiCommandOutbox();
 		const submit = outbox.submit("hello", "followUp");
 
@@ -49,9 +49,28 @@ describe("the client command outbox", () => {
 		expect(submit.operationId).toBe(submit.id);
 		expect(outbox.pending()).toEqual([submit]);
 
-		outbox.receive({ type: "result", id: "other", result: null });
+		const result = { accepted: true, operationId: submit.operationId, session: "1" };
+		outbox.receive({ type: "result", id: "other", result });
 		expect(outbox.pending()).toEqual([submit]);
-		outbox.receive({ type: "result", id: submit.id, result: null });
+		outbox.receive({ type: "result", id: submit.id, result });
+		expect(outbox.pending()).toEqual([]);
+	});
+
+	it("retains the submit after malformed or mismatched receipts", () => {
+		const outbox = new PiCommandOutbox();
+		const submit = outbox.submit("hello");
+		const receipt = { operationId: submit.operationId, session: "1", accepted: false };
+		const invalid = [
+			null,
+			{ operationId: submit.operationId, accepted: true },
+			{ ...receipt, accepted: "false" },
+			{ ...receipt, operationId: "another operation" },
+		];
+		for (const result of invalid) {
+			outbox.receive({ type: "result", id: submit.id, result });
+			expect(outbox.pending()).toEqual([submit]);
+		}
+		outbox.receive({ type: "result", id: submit.id, result: receipt });
 		expect(outbox.pending()).toEqual([]);
 	});
 
@@ -69,7 +88,11 @@ describe("the client command outbox", () => {
 		expect(sent).toEqual([]);
 
 		const submit = outbox.submit("hello");
-		outbox.receive({ type: "result", id: submit.id, result: null });
+		outbox.receive({
+			type: "result",
+			id: submit.id,
+			result: { accepted: true, operationId: submit.operationId, session: "1" },
+		});
 		outbox.sendPending((data) => sent.push(data));
 		expect(sent).toEqual([]);
 	});

@@ -201,12 +201,12 @@ export const openPiSession = Effect.fn("openPiSession")(function* (
 						const decoded = decodeServerMessage(event.data);
 						if (Option.isNone(decoded)) break;
 						const message = decoded.value;
-						outbox.receive(message);
+						const settledSubmit = outbox.receive(message);
 						mirror.receive(message);
 						if (message.type === "hello") yield* update({ catalog: message.tools });
 						if (message.type !== "result" && message.type !== "error") break;
 						const { submission } = yield* SubscriptionRef.get(state);
-						if (submission?.status === "pending" && submission.id === message.id) {
+						if (settledSubmit && submission?.status === "pending" && submission.id === message.id) {
 							yield* update({
 								submission:
 									message.type === "result"

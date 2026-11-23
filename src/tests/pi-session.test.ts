@@ -27,6 +27,14 @@ class TestSocket extends EventTarget {
 	receive(message: unknown) {
 		this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(message) }));
 	}
+
+	acknowledge(submit: Extract<PiClientMessage, { type: "submit" }>, accepted = true) {
+		this.receive({
+			type: "result",
+			id: submit.id,
+			result: { operationId: submit.operationId, session: "1", accepted },
+		});
+	}
 }
 
 function snapshot(id: EntryId, before?: EntryId): Extract<PiServerMessage, { type: "view" }> {
@@ -136,7 +144,7 @@ describe("the scoped browser session", () => {
 
 			edit("new text");
 			edit("same text");
-			socket.receive({ type: "result", id: first.id, result: { accepted: true } });
+			socket.acknowledge(first);
 			await expect
 				.poll(() => registry.get(active).session)
 				.toMatchObject({
@@ -159,7 +167,7 @@ describe("the scoped browser session", () => {
 
 			submit();
 			await expect.poll(() => registry.get(composer).submitting).toBe(true);
-			socket.receive({ type: "result", id: latestSubmit().id, result: { accepted: true } });
+			socket.acknowledge(latestSubmit());
 			await expect
 				.poll(() => registry.get(composer))
 				.toEqual({ text: "", submitting: false, canSubmit: false });
@@ -216,7 +224,7 @@ describe("the scoped browser session", () => {
 					expect(socket.sent.slice(2)).toEqual([{ type: "watch", from: 2 }, submit]);
 
 					socket.receive(snapshot(2 as EntryId, 1 as EntryId));
-					socket.receive({ type: "result", id: submit.id, result: { accepted: false } });
+					socket.acknowledge(submit, false);
 					const acknowledged = yield* waitFor(
 						session.changes,
 						(state) => state.submission?.status === "accepted",
@@ -256,7 +264,7 @@ describe("the scoped browser session", () => {
 					expect(submissions.map((frame) => frame.input)).toEqual(["first draft", "second draft"]);
 					expect(submissions[1]?.whenBusy).toBe("steer");
 
-					socket.receive({ type: "result", id: submissions[0]!.id, result: { accepted: true } });
+					socket.acknowledge(submissions[0]!);
 					socket.receive({ type: "result", id: page.id, result: { items: [] } });
 					const loaded = yield* waitFor(session.changes, (state) => !state.loading);
 					expect(loaded).toMatchObject({

@@ -7,6 +7,7 @@ import type {
 	EntryRecord,
 	Page,
 } from "@earendil-works/pi-durable";
+import type { PiReceipt } from "agents/harness/pi";
 import { Schema } from "effect";
 
 /** Trajan's WebSocket messages. Pi supplies the transcript and its deltas. */
@@ -107,6 +108,13 @@ const serverMessage = Schema.Union([
 export const decodeClientMessage = Schema.decodeUnknownResult(clientMessage);
 export const decodeRequestId = Schema.decodeUnknownResult(requestId);
 export const decodeServerMessage = Schema.decodeUnknownOption(Schema.fromJsonString(serverMessage));
+export const isSubmitReceipt = Schema.is(
+	Schema.Struct({
+		operationId: Schema.NonEmptyString,
+		session: Schema.NonEmptyString,
+		accepted: Schema.Boolean,
+	}) satisfies Schema.Schema<PiReceipt>,
+);
 export const decodeEntriesPage = Schema.decodeUnknownOption(
 	Schema.declare((value): value is PiEntriesPage => hasPageShape(value)),
 );

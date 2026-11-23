@@ -44,7 +44,7 @@ npx playwright install chromium --only-shell
 npm run test:browser
 ```
 
-The test starts a local Worker fixture with temporary storage and a faux model. It drops a submit receipt, reconnects the real chat UI, and checks replay, draft preservation, and the Worker watch logs. The fixture log is in `.cloudflare/browser-smoke.log`.
+The test starts a local Worker fixture with temporary storage and a faux model. It replaces a submit receipt with invalid frames, reconnects the real chat UI, and checks replay, draft preservation, and the Worker watch logs. The fixture log is in `.cloudflare/browser-smoke.log`.
 
 Worker configuration lives in `cloudflare.config.ts`; the Worker is named `trajan`. `GET /api/health` checks HTTP availability. The default model is Workers AI `@cf/deepseek-ai/deepseek-v4.1-flash-1017`. Existing chats that used the retired GLM model switch when Pi opens them.
 

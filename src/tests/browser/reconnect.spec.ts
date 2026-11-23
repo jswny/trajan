@@ -4,7 +4,10 @@ import type { PiClientMessage, PiServerMessage } from "../../protocol";
 
 const workerLog = new URL("../../../.cloudflare/browser-smoke.log", import.meta.url);
 
-test("replays a lost receipt once and keeps the newer draft", async ({ page, request }) => {
+test("ignores invalid receipts, then replays the pending submit once", async ({
+	page,
+	request,
+}) => {
 	const prompt = "gate browser recovery";
 	const submissions: Array<Extract<PiClientMessage, { type: "submit" }>> = [];
 	const receipts: Array<Extract<PiServerMessage, { type: "result" }>> = [];
@@ -22,8 +25,23 @@ test("replays a lost receipt once and keeps the newer draft", async ({ page, req
 			if (message.type === "result" && message.id === submissions[0]?.id) {
 				receipts.push(message);
 				if (receipts.length === 1) {
-					// Pi has durably accepted the prompt. Keep this receipt off the browser's socket.
+					// Replace Pi's real receipt with invalid frames that carry the right request ID.
 					sessionId = new URL(client.url()).pathname.split("/").at(-1);
+					client.send(JSON.stringify({ ...message, result: null }));
+					client.send(
+						JSON.stringify({
+							...message,
+							result: { accepted: true, operationId: "another-operation", session: "1" },
+						}),
+					);
+					// A visible marker confirms that the client has processed both preceding frames.
+					client.send(
+						JSON.stringify({
+							type: "hello",
+							session: "1",
+							tools: [{ name: "receipt-test-marker", description: "Test marker" }],
+						}),
+					);
 					return;
 				}
 			}
@@ -37,12 +55,14 @@ test("replays a lost receipt once and keeps the newer draft", async ({ page, req
 	await composer.fill(prompt);
 	await composer.press("Enter");
 	await expect.poll(() => receipts[0]?.result).toMatchObject({ accepted: true });
+	await expect(page.getByText("receipt-test-marker", { exact: true })).toBeVisible();
+	await expect(page.locator("form")).toHaveAttribute("aria-busy", "true");
 	await expect(composer).toHaveValue(prompt);
 
 	// The newer revision deliberately ends up with the same text as the original.
 	await composer.fill("A newer draft");
 	await composer.fill(prompt);
-	if (!sessionId) throw new Error("Missing session for the withheld receipt");
+	if (!sessionId) throw new Error("Missing session for the intercepted receipt");
 	expect((await request.post(`/__browser-smoke/${sessionId}/disconnect`)).status()).toBe(204);
 	await expect.poll(() => receipts[1]?.result).toMatchObject({ accepted: false });
 	expect(submissions).toHaveLength(2);

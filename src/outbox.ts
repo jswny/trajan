@@ -1,6 +1,6 @@
 import type { UserInput } from "@earendil-works/pi-durable";
 import type { PiWhenBusy } from "agents/harness/pi";
-import type { PiClientMessage, PiServerMessage } from "./protocol";
+import { isSubmitReceipt, type PiClientMessage, type PiServerMessage } from "./protocol";
 
 /** A submit as the outbox sends it: always named, by id and operation id. */
 export type PiOutboxSubmit = Extract<PiClientMessage, { type: "submit" }> & {
@@ -15,8 +15,8 @@ export type PiOutboxSubmit = Extract<PiClientMessage, { type: "submit" }> & {
  * client read its result. Each submit carries an `operationId` equal to its
  * message id, which the harness deduplicates on, so sending it again returns
  * the same operation (`accepted: false`) instead of running the prompt
- * twice. The client keeps a submit here until a `result` or `error` with its
- * id arrives, and sends every pending one again when the socket opens.
+ * twice. The client keeps a submit here until a matching receipt or error
+ * arrives, and sends every pending one again when the socket opens.
  */
 export class PiCommandOutbox {
 	readonly #pending = new Map<string, PiOutboxSubmit>();
@@ -50,9 +50,17 @@ export class PiCommandOutbox {
 		this.#pending.clear();
 	}
 
-	/** Drop the submit a `result` or `error` answers. */
-	receive(message: PiServerMessage): void {
-		if (message.type !== "result" && message.type !== "error") return;
-		if (message.id !== undefined) this.#pending.delete(message.id);
+	/** Whether this reply settled a pending submit. */
+	receive(message: PiServerMessage): boolean {
+		if (message.type !== "result" && message.type !== "error") return false;
+		if (message.id === undefined) return false;
+		const pending = this.#pending.get(message.id);
+		if (!pending) return false;
+		if (
+			message.type === "result" &&
+			(!isSubmitReceipt(message.result) || message.result.operationId !== pending.operationId)
+		)
+			return false;
+		return this.#pending.delete(message.id);
 	}
 }
