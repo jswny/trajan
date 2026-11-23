@@ -206,6 +206,47 @@ test("waits for a snapshot before going Live and retries the watch on the same s
 	expect(watches).toEqual([{ type: "watch" }, { type: "watch" }]);
 });
 
+test("retries an invalid snapshot before making its transcript visible", async ({ page }) => {
+	await page.clock.install();
+	let snapshots = 0;
+	await page.routeWebSocket(/\/agents\/trajan\//, (client) => {
+		const server = client.connectToServer();
+		server.onMessage((data) => {
+			const message = JSON.parse(String(data)) as PiServerMessage;
+			if (message.type === "view" && ++snapshots === 1) {
+				const { view } = message;
+				client.send(
+					JSON.stringify({
+						...message,
+						view: {
+							...view,
+							entries: [
+								...view.entries,
+								{
+									id: 1234,
+									conversationId: view.conversation.id,
+									kind: "test.note",
+									model: [{ role: "user", timestamp: 0, content: "Malformed snapshot entry" }],
+								},
+							],
+							docs: { ...view.docs, "pi.inbox": {} },
+						},
+					}),
+				);
+				return;
+			}
+			client.send(data);
+		});
+	});
+	await page.goto("/");
+	await expect.poll(() => snapshots).toBe(1);
+	await expect(page.getByText("Syncing", { exact: true })).toBeVisible();
+	await page.clock.fastForward(6_000);
+	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	await expect(page.getByText("Malformed snapshot entry", { exact: true })).toHaveCount(0);
+	expect(snapshots).toBe(2);
+});
+
 test("keeps the transcript and offers manual sync after two snapshots go missing on reconnect", async ({
 	page,
 	request,

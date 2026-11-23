@@ -18,25 +18,18 @@ const entryQuery = Schema.Struct({
 	maxEntryId: Schema.optionalKey(entryId),
 	order: Schema.optionalKey(Schema.Literals(["ascending", "descending"])),
 });
-const userInput = Schema.Union([
-	Schema.String,
-	Schema.mutable(
-		Schema.Array(
-			Schema.Union([
-				Schema.Struct({
-					type: Schema.Literal("text"),
-					text: Schema.String,
-					textSignature: Schema.optionalKey(Schema.String),
-				}),
-				Schema.Struct({
-					type: Schema.Literal("image"),
-					data: Schema.String,
-					mimeType: Schema.String,
-				}),
-			]),
-		),
-	),
-]);
+const textContent = Schema.Struct({
+	type: Schema.Literal("text"),
+	text: Schema.String,
+	textSignature: Schema.optionalKey(Schema.String),
+});
+const imageContent = Schema.Struct({
+	type: Schema.Literal("image"),
+	data: Schema.String,
+	mimeType: Schema.String,
+});
+const textOrImageContent = Schema.Array(Schema.Union([textContent, imageContent]));
+const userInput = Schema.Union([Schema.String, Schema.mutable(textOrImageContent)]);
 
 const clientMessage = Schema.Union([
 	Schema.Struct({
@@ -66,7 +59,93 @@ const clientMessage = Schema.Union([
 ]);
 
 const toolInfo = Schema.Struct({ name: Schema.String, description: Schema.String });
-const entryShape = Schema.Struct({ id: entryId, conversationId: Schema.Int, kind: Schema.String });
+const assistantMessage = Schema.Struct({
+	role: Schema.Literal("assistant"),
+	timestamp: Schema.Number,
+	stopReason: Schema.String,
+	errorMessage: Schema.optionalKey(Schema.String),
+	content: Schema.Array(
+		Schema.Union([
+			textContent,
+			Schema.Struct({ type: Schema.Literal("thinking"), thinking: Schema.String }),
+			Schema.Struct({
+				type: Schema.Literal("toolCall"),
+				id: Schema.String,
+				name: Schema.String,
+				arguments: Schema.Json,
+			}),
+		]),
+	),
+});
+const transcriptMessage = Schema.Union([
+	Schema.Struct({ role: Schema.Literal("system"), timestamp: Schema.Number }),
+	Schema.Struct({
+		role: Schema.Literal("user"),
+		timestamp: Schema.Number,
+		content: userInput,
+	}),
+	assistantMessage,
+	Schema.Struct({
+		role: Schema.Literal("toolResult"),
+		timestamp: Schema.Number,
+		toolCallId: Schema.String,
+		toolName: Schema.String,
+		content: textOrImageContent,
+		isError: Schema.Boolean,
+		details: Schema.optionalKey(Schema.Json),
+	}),
+]);
+const entryShape = Schema.Struct({
+	id: entryId,
+	conversationId: Schema.Int,
+	kind: Schema.String,
+	// Trajan projects the first message contributed by an entry.
+	model: Schema.optionalKey(
+		Schema.Union([
+			Schema.Tuple([]),
+			Schema.TupleWithRest(Schema.Tuple([transcriptMessage]), [Schema.Unknown]),
+		]),
+	),
+});
+const document = Schema.Record(Schema.String, Schema.Unknown);
+const transcriptDocs = Schema.Struct({
+	"pi.live": Schema.optionalKey(
+		Schema.Struct({
+			run: Schema.optionalKey(document),
+			generation: Schema.optionalKey(
+				Schema.Struct({
+					message: Schema.optionalKey(assistantMessage),
+					retry: Schema.optionalKey(Schema.Struct({ at: Schema.Number, error: Schema.String })),
+				}),
+			),
+			tools: Schema.optionalKey(
+				Schema.Array(
+					Schema.Struct({
+						callId: Schema.String,
+						name: Schema.String,
+						status: Schema.String,
+						output: Schema.optionalKey(Schema.String),
+					}),
+				),
+			),
+			runFailure: Schema.optionalKey(
+				Schema.Struct({
+					reason: Schema.String,
+					detail: Schema.optionalKey(Schema.String),
+				}),
+			),
+		}),
+	),
+	"pi.inbox": Schema.optionalKey(Schema.Struct({ items: Schema.Array(Schema.Unknown) })),
+	"pi.agent": Schema.optionalKey(
+		Schema.Struct({
+			model: Schema.optionalKey(Schema.Struct({ provider: Schema.String, modelId: Schema.String })),
+		}),
+	),
+});
+const conversationDocs = Schema.StructWithRest(transcriptDocs, [
+	Schema.Record(Schema.String, document),
+]);
 const hasPageShape = Schema.is(
 	Schema.Struct({
 		items: Schema.Array(entryShape),
@@ -78,7 +157,7 @@ const hasViewShape = Schema.is(
 		conversation: Schema.Struct({ id: Schema.Int }),
 		entries: Schema.Array(entryShape),
 		before: Schema.optionalKey(entryId),
-		docs: Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown)),
+		docs: conversationDocs,
 	}),
 );
 
@@ -127,6 +206,8 @@ export type PiClientMessage = typeof clientMessage.Type;
 export type PiServerMessage = typeof serverMessage.Type;
 export type PiEntriesPage = Page<EntryRecord, Cursor>;
 export type PiCommandResult = JsonValue | PiEntriesPage;
+export type TranscriptDocs = typeof transcriptDocs.Type;
+export type TranscriptModelMessage = typeof transcriptMessage.Type;
 
 export type {
 	PiClientMessage as ClientMessage,

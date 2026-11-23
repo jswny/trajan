@@ -1,12 +1,6 @@
-import type {
-	AssistantMessage,
-	ImageContent,
-	JsonValue,
-	Message,
-	TextContent,
-	UserMessage,
-} from "@earendil-works/pi-ai";
+import type { ImageContent, JsonValue, Message, TextContent } from "@earendil-works/pi-ai";
 import type { EntryId, EntryRecord } from "@earendil-works/pi-durable";
+import type { TranscriptModelMessage } from "./protocol";
 
 /**
  * This app's display model for a transcript. The harness returns pi's own
@@ -62,11 +56,15 @@ export type PiMessage =
 			readonly upTo: EntryId;
 	  };
 
-function userParts(content: UserMessage["content"]): PiMessagePart[] {
+function userParts(
+	content: Extract<TranscriptModelMessage, { role: "user" }>["content"],
+): PiMessagePart[] {
 	return typeof content === "string" ? [{ type: "text", text: content }] : content;
 }
 
-function assistantParts(content: AssistantMessage["content"]): PiMessagePart[] {
+function assistantParts(
+	content: Extract<TranscriptModelMessage, { role: "assistant" }>["content"],
+): PiMessagePart[] {
 	return content.map((part): PiMessagePart => {
 		switch (part.type) {
 			case "text":
@@ -85,7 +83,7 @@ function assistantParts(content: AssistantMessage["content"]): PiMessagePart[] {
 }
 
 /** Project one pi-ai message. */
-export function projectMessage(message: Message, id: string): PiMessage {
+export function projectMessage(message: TranscriptModelMessage, id: string): PiMessage {
 	switch (message.role) {
 		case "system":
 			// pi records prompt changes as system entries; the UI does not show them.

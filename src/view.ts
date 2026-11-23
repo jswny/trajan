@@ -1,11 +1,5 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type {
-	AgentState,
-	InboxState,
-	LiveState,
-	TranscriptItem,
-	TranscriptView,
-} from "@earendil-works/pi-durable";
+import type { TranscriptItem, TranscriptView } from "@earendil-works/pi-durable";
+import type { TranscriptDocs } from "./protocol";
 import { projectEntry, projectMessage, type PiMessage } from "./transcript";
 
 /** A tool call running now, with its streamed output. */
@@ -57,8 +51,7 @@ export const EMPTY_VIEW: PiSessionView = {
 const LIVE_ID = "live";
 
 /** Why a run ended without an answer, unless the user stopped it. */
-function failure(live: LiveState): string | null {
-	const failed = live.runFailure;
+function failure(failed: NonNullable<TranscriptDocs["pi.live"]>["runFailure"]): string | null {
 	if (failed === undefined || failed.reason === "aborted") return null;
 	return failed.detail === undefined
 		? `Not answered: ${failed.reason}`
@@ -127,10 +120,12 @@ function projectItems(all: readonly TranscriptItem[]): ProjectedItems {
  * not part of the harness.
  */
 export function projectView(view: TranscriptView): PiSessionView {
-	const live = (view.docs["pi.live"] ?? {}) as LiveState;
-	const inbox = view.docs["pi.inbox"] as InboxState | undefined;
-	const agent = view.docs["pi.agent"] as AgentState | undefined;
-	const partial = live.generation?.message as AssistantMessage | undefined;
+	const {
+		"pi.live": live = {},
+		"pi.inbox": inbox,
+		"pi.agent": agent,
+	} = view.docs as TranscriptDocs;
+	const partial = live.generation?.message;
 	const { messages, earlier } = projectItems(view.items);
 	return {
 		messages,
@@ -147,6 +142,6 @@ export function projectView(view: TranscriptView): PiSessionView {
 		queued: inbox?.items.length ?? 0,
 		retry: live.generation?.retry ?? null,
 		model: agent?.model ?? null,
-		error: failure(live),
+		error: failure(live.runFailure),
 	};
 }
