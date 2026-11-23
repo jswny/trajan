@@ -1,8 +1,3 @@
-import {
-	BACKGROUND_CONTEXT,
-	withAbortSignal,
-	type Context as ChordContext,
-} from "@earendil-works/chord/context";
 import type { EntryId } from "@earendil-works/pi-durable";
 import { AgentClient } from "agents/client";
 import {
@@ -13,6 +8,7 @@ import {
 	Layer,
 	Option,
 	Queue,
+	Result,
 	Stream,
 	SubscriptionRef,
 } from "effect";
@@ -93,7 +89,9 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 		SubscriptionRef.update(state, (current) => ({ ...current, ...patch }));
 	// Pi calls the page loader through a Promise. Keep the session clock across that boundary.
 	const runPage = Effect.runPromiseWith(yield* Effect.context());
-	const mirror = new PiSessionMirror((view) => Effect.runSync(update(view)), runPage);
+	const mirror = new PiSessionMirror(runPage);
+	const publishView = (patch?: Partial<SessionState>) =>
+		SubscriptionRef.update(state, (current) => ({ ...current, ...mirror.view, ...patch }));
 	const outbox = new PiCommandOutbox();
 	const scope = yield* Effect.scope;
 	const events = yield* Queue.unbounded<SessionEvent>();
@@ -118,9 +116,8 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 			socket.removeEventListener("close", onClose);
 			socket.removeEventListener("message", onMessage);
 			socket.close();
-			mirror.close();
 			outbox.clear();
-		}),
+		}).pipe(Effect.andThen(mirror.close())),
 	);
 
 	const send = (message: ClientMessage) => {
@@ -170,7 +167,7 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 		deadlines.set(submit.id, { event, fiber });
 	});
 
-	const load = (request: (context: ChordContext) => Promise<void>) =>
+	const load = (request: Effect.Effect<SessionView | undefined, unknown>) =>
 		Effect.uninterruptibleMask((restore) =>
 			Effect.gen(function* () {
 				const started = yield* SubscriptionRef.modify(state, (current) =>
@@ -181,10 +178,8 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 				if (!started) return;
 
 				yield* restore(
-					Effect.tryPromise({
-						try: (signal) => request(withAbortSignal(signal, BACKGROUND_CONTEXT)),
-						catch: (error) => error,
-					}).pipe(
+					request.pipe(
+						Effect.flatMap((view) => (view === undefined ? Effect.void : publishView())),
 						Effect.catch((error) => {
 							if (error instanceof HistoryDisconnected) return Effect.void;
 							const historyError = Cause.isTimeoutError(error)
@@ -241,16 +236,10 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 					}
 					return;
 				case "loadEarlier":
-					yield* Effect.forkIn(
-						load((context) => mirror.loadEarlier(context)),
-						scope,
-					);
+					yield* Effect.forkIn(load(mirror.loadEarlier()), scope);
 					return;
 				case "fillGap":
-					yield* Effect.forkIn(
-						load((context) => mirror.fillGap(command.gap, context)),
-						scope,
-					);
+					yield* Effect.forkIn(load(mirror.fillGap(command.gap)), scope);
 					return;
 			}
 		});
@@ -277,7 +266,7 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 						break;
 					}
 					case "close": {
-						mirror.close();
+						yield* mirror.close();
 						yield* cancelWatchDeadline;
 						const fibers = Array.from(deadlines.values(), ({ fiber }) => fiber);
 						deadlines.clear();
@@ -315,15 +304,20 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 						const decoded = decodeServerMessage(event.data);
 						if (Option.isNone(decoded)) break;
 						const message = decoded.value;
-						mirror.receive(message);
-						if (message.type === "view") {
+						const received = yield* Effect.result(mirror.receive(message));
+						if (Result.isFailure(received)) {
 							const { status, transcriptStatus } = yield* SubscriptionRef.get(state);
-							if (status === "open" && transcriptStatus !== "synced") {
+							if (status === "open" && transcriptStatus === "synced") yield* startWatch(true);
+							break;
+						}
+						if (message.type === "view") {
+							if (received.success !== undefined) {
 								yield* cancelWatchDeadline;
-								yield* update({ transcriptStatus: "synced" });
+								yield* publishView({ transcriptStatus: "synced" });
 							}
 							break;
 						}
+						if (received.success !== undefined) yield* publishView();
 						if (message.type === "hello") yield* update({ catalog: message.tools });
 						if (message.type !== "result" && message.type !== "error") break;
 						const settledId = outbox.receive(message) ? message.id : undefined;

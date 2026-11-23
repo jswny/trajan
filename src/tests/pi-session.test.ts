@@ -271,6 +271,39 @@ describe("the scoped browser session", () => {
 		expect(socket.readyState).toBe(WebSocket.CLOSED);
 	});
 
+	it("keeps the transcript and asks for a new snapshot when a patch invalidates the view", async () => {
+		const socket = new TestSocket();
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* openPiSession(() => socket);
+					socket.receive(snapshot(5 as EntryId));
+					yield* waitFor(session.changes, (state) => state.transcriptStatus === "synced");
+
+					socket.receive({ type: "ops", session: "1", ops: [["d", ["entries"]]] });
+					const syncing = yield* waitFor(
+						session.changes,
+						(state) => state.transcriptStatus === "syncing",
+					);
+					expect(syncing).toMatchObject({
+						value: { status: "open", messages: [{ parts: [{ text: "Note 5" }] }] },
+					});
+					yield* Effect.promise(() =>
+						expect.poll(() => socket.sent).toEqual([{ type: "watch" }, { type: "watch", from: 6 }]),
+					);
+					socket.receive(snapshot(6 as EntryId, 5 as EntryId));
+					const restored = yield* waitFor(
+						session.changes,
+						(state) => state.transcriptStatus === "synced",
+					);
+					expect(restored).toMatchObject({
+						value: { messages: [{ parts: [{ text: "Note 5" }] }, { parts: [{ text: "Note 6" }] }] },
+					});
+				}),
+			),
+		);
+	});
+
 	it("lets a late receipt confirm an older submission without changing the latest draft", async () => {
 		const socket = new TestSocket();
 		await Effect.runPromise(

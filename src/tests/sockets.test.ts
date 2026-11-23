@@ -11,7 +11,7 @@ import {
 import { routeAgentRequest } from "agents";
 import { PiHarness, ROOT_SESSION } from "agents/harness/pi";
 import type { Connection } from "agents/lifecycle";
-import { Option } from "effect";
+import { Effect, Option } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { PiSessionMirror } from "../mirror";
 import { decodeServerMessage, type PiServerMessage } from "../protocol";
@@ -41,7 +41,7 @@ function closed(socket: WebSocket): Promise<number> {
  * a socket opens, and mirrors every frame into a `PiSessionMirror`.
  */
 function follow(socket: WebSocket) {
-	const mirror = new PiSessionMirror(() => {});
+	const mirror = new PiSessionMirror();
 	const frames: PiServerMessage[] = [];
 	const waiters: Array<() => void> = [];
 	const attach = (next: WebSocket) => {
@@ -50,7 +50,7 @@ function follow(socket: WebSocket) {
 			if (Option.isNone(decoded)) return;
 			const frame = decoded.value;
 			frames.push(frame);
-			mirror.receive(frame);
+			Effect.runSync(mirror.receive(frame));
 			for (const waiter of waiters.splice(0)) waiter();
 		});
 		mirror.open((message) => {
@@ -62,7 +62,7 @@ function follow(socket: WebSocket) {
 	attach(socket);
 	/** The socket dropped; follow on `next`, as a reconnect does. */
 	const reconnect = (next: WebSocket) => {
-		mirror.close();
+		Effect.runSync(mirror.close());
 		attach(next);
 	};
 	const until = async (check: () => boolean) => {
@@ -467,7 +467,7 @@ describe("the session WebSocket protocol", () => {
 
 		let pages = 0;
 		while (client.view().earlier) {
-			await client.mirror.loadEarlier();
+			await Effect.runPromise(client.mirror.loadEarlier());
 			pages++;
 		}
 		expect(pages).toBeGreaterThan(1);
@@ -487,7 +487,7 @@ describe("the session WebSocket protocol", () => {
 		await client.until(() => client.views() > 0);
 		expect(client.view().earlier).toBe(true);
 
-		await client.mirror.loadEarlier();
+		await Effect.runPromise(client.mirror.loadEarlier());
 		// The page reached the reset: nothing before it shows or loads.
 		expect(client.view().earlier).toBe(false);
 		const { messages } = client.view();
@@ -523,7 +523,7 @@ describe("the session WebSocket protocol", () => {
 					(message): message is Extract<PiMessage, { role: "gap" }> => message.role === "gap",
 				);
 		for (let next = nextGap(); next !== undefined; next = nextGap()) {
-			await client.mirror.fillGap(next);
+			await Effect.runPromise(client.mirror.fillGap(next));
 		}
 		expect(notes(client.view().messages, "missed")).toEqual(numbered("missed", 200));
 		second.close();

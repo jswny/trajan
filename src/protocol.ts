@@ -83,7 +83,10 @@ const hasViewShape = Schema.is(
 );
 
 // Check the shape needed by the client and preserve Pi's full payload.
-const view = Schema.declare((value): value is ConversationView => hasViewShape(value));
+export function isConversationView(value: unknown): value is ConversationView {
+	return hasViewShape(value);
+}
+const view = Schema.declare(isConversationView);
 const op = Schema.declare((value): value is Op => {
 	try {
 		assertValidOp(value);
