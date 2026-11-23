@@ -16,7 +16,7 @@ export type PiOutboxSubmit = Extract<PiClientMessage, { type: "submit" }> & {
  * message id, which the harness deduplicates on, so sending it again returns
  * the same operation (`accepted: false`) instead of running the prompt
  * twice. The client keeps a submit here until a matching receipt or error
- * arrives, and sends every pending one again when the socket opens.
+ * arrives, so reconnect and receipt recovery can send the same command.
  */
 export class PiCommandOutbox {
 	readonly #pending = new Map<string, PiOutboxSubmit>();
@@ -38,11 +38,6 @@ export class PiCommandOutbox {
 	/** Unanswered submits, oldest first. */
 	pending(): PiOutboxSubmit[] {
 		return [...this.#pending.values()];
-	}
-
-	/** Send every unanswered submit again, as the socket opens. */
-	sendPending(send: (data: string) => void): void {
-		for (const command of this.#pending.values()) send(JSON.stringify(command));
 	}
 
 	/** Forget every unanswered submit. */

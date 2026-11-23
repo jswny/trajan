@@ -54,11 +54,15 @@ export function makeSessionAtoms(live: typeof PiSession.live = (id) => PiSession
 			const draft = get(draftAtom);
 			const session = AsyncResult.getOrElse(get(activeSessionAtom).session, () => undefined);
 			const submission = session?.state.submission;
-			const submitting = submission?.status === "pending" && submission.draft === draft;
+			const currentSubmission = submission?.draft === draft ? submission.status : undefined;
 			return {
 				text: draft.text,
-				submitting,
-				canSubmit: session?.state.status === "open" && !submitting && draft.text.trim() !== "",
+				submitting: currentSubmission === "pending",
+				canSubmit:
+					session?.state.status === "open" &&
+					currentSubmission !== "pending" &&
+					currentSubmission !== "unconfirmed" &&
+					draft.text.trim() !== "",
 			};
 		},
 		(ctx, action) => {

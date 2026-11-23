@@ -32,7 +32,7 @@ function replay(socket: WebSocket, outbox: PiCommandOutbox, id: string): Promise
 			}
 		});
 	});
-	outbox.sendPending((data) => socket.send(data));
+	for (const submit of outbox.pending()) socket.send(JSON.stringify(submit));
 	return answered;
 }
 
@@ -79,22 +79,6 @@ describe("the client command outbox", () => {
 		const submit = outbox.submit("hello");
 		outbox.receive({ type: "error", id: submit.id, message: "rejected" });
 		expect(outbox.pending()).toEqual([]);
-	});
-
-	it("sends nothing on open with nothing pending", () => {
-		const outbox = new PiCommandOutbox();
-		const sent: string[] = [];
-		outbox.sendPending((data) => sent.push(data));
-		expect(sent).toEqual([]);
-
-		const submit = outbox.submit("hello");
-		outbox.receive({
-			type: "result",
-			id: submit.id,
-			result: { accepted: true, operationId: submit.operationId, session: "1" },
-		});
-		outbox.sendPending((data) => sent.push(data));
-		expect(sent).toEqual([]);
 	});
 
 	it("sends an unanswered submit again on reconnect without running it twice", async () => {

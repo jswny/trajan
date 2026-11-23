@@ -44,7 +44,7 @@ npx playwright install chromium --only-shell
 npm run test:browser
 ```
 
-The test starts a local Worker fixture with temporary storage and a faux model. It replaces a submit receipt with invalid frames, reconnects the real chat UI, and checks replay, draft preservation, and the Worker watch logs. The fixture log is in `.cloudflare/browser-smoke.log`.
+The tests start a local Worker fixture with temporary storage and a faux model. They check reconnect recovery, missing receipts on an open socket, and manual retry when automatic replay stays unconfirmed. They verify that replay preserves drafts and Pi runs the prompt once. The fixture log is in `.cloudflare/browser-smoke.log`.
 
 Worker configuration lives in `cloudflare.config.ts`; the Worker is named `trajan`. `GET /api/health` checks HTTP availability. The default model is Workers AI `@cf/deepseek-ai/deepseek-v4.1-flash-1017`. Existing chats that used the retired GLM model switch when Pi opens them.
 
@@ -54,7 +54,7 @@ After a conversation runs on Pi 1.6, roll forward to fix production issues. Pi 1
 
 - `src/server.ts` composes `PiHarness`, `Lifecycle`, WebSockets, and the durable workspace in a `Trajan` Durable Object. Each browser chat uses its own object and Pi's root conversation.
 - Pi Durable owns the model loop, inbox, transcript, retries, compaction, and recovery. The SDK stores Pi's state in SQLite and schedules a wake job for running and sleeping tasks.
-- `src/sockets.ts` sends session snapshots and patches; `src/mirror.ts` keeps the client transcript and loads older entries. `src/outbox.ts` deduplicates submissions resent after socket reconnects; this outbox is in memory, not persisted across page reloads.
+- `src/sockets.ts` sends session snapshots and patches. `src/mirror.ts` keeps the client transcript and loads older entries. The in-memory outbox in `src/outbox.ts` preserves operation IDs for reconnect and receipt recovery. Pi deduplicates the replays.
 - `src/workspace.ts` adapts file tools. `exec` runs JavaScript ES modules in fresh Dynamic Workers, with workspace filesystem access and a host Git module. It is not a shell and cannot install npm packages. Reads, whole-file writes, and deletes are replay-safe; edits and arbitrary execution are not automatically replayed.
 - `src/tests` retains the upstream runtime tests for WebSocket recovery, transcript paging, reconnect deduplication, and workspace tool declarations.
 

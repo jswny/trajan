@@ -90,3 +90,72 @@ test("ignores invalid receipts, then replays the pending submit once", async ({
 		})
 		.toBe(2);
 });
+
+for (const lostReceipts of [1, 2]) {
+	test(`recovers on the same socket when ${lostReceipts === 1 ? "the first receipt is" : "both receipts are"} lost`, async ({
+		page,
+		request,
+	}) => {
+		const prompt = "gate browser recovery";
+		const submissions: Array<Extract<PiClientMessage, { type: "submit" }>> = [];
+		const receipts: Array<Extract<PiServerMessage, { type: "result" }>> = [];
+		const connections: string[] = [];
+		await page.clock.install();
+		await page.routeWebSocket(/\/agents\/trajan\//, (client) => {
+			connections.push(client.url());
+			const server = client.connectToServer();
+			client.onMessage((data) => {
+				const message = JSON.parse(String(data)) as PiClientMessage;
+				if (message.type === "submit") submissions.push(message);
+				server.send(data);
+			});
+			server.onMessage((data) => {
+				const message = JSON.parse(String(data)) as PiServerMessage;
+				if (message.type === "result" && message.id === submissions[0]?.id) {
+					receipts.push(message);
+					if (receipts.length <= lostReceipts) return;
+				}
+				client.send(data);
+			});
+		});
+
+		await page.goto("/");
+		await expect(page.getByText("Live", { exact: true })).toBeVisible();
+		const composer = page.getByRole("textbox", { name: "Message Trajan" });
+		await composer.fill(prompt);
+		await composer.press("Enter");
+		await expect.poll(() => receipts[0]?.result).toMatchObject({ accepted: true });
+		await expect(page.locator("form")).toHaveAttribute("aria-busy", "true");
+		await page.clock.fastForward(6_000);
+		await expect.poll(() => receipts[1]?.result).toMatchObject({ accepted: false });
+
+		const retry = page.getByRole("button", { name: "Retry sending" });
+		if (lostReceipts === 2) {
+			await page.clock.fastForward(6_000);
+			await expect(retry).toBeVisible();
+			await expect(page.locator("form")).toHaveAttribute("aria-busy", "false");
+			await expect(composer).toHaveValue(prompt);
+			await composer.press("Enter");
+			await page.clock.fastForward(6_000);
+			expect(submissions).toHaveLength(2);
+			await retry.click();
+			await expect.poll(() => receipts[2]?.result).toMatchObject({ accepted: false });
+		}
+
+		await expect(composer).toHaveValue("");
+		await expect(retry).toHaveCount(0);
+		await expect(page.locator("form")).toHaveAttribute("aria-busy", "false");
+		await page.clock.fastForward(6_000);
+		expect(submissions).toEqual(Array.from({ length: lostReceipts + 1 }, () => submissions[0]));
+		expect(connections).toHaveLength(1);
+
+		const sessionId = new URL(connections[0]!).pathname.split("/").at(-1);
+		const release = await request.post(`/__browser-smoke/${sessionId}/release`);
+		expect(release.status()).toBe(204);
+		const transcript = page.getByRole("main");
+		await expect(
+			transcript.getByText("tool said: released after 1 runs", { exact: true }),
+		).toBeVisible();
+		await expect(transcript.getByText(prompt, { exact: true })).toHaveCount(1);
+	});
+}

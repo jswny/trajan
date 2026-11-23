@@ -9,6 +9,7 @@ import {
 	Cause,
 	Context,
 	Effect,
+	Fiber,
 	Layer,
 	Option,
 	Queue,
@@ -17,7 +18,7 @@ import {
 	type Duration,
 } from "effect";
 import { HistoryDisconnected, isHistoryRequest, PiSessionMirror } from "./mirror";
-import { PiCommandOutbox } from "./outbox";
+import { PiCommandOutbox, type PiOutboxSubmit } from "./outbox";
 import {
 	decodeServerMessage,
 	type ClientMessage,
@@ -30,8 +31,10 @@ import { EMPTY_VIEW } from "./view";
 export type PromptDraft = { readonly text: string };
 export type SubmitMode = "followUp" | "steer";
 
+const RECEIPT_TIMEOUT = "5 seconds";
+
 type Submission = { readonly id: string; readonly draft: PromptDraft } & (
-	| { readonly status: "pending" | "accepted" }
+	| { readonly status: "pending" | "accepted" | "unconfirmed" }
 	| { readonly status: "rejected"; readonly message: string }
 );
 
@@ -41,6 +44,7 @@ type SessionState = SessionView & {
 	readonly loading: boolean;
 	readonly historyError: string | null;
 	readonly submission: Submission | null;
+	readonly unconfirmedSubmissions: readonly PiOutboxSubmit[];
 };
 
 export const INITIAL_SESSION_STATE: SessionState = {
@@ -50,18 +54,21 @@ export const INITIAL_SESSION_STATE: SessionState = {
 	loading: false,
 	historyError: null,
 	submission: null,
+	unconfirmedSubmissions: [],
 };
 
 type Gap = { after: EntryId; upTo: EntryId };
 
 export type SessionCommand =
 	| { type: "submit"; draft: PromptDraft; whenBusy?: SubmitMode }
+	| { type: "retrySubmit"; id: string }
 	| { type: "abort" | "reset" }
 	| { type: "loadEarlier" }
 	| { type: "fillGap"; gap: Gap };
 
 type SocketEvent = { type: "open" | "close" } | { type: "message"; data: unknown };
-type SessionEvent = SocketEvent | { type: "command"; command: SessionCommand };
+type ReceiptTimeout = { type: "receiptTimeout"; submit: PiOutboxSubmit; canReplay: boolean };
+type SessionEvent = SocketEvent | ReceiptTimeout | { type: "command"; command: SessionCommand };
 
 type Socket = {
 	readonly readyState: number;
@@ -83,6 +90,7 @@ export const openPiSession = Effect.fn("openPiSession")(function* (
 	const outbox = new PiCommandOutbox();
 	const scope = yield* Effect.scope;
 	const events = yield* Queue.unbounded<SessionEvent>();
+	const deadlines = new Map<string, { event: ReceiptTimeout; fiber: Fiber.Fiber<void> }>();
 	yield* Effect.addFinalizer(() => Queue.shutdown(events));
 
 	// Process socket events and commands in the order they arrive.
@@ -107,16 +115,33 @@ export const openPiSession = Effect.fn("openPiSession")(function* (
 		}),
 	);
 
-	const sendRaw = (data: string) => {
+	const send = (message: ClientMessage) => {
 		if (socket.readyState !== WebSocket.OPEN) return false;
 		try {
-			socket.send(data);
+			socket.send(JSON.stringify(message));
 			return true;
 		} catch {
 			return false;
 		}
 	};
-	const send = (message: ClientMessage) => sendRaw(JSON.stringify(message));
+	const cancelDeadline = Effect.fnUntraced(function* (id: string) {
+		const deadline = deadlines.get(id);
+		if (deadline === undefined) return;
+		deadlines.delete(id);
+		yield* Fiber.interrupt(deadline.fiber);
+	});
+
+	const sendSubmit = Effect.fnUntraced(function* (submit: PiOutboxSubmit, canReplay: boolean) {
+		yield* cancelDeadline(submit.id);
+		send(submit);
+		const event: ReceiptTimeout = { type: "receiptTimeout", submit, canReplay };
+		const fiber = yield* Effect.sleep(RECEIPT_TIMEOUT).pipe(
+			Effect.andThen(Queue.offer(events, event)),
+			Effect.asVoid,
+			Effect.forkIn(scope),
+		);
+		deadlines.set(submit.id, { event, fiber });
+	});
 
 	const load = (request: (context: ChordContext) => Promise<void>) =>
 		Effect.uninterruptibleMask((restore) =>
@@ -153,11 +178,28 @@ export const openPiSession = Effect.fn("openPiSession")(function* (
 				case "submit": {
 					const { status, submission } = yield* SubscriptionRef.get(state);
 					const text = command.draft.text.trim();
-					if (!text || (submission?.status === "pending" && submission.draft === command.draft))
+					if (
+						!text ||
+						((submission?.status === "pending" || submission?.status === "unconfirmed") &&
+							submission.draft === command.draft)
+					)
 						return;
 					const submit = outbox.submit(text, command.whenBusy ?? "followUp");
-					if (status === "open") send(submit);
+					if (status === "open") yield* sendSubmit(submit, true);
 					yield* update({ submission: { id: submit.id, draft: command.draft, status: "pending" } });
+					return;
+				}
+				case "retrySubmit": {
+					const { status, submission, unconfirmedSubmissions } = yield* SubscriptionRef.get(state);
+					if (status !== "open") return;
+					const submit = unconfirmedSubmissions.find(({ id }) => id === command.id);
+					if (submit === undefined) return;
+					yield* sendSubmit(submit, false);
+					yield* update({
+						submission:
+							submission?.id === submit.id ? { ...submission, status: "pending" } : submission,
+						unconfirmedSubmissions: unconfirmedSubmissions.filter((item) => item !== submit),
+					});
 					return;
 				}
 				case "abort":
@@ -188,32 +230,69 @@ export const openPiSession = Effect.fn("openPiSession")(function* (
 					case "command":
 						yield* handleCommand(event.command);
 						break;
-					case "open":
+					case "open": {
 						mirror.open(send);
-						outbox.sendPending(sendRaw);
-						yield* update({ status: "open" });
+						for (const submit of outbox.pending()) yield* sendSubmit(submit, true);
+						const { submission } = yield* SubscriptionRef.get(state);
+						yield* update({
+							status: "open",
+							submission:
+								submission?.status === "unconfirmed"
+									? { ...submission, status: "pending" }
+									: submission,
+							unconfirmedSubmissions: [],
+						});
 						break;
-					case "close":
+					}
+					case "close": {
 						mirror.close();
+						const fibers = Array.from(deadlines.values(), ({ fiber }) => fiber);
+						deadlines.clear();
+						yield* Fiber.interruptAll(fibers);
 						yield* update({ status: "closed", historyError: null });
 						break;
+					}
+					case "receiptTimeout": {
+						const { submit, canReplay } = event;
+						// A receipt, disconnect or fresh send can invalidate a queued timeout.
+						if (deadlines.get(submit.id)?.event !== event) break;
+						deadlines.delete(submit.id);
+						if (canReplay) {
+							yield* sendSubmit(submit, false);
+							break;
+						}
+						const { submission, unconfirmedSubmissions } = yield* SubscriptionRef.get(state);
+						yield* update({
+							submission:
+								submission?.id === submit.id
+									? { ...submission, status: "unconfirmed" }
+									: submission,
+							unconfirmedSubmissions: [...unconfirmedSubmissions, submit],
+						});
+						break;
+					}
 					case "message": {
 						const decoded = decodeServerMessage(event.data);
 						if (Option.isNone(decoded)) break;
 						const message = decoded.value;
-						const settledSubmit = outbox.receive(message);
 						mirror.receive(message);
 						if (message.type === "hello") yield* update({ catalog: message.tools });
 						if (message.type !== "result" && message.type !== "error") break;
-						const { submission } = yield* SubscriptionRef.get(state);
-						if (settledSubmit && submission?.status === "pending" && submission.id === message.id) {
+						const settledId = outbox.receive(message) ? message.id : undefined;
+						const { submission, unconfirmedSubmissions } = yield* SubscriptionRef.get(state);
+						const settledLatest = settledId !== undefined && submission?.id === settledId;
+						if (settledId !== undefined) {
+							yield* cancelDeadline(settledId);
 							yield* update({
-								submission:
-									message.type === "result"
+								submission: !settledLatest
+									? submission
+									: message.type === "result"
 										? { ...submission, status: "accepted" }
 										: { ...submission, status: "rejected", message: message.message },
+								unconfirmedSubmissions: unconfirmedSubmissions.filter(({ id }) => id !== settledId),
 							});
-						} else if (message.type === "error" && !isHistoryRequest(message.id)) {
+						}
+						if (!settledLatest && message.type === "error" && !isHistoryRequest(message.id)) {
 							yield* update({ error: message.message });
 						}
 						break;

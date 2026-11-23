@@ -412,9 +412,11 @@ function App() {
 		error,
 		historyError,
 		submission,
+		unconfirmedSubmissions,
 		composer: { text: prompt, canSubmit, submitting },
 		editPrompt: setPrompt,
 		submit: submitPrompt,
+		retrySubmit,
 		abort,
 		loadEarlier,
 		fillGap,
@@ -633,6 +635,22 @@ function App() {
 				</main>
 
 				<div className="shrink-0 border-t border-kumo-line bg-kumo-base">
+					{unconfirmedSubmissions.map(({ id, input }) => (
+						<div key={id} className="mx-auto flex max-w-3xl items-center gap-3 px-5 pt-3">
+							<p role="status" className="flex-1 truncate text-sm text-kumo-subtle">
+								Couldn’t confirm delivery{typeof input === "string" ? ` of “${input}”` : ""}.
+							</p>
+							<Button
+								type="button"
+								variant="secondary"
+								size="sm"
+								disabled={!connected}
+								onClick={() => retrySubmit(id)}
+							>
+								Retry sending
+							</Button>
+						</div>
+					))}
 					{submission?.status === "rejected" ? (
 						<p role="alert" className="mx-auto max-w-3xl px-5 pt-3 text-sm text-kumo-danger">
 							{submission.message}

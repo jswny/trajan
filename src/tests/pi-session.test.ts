@@ -1,6 +1,7 @@
 import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
 import { Effect, Exit, Layer, Scope, Stream } from "effect";
 import { AtomRegistry } from "effect/reactivity";
+import { TestClock } from "effect/testing";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { openPiSession, PiSession, type INITIAL_SESSION_STATE } from "../pi-session";
 import type { PiClientMessage, PiServerMessage } from "../protocol";
@@ -219,6 +220,8 @@ describe("the scoped browser session", () => {
 					}
 					socket.close();
 					yield* waitFor(session.changes, (state) => state.status === "closed");
+					yield* TestClock.adjust("10 seconds");
+					expect(socket.sent.slice(2)).toEqual([]);
 					socket.reconnect();
 					yield* waitFor(session.changes, (state) => state.status === "open");
 					expect(socket.sent.slice(2)).toEqual([{ type: "watch", from: 2 }, submit]);
@@ -236,11 +239,48 @@ describe("the scoped browser session", () => {
 					yield* waitFor(session.changes, (state) => state.status === "closed");
 					socket.reconnect();
 					yield* waitFor(session.changes, (state) => state.status === "open");
+					yield* TestClock.adjust("10 seconds");
 					expect(socket.sent.slice(4)).toEqual([{ type: "watch", from: 3 }]);
 				}),
-			),
+			).pipe(Effect.provide(TestClock.layer())),
 		);
 		expect(socket.readyState).toBe(WebSocket.CLOSED);
+	});
+
+	it("lets a late receipt confirm an older submission without changing the latest draft", async () => {
+		const socket = new TestSocket();
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* openPiSession(() => socket);
+					yield* waitFor(session.changes, (state) => state.status === "open");
+					const latestDraft = { text: "latest" };
+					session.dispatch({ type: "submit", draft: { text: "older" } });
+					session.dispatch({ type: "submit", draft: latestDraft });
+					yield* waitFor(session.changes, (state) => state.submission?.draft === latestDraft);
+					const [older, latest] = socket.sent.filter((frame) => frame.type === "submit");
+					socket.acknowledge(latest!);
+					yield* waitFor(session.changes, (state) => state.submission?.status === "accepted");
+
+					yield* TestClock.adjust("10 seconds");
+					const unconfirmed = yield* waitFor(
+						session.changes,
+						(state) => state.unconfirmedSubmissions.length === 1,
+					);
+					expect(unconfirmed).toMatchObject({ value: { unconfirmedSubmissions: [older] } });
+					expect(socket.sent.slice(1)).toEqual([older, latest, older]);
+
+					socket.acknowledge(older!, false);
+					const confirmed = yield* waitFor(
+						session.changes,
+						(state) => state.unconfirmedSubmissions.length === 0,
+					);
+					expect(confirmed).toMatchObject({
+						value: { submission: { draft: latestDraft, status: "accepted" } },
+					});
+				}),
+			).pipe(Effect.provide(TestClock.layer())),
+		);
 	});
 
 	it("processes commands during paging and matches receipts to the latest draft", async () => {
