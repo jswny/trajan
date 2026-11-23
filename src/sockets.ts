@@ -9,7 +9,7 @@ import type {
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 import { ROOT_SESSION, type PiHarness, type PiSessionId } from "agents/harness/pi";
-import { Effect, Exit, Logger, Result, Scope } from "effect";
+import { Effect, Exit, Logger, Result, Schema, Scope } from "effect";
 import {
 	decodeClientMessage,
 	decodeRequestId,
@@ -25,6 +25,11 @@ const MAX_PAGE = 100;
 /** `WebSocket.OPEN`; the constant is not defined on every runtime's global. */
 const OPEN = 1;
 const watchLogger = Logger.layer([Logger.withLeveledConsole(Logger.formatStructured)]);
+const parseFrame = Schema.decodeUnknownResult(Schema.fromJsonString(Schema.Unknown));
+
+function callPi<A>(run: () => Promise<A>) {
+	return Effect.tryPromise({ try: run, catch: (error) => error });
+}
 
 type WatchTrigger =
 	| { readonly trigger: "client_request" | "hibernation_reattach" }
@@ -91,23 +96,22 @@ function resumeAfter(view: ConversationView): ConversationWindow {
 	return newest === undefined ? {} : { from: (newest + 1) as EntryId };
 }
 
-function send(socket: WebSocket, message: PiServerMessage): void {
-	if (socket.readyState !== OPEN) return;
+function send(socket: WebSocket, message: PiServerMessage): boolean {
+	if (socket.readyState !== OPEN) return false;
 	try {
 		socket.send(JSON.stringify(message));
+		return true;
 	} catch {
-		// The socket closed between the state check and the send.
+		return false;
 	}
 }
 
-async function closeWatchScope(scope: Scope.Closeable): Promise<void> {
+const closeWatchScope = Effect.fnUntraced(function* (scope: Scope.Closeable) {
 	const startedAt = performance.now();
-	try {
-		await Effect.runPromise(Scope.close(scope, Exit.void));
-	} catch {
-		Effect.runSync(watchLog("pi_session_watch_cleanup", "failed", startedAt));
-	}
-}
+	yield* Scope.close(scope, Exit.void).pipe(
+		Effect.catchCause(() => watchLog("pi_session_watch_cleanup", "failed", startedAt)),
+	);
+});
 
 /**
  * App glue: this app's session protocol over the `WebSockets` capability,
@@ -152,32 +156,40 @@ export class PiSessionSockets {
 			],
 			handlers: {
 				onConnect: (connection, ctx) => this.#onConnect(connection, ctx),
-				onMessage: (connection, message) => this.#onMessage(connection, message),
-				onClose: (connection) => this.#unwatch(connection),
-				onError: (connection) => this.#unwatch(connection),
+				onMessage: (connection, message) => Effect.runPromise(this.#onMessage(connection, message)),
+				onClose: (connection) => Effect.runPromise(this.#unwatch(connection)),
+				onError: (connection) => Effect.runPromise(this.#unwatch(connection)),
 			},
 		};
 	}
 
 	/** Give every hibernated socket a new watch after the object restarts. */
-	async reattach(): Promise<void> {
-		if (this.#getWebSockets().length === 0) return;
-		// Sockets are found by tag, not tags by socket, so walk the sessions
-		// and look up each one's tag.
-		for (const { id } of await this.#harness.sessions.list()) {
-			for (const socket of this.#getWebSockets(sessionTag(id))) {
-				if (!this.#watchScopes.has(socket)) {
-					await this.#watchOrClose(socket, id, { trigger: "hibernation_reattach" });
+	reattach(): Promise<void> {
+		return Effect.runPromise(
+			Effect.gen({ self: this }, function* () {
+				if (this.#getWebSockets().length === 0) return;
+				// Look up the sockets by each session's tag.
+				const sessions = yield* callPi(() => this.#harness.sessions.list());
+				for (const { id } of sessions) {
+					for (const socket of this.#getWebSockets(sessionTag(id))) {
+						if (!this.#watchScopes.has(socket)) {
+							yield* this.#watchOrClose(socket, id, { trigger: "hibernation_reattach" });
+						}
+					}
 				}
-			}
-		}
+			}),
+		);
 	}
 
-	async close(): Promise<void> {
-		this.#closed = true;
-		const scopes = [...this.#watchScopes.values()];
-		this.#watchScopes.clear();
-		await Promise.all(scopes.map(closeWatchScope));
+	close(): Promise<void> {
+		return Effect.runPromise(
+			Effect.gen({ self: this }, function* () {
+				this.#closed = true;
+				const scopes = [...this.#watchScopes.values()];
+				this.#watchScopes.clear();
+				yield* Effect.forEach(scopes, closeWatchScope, { concurrency: "unbounded", discard: true });
+			}),
+		);
 	}
 
 	async #onConnect(connection: Connection, ctx: ConnectionContext) {
@@ -194,32 +206,30 @@ export class PiSessionSockets {
 	}
 
 	/** The newest request owns the socket from acquisition through its final frame. */
-	async #watchOrClose(
+	#watchOrClose(
 		socket: WebSocket,
 		session: PiSessionId,
 		trigger: WatchTrigger,
 		window: ConversationWindow = {},
-	): Promise<void> {
-		if (this.#closed || socket.readyState !== OPEN) return;
-		const scope = Scope.makeUnsafe();
-		const abort = new AbortController();
-		const previous = this.#watchScopes.get(socket);
-		const report = watchReporter(trigger, previous !== undefined);
-		Effect.runSync(
-			Scope.addFinalizer(
+	): Effect.Effect<void> {
+		return Effect.gen({ self: this }, function* () {
+			if (this.#closed || socket.readyState !== OPEN) return;
+			const scope = Scope.makeUnsafe();
+			const abort = new AbortController();
+			const previous = this.#watchScopes.get(socket);
+			const report = watchReporter(trigger, previous !== undefined);
+			// Publish ownership before awaiting cleanup or asking Pi to open the watch.
+			this.#watchScopes.set(socket, scope);
+			const ownsWatch = () => this.#watchScopes.get(socket) === scope;
+			yield* Scope.addFinalizer(
 				scope,
 				Effect.sync(() => abort.abort()).pipe(Effect.andThen(report("cancelled"))),
-			),
-		);
-		// Publish ownership before awaiting cleanup or asking Pi to open the watch.
-		this.#watchScopes.set(socket, scope);
-		const ownsWatch = () => this.#watchScopes.get(socket) === scope;
+			);
 
-		try {
-			if (previous) await closeWatchScope(previous);
-			if (!ownsWatch()) return;
-			const watch = await Effect.runPromise(
-				Effect.acquireRelease(
+			yield* Effect.gen({ self: this }, function* () {
+				if (previous) yield* closeWatchScope(previous);
+				if (!ownsWatch()) return;
+				const watch = yield* Effect.acquireRelease(
 					Effect.tryPromise({
 						try: () =>
 							this.#harness
@@ -228,39 +238,36 @@ export class PiSessionSockets {
 						catch: (error) => error,
 					}),
 					(watch) => Effect.promise(() => watch.stop()),
-				).pipe(Scope.provide(scope)),
-			);
-			// A late acquisition is released by its already closed scope.
-			if (!ownsWatch()) return;
-			if (socket.readyState !== OPEN) {
-				await this.#unwatch(socket);
-				return;
-			}
-
-			let last = watch.value;
-			send(socket, { type: "view", session, view: last });
-			watch.start(async (call) => {
-				if (call.kind !== "value" || !ownsWatch()) return;
-				if (socket.readyState !== OPEN) {
-					await this.#unwatch(socket);
-					return;
+				).pipe(Scope.provide(scope));
+				// A late acquisition is released by its already closed scope.
+				if (!ownsWatch()) return;
+				let last = watch.value;
+				if (!send(socket, { type: "view", session, view: last })) {
+					yield* report("failed");
+					return yield* this.#disconnectWatch(socket, scope);
 				}
-				last = call.value;
-				send(socket, { type: "ops", session, ops: call.ops });
-			});
-			void watch.closed.then((end) => this.#ended(socket, session, scope, end, last));
-			Effect.runSync(report("started"));
-		} catch {
-			if (!ownsWatch()) return;
-			Effect.runSync(report("failed"));
-			// A failed current watch closes the socket so the client can reconnect.
-			try {
-				socket.close(1011, "Lost the session's watch");
-			} catch {
-				// Already closed.
-			}
-			await this.#unwatch(socket);
-		}
+				watch.start(async (call) => {
+					if (call.kind !== "value" || !ownsWatch()) return;
+					if (!send(socket, { type: "ops", session, ops: call.ops })) {
+						return Effect.runPromise(this.#disconnectWatch(socket, scope));
+					}
+					last = call.value;
+				});
+				// Pi settles this promise when the watch ends, including on scope cleanup.
+				void watch.closed.then((end) =>
+					Effect.runPromise(this.#ended(socket, session, scope, end, last)),
+				);
+				yield* report("started");
+			}).pipe(
+				Effect.catchCause(() =>
+					Effect.gen({ self: this }, function* () {
+						if (!ownsWatch()) return;
+						yield* report("failed");
+						yield* this.#disconnectWatch(socket, scope);
+					}),
+				),
+			);
+		});
 	}
 
 	/**
@@ -268,97 +275,115 @@ export class PiSessionSockets {
 	 * failed (`failed`), or the listener threw: watch again, from right after
 	 * the last entry the socket got. Opening the session reopens pi.
 	 */
-	async #ended(
+	#ended(
 		socket: WebSocket,
 		session: PiSessionId,
 		scope: Scope.Closeable,
 		end: WatchEnd,
 		last: ConversationView,
-	): Promise<void> {
-		if (end.kind === "stopped" || end.kind === "aborted") return;
-		if (this.#watchScopes.get(socket) !== scope) return;
-		if (socket.readyState !== OPEN) {
-			await this.#unwatch(socket);
-			return;
-		}
-		await this.#watchOrClose(
-			socket,
-			session,
-			{ trigger: "recovery", previousEnd: end.kind },
-			resumeAfter(last),
-		);
+	): Effect.Effect<void> {
+		return Effect.suspend(() => {
+			if (end.kind === "stopped" || end.kind === "aborted") return Effect.void;
+			if (this.#watchScopes.get(socket) !== scope) return Effect.void;
+			if (socket.readyState !== OPEN) return this.#unwatch(socket);
+			return this.#watchOrClose(
+				socket,
+				session,
+				{ trigger: "recovery", previousEnd: end.kind },
+				resumeAfter(last),
+			);
+		});
 	}
 
-	async #unwatch(socket: WebSocket): Promise<void> {
-		const scope = this.#watchScopes.get(socket);
-		if (!scope) return;
-		this.#watchScopes.delete(socket);
-		await closeWatchScope(scope);
+	#disconnectWatch(socket: WebSocket, scope: Scope.Closeable): Effect.Effect<void> {
+		return Effect.suspend(() => {
+			if (this.#watchScopes.get(socket) !== scope) return Effect.void;
+			// A missing delta breaks the sequence, so let the client reconnect from its own cursor.
+			return Effect.try(() => socket.close(1011, "Lost the session's watch")).pipe(
+				Effect.ignore,
+				Effect.andThen(this.#unwatch(socket, scope)),
+			);
+		});
 	}
 
-	async #onMessage(connection: Connection, raw: WebSocketMessage) {
-		if (typeof raw !== "string") return;
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(raw);
-		} catch {
-			send(connection, { type: "error", message: "Malformed JSON" });
-			return;
-		}
-		const decoded = decodeClientMessage(parsed);
-		if (Result.isFailure(decoded)) {
-			const request = decodeRequestId(parsed);
-			const id = Result.isSuccess(request) ? request.success.id : undefined;
-			send(connection, {
-				type: "error",
-				...(id === undefined ? {} : { id }),
-				message: "Invalid session message",
-			});
-			return;
-		}
-		const message = decoded.success;
-		const session = sessionOf(connection.tags) ?? ROOT_SESSION;
-		try {
-			const result = await this.#dispatch(connection, session, message);
-			if (message.id !== undefined) {
-				send(connection, { type: "result", id: message.id, result });
+	#unwatch(socket: WebSocket, expected?: Scope.Closeable): Effect.Effect<void> {
+		return Effect.suspend(() => {
+			const scope = this.#watchScopes.get(socket);
+			if (!scope || (expected !== undefined && scope !== expected)) return Effect.void;
+			this.#watchScopes.delete(socket);
+			return closeWatchScope(scope);
+		});
+	}
+
+	#onMessage(connection: Connection, raw: WebSocketMessage): Effect.Effect<void> {
+		return Effect.gen({ self: this }, function* () {
+			if (typeof raw !== "string") return;
+			const parsed = parseFrame(raw);
+			if (Result.isFailure(parsed)) {
+				send(connection, { type: "error", message: "Malformed JSON" });
+				return;
 			}
-		} catch (error) {
-			send(connection, {
-				type: "error",
-				...(message.id === undefined ? {} : { id: message.id }),
-				message: error instanceof Error ? error.message : String(error),
-			});
-		}
+			const decoded = decodeClientMessage(parsed.success);
+			if (Result.isFailure(decoded)) {
+				const request = decodeRequestId(parsed.success);
+				const id = Result.isSuccess(request) ? request.success.id : undefined;
+				send(connection, {
+					type: "error",
+					...(id === undefined ? {} : { id }),
+					message: "Invalid session message",
+				});
+				return;
+			}
+			const message = decoded.success;
+			const session = sessionOf(connection.tags) ?? ROOT_SESSION;
+			const result = yield* Effect.result(this.#dispatch(connection, session, message));
+			if (Result.isFailure(result)) {
+				const error = result.failure;
+				send(connection, {
+					type: "error",
+					...(message.id === undefined ? {} : { id: message.id }),
+					message: error instanceof Error ? error.message : String(error),
+				});
+			} else if (message.id !== undefined) {
+				send(connection, { type: "result", id: message.id, result: result.success });
+			}
+		});
 	}
 
-	async #dispatch(
+	#dispatch(
 		connection: Connection,
 		session: PiSessionId,
 		message: PiClientMessage,
-	): Promise<PiCommandResult> {
-		const handle = this.#harness.session(session);
-		switch (message.type) {
-			case "submit":
-				return await handle.submit(message.input, {
-					...(message.whenBusy ? { whenBusy: message.whenBusy } : {}),
-					...(message.operationId ? { operationId: message.operationId } : {}),
-				});
-			case "abort":
-				return await handle.abort();
-			case "reset":
-				await handle.reset(message.handoff);
-				return null;
-			case "watch":
-				await this.#watchOrClose(
-					connection,
-					session,
-					{ trigger: "client_request" },
-					message.from === undefined ? {} : { from: message.from },
-				);
-				return null;
-			case "entries":
-				return await handle.entries(message.query ?? {}, Math.min(message.limit, MAX_PAGE));
-		}
+	): Effect.Effect<PiCommandResult, unknown> {
+		return Effect.gen({ self: this }, function* () {
+			const handle = yield* Effect.try({
+				try: () => this.#harness.session(session),
+				catch: (error) => error,
+			});
+			switch (message.type) {
+				case "submit":
+					return yield* callPi(() =>
+						handle.submit(message.input, {
+							...(message.whenBusy ? { whenBusy: message.whenBusy } : {}),
+							...(message.operationId ? { operationId: message.operationId } : {}),
+						}),
+					);
+				case "abort":
+					return yield* callPi(() => handle.abort());
+				case "reset":
+					return yield* callPi(() => handle.reset(message.handoff)).pipe(Effect.as(null));
+				case "watch":
+					return yield* this.#watchOrClose(
+						connection,
+						session,
+						{ trigger: "client_request" },
+						message.from === undefined ? {} : { from: message.from },
+					).pipe(Effect.as(null));
+				case "entries":
+					return yield* callPi(() =>
+						handle.entries(message.query ?? {}, Math.min(message.limit, MAX_PAGE)),
+					);
+			}
+		});
 	}
 }

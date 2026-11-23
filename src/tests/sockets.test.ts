@@ -236,6 +236,32 @@ describe("the session WebSocket protocol", () => {
 		}
 	});
 
+	it("closes the socket when a watch delta cannot be delivered", async () => {
+		const { watch, client, socket, sockets, frames, handlers } = watchFixture();
+		const current = new Watch(watchView(10), vi.fn(), vi.fn());
+		watch.mockResolvedValueOnce(current);
+		try {
+			await handlers.onMessage!(socket, JSON.stringify({ type: "watch" }));
+			await expect
+				.poll(() => frames)
+				.toEqual([{ type: "view", session: ROOT_SESSION, view: watchView(10) }]);
+			vi.spyOn(socket, "send").mockImplementationOnce(() => {
+				throw new Error("Socket send failed");
+			});
+			const lost = closed(client);
+			current.advance(
+				{ kind: "value", value: watchView(11), retired: false, ops: [["s", ["before"], 11]] },
+				BACKGROUND_CONTEXT,
+			);
+			expect(await lost).toBe(1011);
+			expect(await current.closed).toEqual({ kind: "stopped" });
+			expect(watch).toHaveBeenCalledTimes(1);
+		} finally {
+			await sockets.close();
+			client.close();
+		}
+	});
+
 	it("rejects invalid requests and continues to serve the socket", async () => {
 		const socket = await connect(crypto.randomUUID());
 		const client = follow(socket);
