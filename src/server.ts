@@ -3,7 +3,6 @@ import { Workspace } from "@cloudflare/computer";
 import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
-import { withoutAbortSignal } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
@@ -11,10 +10,9 @@ import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
-import { Effect, Exit } from "effect";
+import { Effect } from "effect";
 import { workspaceCodemode } from "./codemode";
 import { isMainChatUrl } from "./main-chat";
-import { migrateRetiredModel } from "./model";
 import { MODEL_ID } from "./model-id";
 import { PiSessionSockets } from "./sockets";
 import { createWorkspaceTools } from "./workspace";
@@ -46,49 +44,29 @@ export class Trajan extends DurableObject<Env> {
 	readonly registry = createRegistry();
 	readonly harness = new PiHarness({
 		harness: ({ storage, context, onWake }) => {
-			const open = Effect.tryPromise({
-				try: () => {
-					this.registry.install({
-						name: "playground",
-						sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
-						tools: createWorkspaceTools(this.workspace),
-					});
-					this.registry.install(
-						workspaceCodemode(() => this.env.CODEMODE_SANDBOX.getByName(this.ctx.id.toString())),
-					);
-					const models = createModels();
-					models.setProvider(this.ai.provider);
-					return Harness.open(
-						storage,
-						{
-							models,
-							registry: this.registry,
-							onWake,
-							settings: {
-								// Pi doubles the delay before each retry, for about 30 seconds total.
-								retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
-							},
-							onReport: (report) => console.warn(JSON.stringify({ event: "pi_report", report })),
-						},
-						context,
-					);
-				},
-				catch: (error) => error,
+			this.registry.install({
+				name: "playground",
+				sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
+				tools: createWorkspaceTools(this.workspace),
 			});
-			return Effect.runPromise(
-				Effect.acquireUseRelease(
-					open,
-					(pi) => {
-						const { provider, id: modelId } = this.model;
-						return migrateRetiredModel(pi, { provider, modelId }, context).pipe(Effect.as(pi));
+			this.registry.install(
+				workspaceCodemode(() => this.env.CODEMODE_SANDBOX.getByName(this.ctx.id.toString())),
+			);
+			const models = createModels();
+			models.setProvider(this.ai.provider);
+			return Harness.open(
+				storage,
+				{
+					models,
+					registry: this.registry,
+					onWake,
+					settings: {
+						// Pi doubles the delay before each retry, for about 30 seconds total.
+						retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
 					},
-					// A successful factory hands Pi's lifetime to the SDK.
-					(pi, exit) =>
-						Exit.isSuccess(exit)
-							? Effect.void
-							: Effect.tryPromise(() => pi.close(withoutAbortSignal(context))).pipe(Effect.ignore),
-				),
-				{ signal: context.abortSignal },
+					onReport: (report) => console.warn(JSON.stringify({ event: "pi_report", report })),
+				},
+				context,
 			);
 		},
 		defaults: { model: this.model, thinkingLevel: "low" },
