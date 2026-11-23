@@ -138,6 +138,9 @@ describe("the scoped browser session", () => {
 		try {
 			registry.mount(composer);
 			edit("same text");
+			await expect.poll(() => socket.sent).toEqual([{ type: "watch" }]);
+			expect(registry.get(composer).canSubmit).toBe(false);
+			socket.receive(snapshot(1 as EntryId));
 			await expect.poll(() => registry.get(composer).canSubmit).toBe(true);
 			submit();
 			await expect.poll(() => registry.get(composer).submitting).toBe(true);
@@ -225,6 +228,21 @@ describe("the scoped browser session", () => {
 					socket.reconnect();
 					yield* waitFor(session.changes, (state) => state.status === "open");
 					expect(socket.sent.slice(2)).toEqual([{ type: "watch", from: 2 }, submit]);
+					// This patch needs the new watch's snapshot, which has not arrived yet.
+					socket.receive({
+						type: "ops",
+						session: "1",
+						ops: [["p", ["entries"], 1, 0, snapshot(9 as EntryId).view.entries]],
+					});
+					socket.receive({
+						type: "hello",
+						session: "1",
+						tools: [{ name: "marker", description: "" }],
+					});
+					const syncing = yield* waitFor(session.changes, (state) => state.catalog.length === 1);
+					expect(syncing).toMatchObject({
+						value: { transcriptStatus: "syncing", messages: [{ parts: [{ text: "Note 1" }] }] },
+					});
 
 					socket.receive(snapshot(2 as EntryId, 1 as EntryId));
 					socket.acknowledge(submit, false);
@@ -233,12 +251,18 @@ describe("the scoped browser session", () => {
 						(state) => state.submission?.status === "accepted",
 					);
 					expect(acknowledged).toMatchObject({
-						value: { messages: [{}, {}], submission: { id: submit.id } },
+						value: {
+							transcriptStatus: "synced",
+							messages: [{}, {}],
+							submission: { id: submit.id },
+						},
 					});
 					socket.close();
 					yield* waitFor(session.changes, (state) => state.status === "closed");
 					socket.reconnect();
 					yield* waitFor(session.changes, (state) => state.status === "open");
+					socket.receive(snapshot(2 as EntryId, 1 as EntryId));
+					yield* waitFor(session.changes, (state) => state.transcriptStatus === "synced");
 					yield* TestClock.adjust("10 seconds");
 					expect(socket.sent.slice(4)).toEqual([{ type: "watch", from: 3 }]);
 				}),
@@ -253,7 +277,8 @@ describe("the scoped browser session", () => {
 			Effect.scoped(
 				Effect.gen(function* () {
 					const session = yield* openPiSession(() => socket);
-					yield* waitFor(session.changes, (state) => state.status === "open");
+					socket.receive(snapshot(1 as EntryId));
+					yield* waitFor(session.changes, (state) => state.transcriptStatus === "synced");
 					const latestDraft = { text: "latest" };
 					session.dispatch({ type: "submit", draft: { text: "older" } });
 					session.dispatch({ type: "submit", draft: latestDraft });
@@ -456,7 +481,8 @@ describe("the scoped browser session", () => {
 					});
 
 					socket.reconnect();
-					yield* waitFor(session.changes, (state) => state.status === "open");
+					socket.receive(snapshot(5 as EntryId, 4 as EntryId));
+					yield* waitFor(session.changes, (state) => state.transcriptStatus === "synced");
 					session.dispatch({ type: "loadEarlier" });
 					const current = yield* pageRequest(socket, 1);
 					socket.receive({ type: "result", id: current.id, result: { items: null } });

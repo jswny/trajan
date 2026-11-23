@@ -21,6 +21,7 @@ export function usePiSession() {
 		editPrompt: (text: string) => updateComposer({ type: "edit", text }),
 		submit: (whenBusy: SubmitMode) => updateComposer({ type: "submit", whenBusy }),
 		retrySubmit: (id: string) => dispatch({ type: "retrySubmit", id }),
+		retryWatch: () => dispatch({ type: "retryWatch" }),
 		abort: () => dispatch({ type: "abort" }),
 		reset: () => dispatch({ type: "reset" }),
 		loadEarlier: () => dispatch({ type: "loadEarlier" }),

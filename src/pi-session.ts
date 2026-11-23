@@ -31,6 +31,7 @@ export type PromptDraft = { readonly text: string };
 export type SubmitMode = "followUp" | "steer";
 
 const RECEIPT_TIMEOUT = "5 seconds";
+const WATCH_TIMEOUT = "5 seconds";
 
 type Submission = { readonly id: string; readonly draft: PromptDraft } & (
 	| { readonly status: "pending" | "accepted" | "unconfirmed" }
@@ -39,6 +40,7 @@ type Submission = { readonly id: string; readonly draft: PromptDraft } & (
 
 type SessionState = SessionView & {
 	readonly status: "connecting" | "open" | "closed";
+	readonly transcriptStatus: "syncing" | "synced" | "failed";
 	readonly catalog: readonly ToolInfo[];
 	readonly loading: boolean;
 	readonly historyError: string | null;
@@ -49,6 +51,7 @@ type SessionState = SessionView & {
 export const INITIAL_SESSION_STATE: SessionState = {
 	...EMPTY_VIEW,
 	status: "connecting",
+	transcriptStatus: "syncing",
 	catalog: [],
 	loading: false,
 	historyError: null,
@@ -61,13 +64,19 @@ type Gap = { after: EntryId; upTo: EntryId };
 export type SessionCommand =
 	| { type: "submit"; draft: PromptDraft; whenBusy?: SubmitMode }
 	| { type: "retrySubmit"; id: string }
+	| { type: "retryWatch" }
 	| { type: "abort" | "reset" }
 	| { type: "loadEarlier" }
 	| { type: "fillGap"; gap: Gap };
 
 type SocketEvent = { type: "open" | "close" } | { type: "message"; data: unknown };
 type ReceiptTimeout = { type: "receiptTimeout"; submit: PiOutboxSubmit; canReplay: boolean };
-type SessionEvent = SocketEvent | ReceiptTimeout | { type: "command"; command: SessionCommand };
+type WatchTimeout = { type: "watchTimeout"; canRetry: boolean };
+type SessionEvent =
+	| SocketEvent
+	| ReceiptTimeout
+	| WatchTimeout
+	| { type: "command"; command: SessionCommand };
 
 type Socket = {
 	readonly readyState: number;
@@ -89,6 +98,7 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 	const scope = yield* Effect.scope;
 	const events = yield* Queue.unbounded<SessionEvent>();
 	const deadlines = new Map<string, { event: ReceiptTimeout; fiber: Fiber.Fiber<void> }>();
+	let watchDeadline: { event: WatchTimeout; fiber: Fiber.Fiber<void> } | undefined;
 	yield* Effect.addFinalizer(() => Queue.shutdown(events));
 
 	// Process socket events and commands in the order they arrive.
@@ -122,6 +132,25 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 			return false;
 		}
 	};
+	const cancelWatchDeadline = Effect.suspend(() => {
+		const deadline = watchDeadline;
+		watchDeadline = undefined;
+		return deadline === undefined ? Effect.void : Fiber.interrupt(deadline.fiber);
+	});
+
+	const startWatch = Effect.fnUntraced(function* (canRetry: boolean) {
+		yield* cancelWatchDeadline;
+		yield* update({ transcriptStatus: "syncing" });
+		mirror.open(send);
+		const event: WatchTimeout = { type: "watchTimeout", canRetry };
+		const fiber = yield* Effect.sleep(WATCH_TIMEOUT).pipe(
+			Effect.andThen(Queue.offer(events, event)),
+			Effect.asVoid,
+			Effect.forkIn(scope),
+		);
+		watchDeadline = { event, fiber };
+	});
+
 	const cancelDeadline = Effect.fnUntraced(function* (id: string) {
 		const deadline = deadlines.get(id);
 		if (deadline === undefined) return;
@@ -145,7 +174,7 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 		Effect.uninterruptibleMask((restore) =>
 			Effect.gen(function* () {
 				const started = yield* SubscriptionRef.modify(state, (current) =>
-					current.loading || current.status !== "open"
+					current.loading || current.status !== "open" || current.transcriptStatus !== "synced"
 						? [false, current]
 						: [true, { ...current, loading: true, historyError: null }],
 				);
@@ -200,6 +229,11 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 					});
 					return;
 				}
+				case "retryWatch": {
+					const { status, transcriptStatus } = yield* SubscriptionRef.get(state);
+					if (status === "open" && transcriptStatus === "failed") yield* startWatch(false);
+					return;
+				}
 				case "abort":
 				case "reset":
 					if (!send({ type: command.type, id: crypto.randomUUID() })) {
@@ -229,7 +263,7 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 						yield* handleCommand(event.command);
 						break;
 					case "open": {
-						mirror.open(send);
+						yield* startWatch(true);
 						for (const submit of outbox.pending()) yield* sendSubmit(submit, true);
 						const { submission } = yield* SubscriptionRef.get(state);
 						yield* update({
@@ -244,10 +278,18 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 					}
 					case "close": {
 						mirror.close();
+						yield* cancelWatchDeadline;
 						const fibers = Array.from(deadlines.values(), ({ fiber }) => fiber);
 						deadlines.clear();
 						yield* Fiber.interruptAll(fibers);
-						yield* update({ status: "closed", historyError: null });
+						yield* update({ status: "closed", transcriptStatus: "syncing", historyError: null });
+						break;
+					}
+					case "watchTimeout": {
+						if (watchDeadline?.event !== event) break;
+						watchDeadline = undefined;
+						if (event.canRetry) yield* startWatch(false);
+						else yield* update({ transcriptStatus: "failed" });
 						break;
 					}
 					case "receiptTimeout": {
@@ -274,6 +316,14 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 						if (Option.isNone(decoded)) break;
 						const message = decoded.value;
 						mirror.receive(message);
+						if (message.type === "view") {
+							const { status, transcriptStatus } = yield* SubscriptionRef.get(state);
+							if (status === "open" && transcriptStatus !== "synced") {
+								yield* cancelWatchDeadline;
+								yield* update({ transcriptStatus: "synced" });
+							}
+							break;
+						}
 						if (message.type === "hello") yield* update({ catalog: message.tools });
 						if (message.type !== "result" && message.type !== "error") break;
 						const settledId = outbox.receive(message) ? message.id : undefined;

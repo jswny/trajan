@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import type { PiClientMessage, PiServerMessage } from "../../protocol";
 
 const workerLog = new URL("../../../.cloudflare/browser-smoke.log", import.meta.url);
@@ -159,3 +159,86 @@ for (const lostReceipts of [1, 2]) {
 		await expect(transcript.getByText(prompt, { exact: true })).toHaveCount(1);
 	});
 }
+
+async function dropWatchSnapshots(page: Page, dropped: readonly number[]) {
+	const connections: string[] = [];
+	const watches: Array<Extract<PiClientMessage, { type: "watch" }>> = [];
+	const snapshots: Array<Extract<PiServerMessage, { type: "view" }>> = [];
+	await page.routeWebSocket(/\/agents\/trajan\//, (client) => {
+		connections.push(client.url());
+		const server = client.connectToServer();
+		client.onMessage((data) => {
+			const message = JSON.parse(String(data)) as PiClientMessage;
+			if (message.type === "watch") watches.push(message);
+			server.send(data);
+		});
+		server.onMessage((data) => {
+			const message = JSON.parse(String(data)) as PiServerMessage;
+			if (message.type === "view") {
+				snapshots.push(message);
+				if (dropped.includes(snapshots.length)) return;
+			}
+			client.send(data);
+		});
+	});
+	return { connections, watches, snapshots };
+}
+
+test("waits for a snapshot before going Live and retries the watch on the same socket", async ({
+	page,
+}) => {
+	await page.clock.install();
+	const { connections, watches, snapshots } = await dropWatchSnapshots(page, [1]);
+	await page.goto("/");
+	await expect.poll(() => snapshots.length).toBe(1);
+	await expect(page.getByText("Syncing", { exact: true })).toBeVisible();
+	await expect(page.getByText("Live", { exact: true })).toHaveCount(0);
+	const composer = page.getByRole("textbox", { name: "Message Trajan" });
+	await composer.fill("Draft while syncing");
+	await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
+
+	await page.clock.fastForward(6_000);
+	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
+	await expect(composer).toHaveValue("Draft while syncing");
+	await page.clock.fastForward(12_000);
+	expect(connections).toHaveLength(1);
+	expect(watches).toEqual([{ type: "watch" }, { type: "watch" }]);
+});
+
+test("keeps the transcript and offers manual sync after two snapshots go missing on reconnect", async ({
+	page,
+	request,
+}) => {
+	await page.clock.install();
+	const { connections, watches, snapshots } = await dropWatchSnapshots(page, [2, 3]);
+	await page.goto("/");
+	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	const composer = page.getByRole("textbox", { name: "Message Trajan" });
+	await composer.fill("Keep this transcript");
+	await composer.press("Enter");
+	const answer = page.getByText("echo: Keep this transcript", { exact: true });
+	await expect(answer).toBeVisible();
+
+	const sessionId = new URL(connections[0]!).pathname.split("/").at(-1);
+	expect((await request.post(`/__browser-smoke/${sessionId}/disconnect`)).status()).toBe(204);
+	await expect.poll(() => snapshots.length).toBe(2);
+	await expect(page.getByText("Syncing", { exact: true })).toBeVisible();
+	await expect(answer).toBeVisible();
+	await page.clock.fastForward(6_000);
+	await expect.poll(() => snapshots.length).toBe(3);
+	await page.clock.fastForward(6_000);
+	const retry = page.getByRole("button", { name: "Retry sync" });
+	await expect(retry).toBeVisible();
+	await expect(page.getByText("Live", { exact: true })).toHaveCount(0);
+	await expect(answer).toBeVisible();
+	await page.clock.fastForward(12_000);
+	expect(watches).toHaveLength(3);
+
+	await retry.click();
+	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	await expect(answer).toHaveCount(1);
+	expect(connections).toHaveLength(2);
+	expect(watches[1]?.from).toBeDefined();
+	expect(watches.slice(2)).toEqual([watches[1], watches[1]]);
+});

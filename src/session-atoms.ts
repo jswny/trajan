@@ -60,6 +60,7 @@ export function makeSessionAtoms(live: typeof PiSession.live = (id) => PiSession
 				submitting: currentSubmission === "pending",
 				canSubmit:
 					session?.state.status === "open" &&
+					session.state.transcriptStatus === "synced" &&
 					currentSubmission !== "pending" &&
 					currentSubmission !== "unconfirmed" &&
 					draft.text.trim() !== "",

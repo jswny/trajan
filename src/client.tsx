@@ -318,7 +318,7 @@ function Message({
 					<Button
 						variant="ghost"
 						size="sm"
-						disabled={loading}
+						disabled={loading || !onFillGap}
 						aria-busy={loading}
 						icon={
 							loading ? (
@@ -400,6 +400,7 @@ function App() {
 		id: session,
 		newSession: startNewSession,
 		status,
+		transcriptStatus,
 		messages,
 		earlier,
 		loading,
@@ -417,6 +418,7 @@ function App() {
 		editPrompt: setPrompt,
 		submit: submitPrompt,
 		retrySubmit,
+		retryWatch,
 		abort,
 		loadEarlier,
 		fillGap,
@@ -462,6 +464,7 @@ function App() {
 	};
 
 	const connected = status === "open";
+	const synced = connected && transcriptStatus === "synced";
 
 	/** While a run is going, Enter queues a follow-up and Steer joins the run. */
 	const submit = (whenBusy: "followUp" | "steer" = "followUp") => {
@@ -502,9 +505,21 @@ function App() {
 							<Badge variant="secondary" className="hidden sm:inline-flex">
 								{MODEL_ID.split("/").at(-1)}
 							</Badge>
-							<Badge variant={connected ? "success" : "secondary"}>
-								{connected ? "Live" : status === "connecting" ? "Connecting" : "Reconnecting"}
-							</Badge>
+							{connected && transcriptStatus === "failed" ? (
+								<Button type="button" variant="secondary" size="sm" onClick={retryWatch}>
+									Retry sync
+								</Button>
+							) : (
+								<Badge variant={synced ? "success" : "secondary"}>
+									{connected
+										? synced
+											? "Live"
+											: "Syncing"
+										: status === "connecting"
+											? "Connecting"
+											: "Reconnecting"}
+								</Badge>
+							)}
 							<Button
 								variant="ghost"
 								shape="square"
@@ -567,7 +582,7 @@ function App() {
 											<IconArrowShortUp size={12} aria-hidden="true" />
 										)
 									}
-									disabled={loading || !connected}
+									disabled={loading || !synced}
 									aria-busy={loading}
 									onClick={showEarlier}
 								>
@@ -582,7 +597,7 @@ function App() {
 								message={message}
 								runningTools={runningTools}
 								loading={loading}
-								onFillGap={fillGap}
+								onFillGap={synced ? fillGap : undefined}
 							/>
 						))}
 

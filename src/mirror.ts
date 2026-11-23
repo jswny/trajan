@@ -69,6 +69,8 @@ export class PiSessionMirror {
 	 */
 	open(send: PiSend): void {
 		this.#send = send;
+		// Keep the transcript, but wait for this watch's snapshot before applying its patches.
+		this.#view = null;
 		const from = this.#transcript.resume?.from;
 		send({ type: "watch", ...(from === undefined ? {} : { from }) });
 	}
@@ -76,6 +78,7 @@ export class PiSessionMirror {
 	/** The socket closed: pages it was loading will not arrive. */
 	close(): void {
 		this.#send = undefined;
+		this.#view = null;
 		const pages = [...this.#pages.values()];
 		this.#pages.clear();
 		for (const page of pages) Effect.runSync(Deferred.fail(page, new HistoryDisconnected()));
@@ -85,6 +88,7 @@ export class PiSessionMirror {
 	receive(message: PiServerMessage): void {
 		switch (message.type) {
 			case "view":
+				if (this.#send === undefined) return;
 				this.#view = message.view;
 				this.#show(this.#transcript.merge(this.#view));
 				return;
