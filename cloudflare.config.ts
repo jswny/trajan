@@ -1,6 +1,8 @@
 import { bindings, defineConfig, exports } from "cf/config";
 import * as entrypoint from "./src/server.ts" with { type: "cf-worker" };
 
+// The deploy script uses --force because dashboard secret updates have triggered false
+// configuration conflicts in Workers Builds. See cloudflare/cf#69 and cloudflare/cf#466.
 export default defineConfig(({ mode }) => {
 	const development = mode === "development";
 	// Vite uses this name for its Workers AI dev proxy. The production name is behind Access.
