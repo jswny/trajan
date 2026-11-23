@@ -1,4 +1,5 @@
 import { bindings, defineConfig, exports } from "cf/config";
+import codemode from "./codemode.config.ts";
 import * as entrypoint from "./src/server.ts" with { type: "cf-worker" };
 
 // The deploy script uses --force because dashboard secret updates have triggered false
@@ -23,6 +24,10 @@ export default defineConfig(({ mode }) => {
 			env: {
 				AI: bindings.ai({ dev: { remote: true } }),
 				LOADER: bindings.workerLoader(),
+				CODEMODE_SANDBOX: bindings.durableObject({
+					worker: codemode.worker,
+					exportName: "CodemodeSandbox",
+				}),
 				Trajan: bindings.durableObject({ worker: name, exportName: "Trajan" }),
 			},
 			exports: { Trajan: exports.durableObject({ storage: "sqlite" }) },

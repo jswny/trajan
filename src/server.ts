@@ -12,6 +12,7 @@ import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
 import { Effect, Exit } from "effect";
+import { workspaceCodemode } from "./codemode";
 import { isMainChatUrl } from "./main-chat";
 import { migrateRetiredModel } from "./model";
 import { MODEL_ID } from "./model-id";
@@ -19,7 +20,7 @@ import { PiSessionSockets } from "./sockets";
 import { createWorkspaceTools } from "./workspace";
 
 const PREAMBLE =
-	"You are Trajan, a concise and capable assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
+	"You are Trajan, a concise and capable assistant. You have a durable workspace at /workspace. Use the direct file tools for simple file operations. Use codemode to compose tools, and call tools.exec from a codemode script to run JavaScript modules against the workspace or use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
 
 /** Playable pi session backed by one Durable Object. */
 export class Trajan extends DurableObject<Env> {
@@ -52,6 +53,9 @@ export class Trajan extends DurableObject<Env> {
 						sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
 						tools: createWorkspaceTools(this.workspace),
 					});
+					this.registry.install(
+						workspaceCodemode(() => this.env.CODEMODE_SANDBOX.getByName(this.ctx.id.toString())),
+					);
 					const models = createModels();
 					models.setProvider(this.ai.provider);
 					return Harness.open(

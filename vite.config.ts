@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { loadAndParseConfig } from "@cloudflare/config";
 import { cloudflare, type PluginConfig } from "@cloudflare/vite-plugin";
 import pierreDark from "@pierre/theme/pierre-dark";
 import pierreLight from "@pierre/theme/pierre-light";
@@ -23,11 +24,10 @@ const paletteRoles = {
 };
 
 async function browserSmokeWorker(): Promise<PluginConfig> {
-	const { loadAndParseConfig } = await import("@cloudflare/config");
 	const fixturePath = fileURLToPath(new URL("./src/tests/cloudflare.config.ts", import.meta.url));
 	const { result } = await loadAndParseConfig(fixturePath, {
 		isPreview: false,
-		mode: "development",
+		mode: "browser-smoke",
 	});
 	if (!result.success) throw result.error;
 	const worker = result.data.worker;
@@ -43,13 +43,24 @@ async function browserSmokeWorker(): Promise<PluginConfig> {
 	};
 }
 
+async function cloudflareWorkers(command: string, mode: string): Promise<PluginConfig> {
+	const sandboxPath = fileURLToPath(new URL("./codemode.config.ts", import.meta.url));
+	const { result } = await loadAndParseConfig(sandboxPath, { isPreview: false, mode });
+	if (!result.success) throw result.error;
+	const sandbox = result.data.worker;
+	if (!sandbox) throw new Error("Missing Pi Code Mode sandbox Worker");
+	const browserSmoke = command === "serve" && mode === "browser-smoke";
+	return {
+		...(browserSmoke ? await browserSmokeWorker() : {}),
+		auxiliaryWorkers: [{ config: sandbox }],
+	};
+}
+
 export default defineConfig(async ({ command, mode }) => ({
 	plugins: [
 		agents(),
 		react(),
-		cloudflare(
-			command === "serve" && mode === "browser-smoke" ? await browserSmokeWorker() : undefined,
-		),
+		cloudflare(await cloudflareWorkers(command, mode)),
 		tailwindcss(),
 		{
 			name: "pierre-palette",

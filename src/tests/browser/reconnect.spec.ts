@@ -398,3 +398,50 @@ test("wraps a long prompt and keeps a wide code block scrollable inside the tran
 		.poll(() => page.locator("main").evaluate((el) => el.scrollWidth - el.clientWidth))
 		.toBe(0);
 });
+
+async function codemodeState(page: Page) {
+	return (await page.request.post("/__browser-smoke/codemode-state")).json();
+}
+
+for (const exec of ["completed", "running"]) {
+	test(`recovers Code Mode with a ${exec} workspace exec`, async ({ page }) => {
+		await page.goto("/");
+		await expect(page.getByText("Live", { exact: true })).toBeVisible();
+		const prompt = `codemode ${exec} exec`;
+		const composer = page.getByRole("textbox", { name: "Message Trajan" });
+		await composer.fill(prompt);
+		await composer.press("Enter");
+
+		await expect
+			.poll(() => codemodeState(page))
+			.toEqual({
+				executions: 1,
+				gateRuns: exec === "completed" ? 1 : 0,
+			});
+		const crash = await page.request.post("/__browser-smoke/crash");
+		expect(crash.status()).toBe(500);
+		expect(await crash.text()).toMatch(/forced browser fixture restart|durable object.*reset/i);
+		await page.reload();
+		await expect(page.getByText("Live", { exact: true })).toBeVisible();
+		const transcript = page.getByRole("main");
+		if (exec === "completed") {
+			await expect
+				.poll(() => codemodeState(page), { timeout: 15_000 })
+				.toEqual({
+					executions: 1,
+					gateRuns: 2,
+				});
+			expect((await page.request.post("/__browser-smoke/release")).status()).toBe(204);
+			await expect(transcript.getByText(/^tool said:.*released after 2 runs$/s)).toBeVisible();
+		} else {
+			await expect(transcript.getByText(/^tool failed:.*interrupted/is)).toBeVisible({
+				timeout: 15_000,
+			});
+		}
+		await expect(transcript.getByText(prompt, { exact: true })).toHaveCount(1);
+		expect(await codemodeState(page)).toEqual({
+			executions: 1,
+			gateRuns: exec === "completed" ? 2 : 0,
+		});
+	});
+}

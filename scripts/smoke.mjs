@@ -49,7 +49,13 @@ function connect(prompt, expectedTools) {
 						.map((part) => part.text)
 						.join("") ?? "";
 				const tools = messages
-					.filter((m) => m.role === "toolResult" && !m.isError)
+					.filter(
+						(m) =>
+							m.role === "toolResult" &&
+							!m.isError &&
+							(m.toolName !== "codemode" ||
+								m.content.some((part) => part.type === "text" && part.text.includes(marker))),
+					)
 					.map((m) => m.toolName);
 				if (
 					live.run === undefined &&
@@ -71,9 +77,10 @@ await connect(
 console.log("Passed: Workers AI, Pi tool loop, durable workspace write/read");
 await connect(undefined, ["write", "read"]);
 console.log("Passed: WebSocket reconnect restores the conversation");
-await connect(
-	`Use exec to run this JavaScript ES module: import { readFile } from "node:fs/promises"; export default async function () { return await readFile(${JSON.stringify(file)}, "utf8"); } Reply only with its result.`,
-	["exec"],
-);
-console.log("Passed: Dynamic Worker JavaScript execution");
+const command = `import { readFile } from "node:fs/promises"; export default async function () { return await readFile(${JSON.stringify(file)}, "utf8"); }`;
+const code = `return await tools.exec({ command: ${JSON.stringify(command)} });`;
+await connect(`Run this script with codemode and reply only with the file contents:\n${code}`, [
+	"codemode",
+]);
+console.log("Passed: Pi Code Mode calling Cloudflare Computer exec");
 console.log(`Verified ${base.origin}`);

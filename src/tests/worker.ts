@@ -29,6 +29,7 @@ import {
 } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
+import { workspaceCodemode } from "../codemode";
 import { isMainChatUrl } from "../main-chat";
 import { PiSessionSockets } from "../sockets";
 import { projectView } from "../view";
@@ -36,6 +37,7 @@ import { createWorkspaceTools } from "../workspace";
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
+const CODEMODE_COUNT_PATH = "/workspace/codemode-count.txt";
 
 function textOf(content: Message["content"] | undefined): string {
 	if (content === undefined) return "";
@@ -64,6 +66,22 @@ function script(context: TranscriptContext): AssistantMessage {
 		]);
 	}
 	const prompt = last?.role === "user" ? textOf(last.content) : "";
+	if (prompt === "codemode completed exec" || prompt === "codemode running exec") {
+		const command = `
+import fs from "node:fs/promises";
+export default async function () {
+  await fs.mkdir("/workspace", { recursive: true });
+  const path = ${JSON.stringify(CODEMODE_COUNT_PATH)};
+  const count = await fs.readFile(path, "utf8").catch((error) => {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  });
+  await fs.writeFile(path, count + "x");
+  ${prompt === "codemode running exec" ? "await new Promise((resolve) => setTimeout(resolve, 45_000));" : ""}
+}`;
+		const code = `await tools.exec({ command: ${JSON.stringify(command)} }); return await tools.gate({});`;
+		return fauxAssistantMessage([fauxToolCall("codemode", { code })], { stopReason: "toolUse" });
+	}
 	const multiply = /^multiply (\d+)$/.exec(prompt);
 	if (multiply) {
 		return fauxAssistantMessage([fauxToolCall("multiply", { value: Number(multiply[1]) })], {
@@ -115,6 +133,10 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 				name: "workspace",
 				tools: createWorkspaceTools(this.workspace),
 			});
+			const sandbox = this.env.CODEMODE_SANDBOX;
+			if (sandbox) {
+				this.registry.install(workspaceCodemode(() => sandbox.getByName(this.ctx.id.toString())));
+			}
 			const models = createModels();
 			models.setProvider(this.#faux.provider);
 			return Harness.open(
@@ -199,6 +221,23 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 
 	disconnect(): void {
 		for (const socket of this.ctx.getWebSockets()) socket.close(1012, "Lost submit receipt");
+	}
+
+	crash(): void {
+		this.ctx.abort("Forced browser fixture restart");
+	}
+
+	async codemodeState() {
+		const contents = await this.workspace.fs
+			.readFile(CODEMODE_COUNT_PATH, "utf8")
+			.catch((error) => {
+				if ((error as { code?: string }).code === "ENOENT") return "";
+				throw error;
+			});
+		return {
+			executions: contents.length,
+			gateRuns: (await this.ctx.storage.get<number>(GATE_RUNS_KEY)) ?? 0,
+		};
 	}
 
 	/** Watch the root session through one run: the view projected from its last value. */
@@ -351,11 +390,24 @@ export default {
 				request = new Request(url, request);
 			}
 		}
-		const control = /^\/__browser-smoke\/(disconnect|release)$/.exec(pathname)?.[1];
+		const control = /^\/__browser-smoke\/(disconnect|release|crash|codemode-state)$/.exec(
+			pathname,
+		)?.[1];
 		if (control && fixture && request.method === "POST") {
 			const stub = env.PI_HARNESS_TEST.getByName(fixture);
-			if (control === "disconnect") await stub.disconnect();
-			else await stub.release();
+			switch (control) {
+				case "disconnect":
+					await stub.disconnect();
+					break;
+				case "release":
+					await stub.release();
+					break;
+				case "crash":
+					await stub.crash();
+					break;
+				case "codemode-state":
+					return Response.json(await stub.codemodeState());
+			}
 			return new Response(null, { status: 204 });
 		}
 		return (

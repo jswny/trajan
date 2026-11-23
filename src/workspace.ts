@@ -120,6 +120,7 @@ export function createWorkspaceTools(
 			// computer's schema type is untyped, so `args` is too.
 			parameters: tool.parameters,
 			...(tool.constrainedSampling ? { constrainedSampling: tool.constrainedSampling } : {}),
+			...(tool.name === "exec" ? { callers: ["tools"] } : {}),
 			replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
 			async execute(args, api, context) {
 				const { content, isError } = await execute(

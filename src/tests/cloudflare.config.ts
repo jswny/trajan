@@ -1,7 +1,8 @@
 import { bindings, defineConfig, exports } from "cf/config";
+import codemode from "../../codemode.config.ts";
 import * as entrypoint from "./worker.ts" with { type: "cf-worker" };
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
 	worker: {
 		name: "trajan-test",
 		entrypoint,
@@ -9,6 +10,9 @@ export default defineConfig({
 		compatibilityFlags: ["nodejs_compat"],
 		env: {
 			LOADER: bindings.workerLoader(),
+			CODEMODE_SANDBOX:
+				mode === "browser-smoke" &&
+				bindings.durableObject({ worker: codemode.worker, exportName: "CodemodeSandbox" }),
 			PI_HARNESS_TEST: bindings.durableObject({
 				worker: "trajan-test",
 				exportName: "PiHarnessTestObject",
@@ -16,4 +20,4 @@ export default defineConfig({
 		},
 		exports: { PiHarnessTestObject: exports.durableObject({ storage: "sqlite" }) },
 	},
-});
+}));
