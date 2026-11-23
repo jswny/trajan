@@ -3,6 +3,7 @@ import { Workspace } from "@cloudflare/computer";
 import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
+import { withoutAbortSignal } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
@@ -10,6 +11,7 @@ import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
+import { Effect, Exit } from "effect";
 import { migrateRetiredModel } from "./model";
 import { MODEL_ID } from "./model-id";
 import { PiSessionSockets } from "./sockets";
@@ -41,38 +43,48 @@ export class Trajan extends DurableObject<Env> {
 	});
 	readonly registry = createRegistry();
 	readonly harness = new PiHarness({
-		harness: async ({ storage, context, onWake }) => {
-			// pi's own extension: the system prompt and the workspace tools.
-			this.registry.install({
-				name: "playground",
-				sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
-				tools: createWorkspaceTools(this.workspace),
-			});
-			const models = createModels();
-			models.setProvider(this.ai.provider);
-			const pi = await Harness.open(
-				storage,
-				{
-					models,
-					registry: this.registry,
-					onWake,
-					settings: {
-						// pi doubles the delay before each retry: 1, 2, 4, 8 and 16 seconds,
-						// so a rate-limited model gets about 30 seconds to recover.
-						retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
-					},
-					onReport: (report) => console.warn(JSON.stringify({ event: "pi_report", report })),
+		harness: ({ storage, context, onWake }) => {
+			const open = Effect.tryPromise({
+				try: () => {
+					this.registry.install({
+						name: "playground",
+						sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
+						tools: createWorkspaceTools(this.workspace),
+					});
+					const models = createModels();
+					models.setProvider(this.ai.provider);
+					return Harness.open(
+						storage,
+						{
+							models,
+							registry: this.registry,
+							onWake,
+							settings: {
+								// Pi doubles the delay before each retry, for about 30 seconds total.
+								retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
+							},
+							onReport: (report) => console.warn(JSON.stringify({ event: "pi_report", report })),
+						},
+						context,
+					);
 				},
-				context,
+				catch: (error) => error,
+			});
+			return Effect.runPromise(
+				Effect.acquireUseRelease(
+					open,
+					(pi) => {
+						const { provider, id: modelId } = this.model;
+						return migrateRetiredModel(pi, { provider, modelId }, context).pipe(Effect.as(pi));
+					},
+					// A successful factory hands Pi's lifetime to the SDK.
+					(pi, exit) =>
+						Exit.isSuccess(exit)
+							? Effect.void
+							: Effect.tryPromise(() => pi.close(withoutAbortSignal(context))).pipe(Effect.ignore),
+				),
+				{ signal: context.abortSignal },
 			);
-			try {
-				const { provider, id: modelId } = this.model;
-				await migrateRetiredModel(pi, { provider, modelId }, context);
-				return pi;
-			} catch (error) {
-				await pi.close(context).catch(() => {});
-				throw error;
-			}
 		},
 		defaults: { model: this.model, thinkingLevel: "low" },
 	});
@@ -85,36 +97,35 @@ export class Trajan extends DurableObject<Env> {
 	readonly lifecycle = Lifecycle.install(this).use(this.webSockets).use(this.harness);
 
 	/** Host startup, after the harness has opened pi. */
-	async onStart(): Promise<void> {
-		await this.sockets.reattach();
+	onStart(): Promise<void> {
+		return this.sockets.reattach();
 	}
 }
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
-		if (new URL(request.url).pathname === "/api/health") {
+		const { pathname } = new URL(request.url);
+		if (pathname === "/api/health") {
 			return Response.json({ ok: true, service: "trajan" });
 		}
-		if (new URL(request.url).pathname === "/api/session") {
+		if (pathname === "/api/session") {
 			// A fresh session id for the client to open its WebSocket against.
 			return Response.json({ session: crypto.randomUUID() });
 		}
-		try {
-			return (
-				(await routeAgentRequest(request, env, { cors: true })) ??
-				new Response("Not found", { status: 404 })
-			);
-		} catch (error) {
-			console.error(
-				JSON.stringify({
-					event: "request_failed",
-					error: error instanceof Error ? error.message : String(error),
-				}),
-			);
-			return Response.json(
-				{ error: error instanceof Error ? error.message : String(error) },
-				{ status: 500 },
-			);
-		}
+		return Effect.runPromise(
+			Effect.tryPromise({
+				try: () => routeAgentRequest(request, env, { cors: true }),
+				catch: (error) => error,
+			}).pipe(
+				Effect.map((response) => response ?? new Response("Not found", { status: 404 })),
+				Effect.catch((error) =>
+					Effect.sync(() => {
+						const message = error instanceof Error ? error.message : String(error);
+						console.error(JSON.stringify({ event: "request_failed", error: message }));
+						return Response.json({ error: message }, { status: 500 });
+					}),
+				),
+			),
+		);
 	},
 } satisfies ExportedHandler<Env>;
