@@ -11,7 +11,7 @@ const ExecutionActivity = Schema.Struct({
 const decodeActivity = Schema.decodeUnknownSync(Schema.UndefinedOr(ExecutionActivity));
 
 export function toolActivityKey(runId: string) {
-	return `effect-tool-activity:${runId}`;
+	return `chat-tool-activity:${runId}`;
 }
 
 export function clearToolState(storage: DurableObjectStorage, runId: string) {

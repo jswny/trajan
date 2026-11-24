@@ -11,9 +11,9 @@ import {
 } from "@trajan/harness";
 import type { TurnMessage, TurnModelEvent } from "@trajan/harness";
 import { Effect, Layer, Option, Predicate, Schema, Stream } from "effect";
-import { clearToolState } from "../effect-harness/tool-activity";
-import { TrajanChatObject } from "../effect-harness/worker-host";
-import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
+import { clearToolState } from "../chat/tool-activity";
+import { TrajanChatObject } from "../chat/worker-host";
+import { createChatTools } from "../chat/tools";
 import { codeModeError, createTrajanWorkspace, workspaceToolset } from "../workspace";
 import {
 	compactReference,
@@ -22,7 +22,7 @@ import {
 	createOpenAiResponsesFixture,
 } from "./openai-responses-fixture";
 
-const effectHarnessReset = "Forced Effect harness fixture restart";
+const chatFixtureReset = "Forced chat fixture restart";
 type PausePoint =
 	| "before-task"
 	| "after-write"
@@ -64,7 +64,7 @@ function isMissing(error: unknown): boolean {
 	return Predicate.hasProperty(error, "code") && error.code === "ENOENT";
 }
 
-export class EffectHarnessTestObject extends TrajanChatObject {
+export class ChatTestObject extends TrajanChatObject {
 	readonly #instance = crypto.randomUUID();
 	readonly #workspace = createTrajanWorkspace(this.ctx);
 	readonly #effectTools = this.#createTools();
@@ -102,7 +102,7 @@ export class EffectHarnessTestObject extends TrajanChatObject {
 		const read = (name: "first" | "second"): CodeModeTool => ({
 			replay: "safe",
 			run: Effect.fnUntraced(function* (
-				this: EffectHarnessTestObject,
+				this: ChatTestObject,
 				_input: Schema.Json,
 				{ callId, signal }: Parameters<CodeModeTool["run"]>[1],
 			) {
@@ -119,7 +119,7 @@ export class EffectHarnessTestObject extends TrajanChatObject {
 			}).bind(this),
 		});
 		const branch = pauseAfter(git.branch, "during-replay-git");
-		return effectWorkspaceTools(this.env.LOADER, storage, this.schedules, {
+		return createChatTools(this.env.LOADER, storage, this.schedules, {
 			instructions,
 			catalog: {
 				"codemode:tools": {
@@ -179,8 +179,8 @@ export class EffectHarnessTestObject extends TrajanChatObject {
 		return receipt;
 	}
 
-	readonly #execute = Effect.fn("effect-harness.fixture.executeTool")(function* (
-		this: EffectHarnessTestObject,
+	readonly #execute = Effect.fn("chat.fixture.executeTool")(function* (
+		this: ChatTestObject,
 		...args: Parameters<TurnTools["Service"]["execute"]>
 	) {
 		const [call, attempt] = args;
@@ -199,7 +199,7 @@ export class EffectHarnessTestObject extends TrajanChatObject {
 	});
 
 	readonly #fakeComplete = Effect.fnUntraced(function* (
-		this: EffectHarnessTestObject,
+		this: ChatTestObject,
 		messages: Parameters<TurnModel["Service"]["stream"]>[0],
 	): Effect.fn.Return<typeof TurnMessage.Type, TurnModelError> {
 		const user = messages.findLast((message) => message.role === "user");
@@ -539,7 +539,7 @@ export default async function () {
 
 	workspaceTool(name: string, input: Schema.Json, recovering = false): Promise<string> {
 		const runId = crypto.randomUUID();
-		const tools = effectWorkspaceTools(
+		const tools = createChatTools(
 			this.env.LOADER,
 			this.ctx.storage,
 			this.schedules,
@@ -588,6 +588,6 @@ export default async function () {
 	}
 
 	crash() {
-		this.ctx.abort(effectHarnessReset);
+		this.ctx.abort(chatFixtureReset);
 	}
 }

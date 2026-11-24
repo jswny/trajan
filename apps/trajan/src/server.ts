@@ -1,15 +1,17 @@
 import { TurnModel, TurnTools } from "@trajan/harness";
+import { openAiTurnModel } from "@trajan/model-openai";
 import { Data, Effect, Layer } from "effect";
-import { ChatPath, isEffectChatPath } from "./effect-harness/chat-protocol";
-import { TrajanChatObject } from "./effect-harness/worker-host";
-import { openAiTurnModel } from "./effect-harness/openai-responses";
-import { effectWorkspaceTools } from "./effect-harness/workspace-tools";
+import { openAiGatewayTransport } from "./chat/openai-gateway";
+import { ChatPath, isChatPath } from "./chat/protocol";
+import { TrajanChatObject } from "./chat/worker-host";
+import { createChatTools } from "./chat/tools";
+import { modelConfig } from "./model-config";
 import { createTrajanWorkspace, WORKSPACE_PROMPT, workspaceToolset } from "./workspace";
 
 class ChatRouteError extends Data.TaggedError("ChatRouteError")<{ readonly cause: unknown }> {}
 
 export class Trajan extends TrajanChatObject {
-	readonly #tools = effectWorkspaceTools(
+	readonly #tools = createChatTools(
 		this.env.LOADER,
 		this.ctx.storage,
 		this.schedules,
@@ -25,7 +27,13 @@ export class Trajan extends TrajanChatObject {
 	protected readonly turnLayer = Layer.merge(
 		Layer.succeed(
 			TurnModel,
-			openAiTurnModel(this.env.AI.gateway("default"), this.#tools.declaration, WORKSPACE_PROMPT),
+			openAiTurnModel(openAiGatewayTransport(this.env.AI.gateway("default")), {
+				model: modelConfig.id,
+				reasoningEffort: modelConfig.reasoningEffort,
+				compactThreshold: modelConfig.compactThreshold,
+				instructions: WORKSPACE_PROMPT,
+				tool: this.#tools.declaration,
+			}),
 		),
 		Layer.succeed(TurnTools, this.#tools.service),
 	);
@@ -41,7 +49,7 @@ export default {
 		if (url.pathname === "/api/health") {
 			return Response.json({ ok: true, service: "trajan" });
 		}
-		if (!isEffectChatPath(url.pathname)) {
+		if (!isChatPath(url.pathname)) {
 			return new Response("Not found", { status: 404 });
 		}
 		const origin = request.headers.get("Origin");
@@ -54,7 +62,7 @@ export default {
 		}
 		return Effect.runPromise(
 			Effect.tryPromise({
-				try: () => env.Trajan.getByName("effect-main").fetch(request),
+				try: () => env.Trajan.getByName("main").fetch(request),
 				catch: (cause) => new ChatRouteError({ cause }),
 			}).pipe(
 				Effect.catch((error) =>

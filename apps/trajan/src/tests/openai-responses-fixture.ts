@@ -1,5 +1,6 @@
+import { openAiTurnModel } from "@trajan/model-openai";
 import { Schema } from "effect";
-import { openAiTurnModel } from "../effect-harness/openai-responses";
+import { openAiGatewayTransport } from "../chat/openai-gateway";
 import { modelConfig } from "../model-config";
 
 export const compactSetupPrompt = "Prepare the compacted reference.";
@@ -41,11 +42,11 @@ function sseResponse(output: ReadonlyArray<Schema.JsonObject>, delta?: string) {
 }
 
 export function createOpenAiResponsesFixture(
-	tool: Parameters<typeof openAiTurnModel>[1],
+	tool: Parameters<typeof openAiTurnModel>[1]["tool"],
 	exec: Schema.JsonObject,
 ) {
 	return openAiTurnModel(
-		{
+		openAiGatewayTransport({
 			run: async (request) => {
 				const entry = Array.isArray(request) ? request[0] : request;
 				if (entry?.provider !== "openai" || entry.endpoint !== "v1/responses") {
@@ -87,9 +88,13 @@ export function createOpenAiResponsesFixture(
 				}
 				throw new Error("Expected the compacted context followed by a matching exec result.");
 			},
+		}),
+		{
+			model: modelConfig.id,
+			reasoningEffort: modelConfig.reasoningEffort,
+			compactThreshold: 1000,
+			instructions: "Local Responses fixture",
+			tool,
 		},
-		tool,
-		"Local Responses fixture",
-		1000,
 	);
 }

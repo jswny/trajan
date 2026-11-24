@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { expect, test } from "vite-plus/test";
 
 function openFixture() {
-	return env.EFFECT_HARNESS_TEST.getByName(crypto.randomUUID());
+	return env.CHAT_TEST.getByName(crypto.randomUUID());
 }
 
 const recoverCase = [
@@ -60,7 +60,7 @@ test.each(recoverCase)(
 		const beforeReset = await stub.codeModeState();
 		await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
 		await pending;
-		stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+		stub = env.CHAT_TEST.get(stub.id);
 		await stub.release();
 
 		const expected = { before: "seed", outcome: "interrupted", ...scenario.expected };
@@ -91,7 +91,7 @@ export default async function () {
 	const { receipts } = await stub.codeModeState();
 	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
 	await pending;
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	stub = env.CHAT_TEST.get(stub.id);
 	await stub.release();
 
 	await expect(stub.runCodeMode("run", source)).resolves.toEqual({ value: ["seed", "seed"] });
@@ -126,7 +126,7 @@ export default async function () {
 	const before = await stub.codeModeState();
 	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
 	await pending;
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	stub = env.CHAT_TEST.get(stub.id);
 	await stub.release();
 
 	await expect(stub.runCodeMode("run", source)).resolves.toEqual({

@@ -3,10 +3,10 @@ import { env } from "cloudflare:workers";
 import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/harness";
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
-import { ChatEvent, ChatPath } from "../effect-harness/chat-protocol";
-import { readToolActivity } from "../effect-harness/tool-activity";
+import { ChatEvent, ChatPath } from "../chat/protocol";
+import { readToolActivity } from "../chat/tool-activity";
 import { nextWeeklyRun } from "../turn-schedules";
-import { appendExecInput } from "./effect-harness-fixture";
+import { appendExecInput } from "./chat-runtime-fixture";
 import {
 	compactReference,
 	compactResumePrompt,
@@ -26,7 +26,7 @@ const unknownMessage = expect.stringContaining("Inspect it before repeating the 
 const unknownTool = { status: "unknown", message: unknownMessage };
 
 function openFixture() {
-	return env.EFFECT_HARNESS_TEST.getByName(crypto.randomUUID());
+	return env.CHAT_TEST.getByName(crypto.randomUUID());
 }
 
 async function submit(stub: ReturnType<typeof openFixture>, input = submission) {
@@ -120,7 +120,7 @@ export default async function () {
 	});
 	const before = await stub.state();
 	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	stub = env.CHAT_TEST.get(stub.id);
 	expect(decode(await stub.workspaceTool("exec", list))).toMatchObject({
 		status: "completed",
 		output: { isError: false, details: { count: 1, entries: [{ name: "turn.txt" }] } },
@@ -217,7 +217,7 @@ export default async function () {
 	);
 	expect(created).toMatchObject({ status: "completed", output: { id: expect.any(String) } });
 	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
-	const restarted = env.EFFECT_HARNESS_TEST.get(stub.id);
+	const restarted = env.CHAT_TEST.get(stub.id);
 	const cancelled = decode(
 		await restarted.workspaceTool("exec", {
 			code: `import { listSchedules, cancelSchedule } from "codemode:tools";
@@ -272,7 +272,7 @@ test("restores native compaction across a reset and pairs the resumed exec with 
 	await expect.poll(() => readTurn(stub, first.runId)).toMatchObject({ state: "completed" });
 	const before = await stub.state();
 	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	stub = env.CHAT_TEST.get(stub.id);
 	expect((await stub.state()).instance).not.toBe(before.instance);
 	const followUp = await submit(stub, { id: "compact-follow-up", prompt: compactResumePrompt });
 	await expect
@@ -337,8 +337,8 @@ test("a chat socket restores a completed transcript from durable history", async
 	const stub = openFixture();
 	const { runId } = await submit(stub, { id: "seen", prompt: "Remember milk" });
 	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "completed" });
-	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
-	const response = await env.EFFECT_HARNESS_TEST.get(stub.id).fetch(
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	const response = await env.CHAT_TEST.get(stub.id).fetch(
 		new Request(`https://fixture${ChatPath}/live`, { headers: { Upgrade: "websocket" } }),
 	);
 	const socket = response.webSocket;
@@ -399,8 +399,8 @@ test.each([
 		await stub.discardExecution(runId);
 	}
 
-	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
 	expect((await stub.state()).instance).not.toBe(instance);
 	await stub.release();
 	await runDurableObjectAlarm(stub);
@@ -434,8 +434,8 @@ test("resumes an in-flight script without repeating its completed write", async 
 		.toMatchObject({ text: "once", pausedAt: "waiting-for-restart" });
 	expect(await stub.turn(runId)).toMatchObject({ state: "running" });
 
-	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
 	await runDurableObjectAlarm(stub);
 
 	await expect
@@ -473,8 +473,8 @@ test("a read-only exec replays a completed call and retries an interrupted call 
 	expect(initial).toEqual({ first: [expect.any(String)], second: [expect.any(String)] });
 	expect(await stub.turn(runId)).toMatchObject({ state: "running" });
 
-	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
 	await runDurableObjectAlarm(stub);
 	expect((await stub.state()).instance).not.toBe(instance);
 	await expect
@@ -552,8 +552,8 @@ test("replay reports an interrupted file edit and continues with a check of the 
 		);
 	expect(await readJournal()).toHaveLength(4);
 
-	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
 	await runDurableObjectAlarm(stub);
 	expect((await stub.state()).instance).not.toBe(instance);
 	await expect
@@ -596,8 +596,8 @@ test("Git replay reports interrupted branch creation and continues with a status
 		runInDurableObject(stub, (_, { storage }) => storage.kv.get("git-branch-attempts"));
 	expect(await branchAttempts()).toBe(1);
 
-	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
 	await runDurableObjectAlarm(stub);
 	expect((await stub.state()).instance).not.toBe(instance);
 	await expect
@@ -640,8 +640,8 @@ test("a restart between tool calls reuses the first result and still executes th
 	const { instance } = await stub.state();
 	expect(await stub.turn(runId)).toMatchObject({ state: "running" });
 
-	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
 	expect((await stub.state()).instance).not.toBe(instance);
 	await stub.release();
 	await runDurableObjectAlarm(stub);
@@ -686,8 +686,8 @@ test("recovers the inbox if the object restarts before starting the accepted tas
 	expect(await stub.taskState(first.runId)).toBe("missing");
 	expect(await stub.taskState(second.runId)).toBe("missing");
 
-	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
 	await stub.release();
 	await runDurableObjectAlarm(stub);
 
@@ -721,8 +721,8 @@ test("a turn committed before the task settles appears once in history and in th
 	expect(await stub.turn(first.runId)).toMatchObject({ state: "completed" });
 	expect(await stub.taskState(first.runId)).toBe("running");
 
-	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
 	await stub.release();
 	await runDurableObjectAlarm(stub);
 
@@ -812,8 +812,8 @@ test("settles a failed model turn and proceeds to the next queued submission", a
 				],
 			},
 		});
-	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
-	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
 	expect(await stub.turn(first.runId)).toMatchObject({
 		state: "failed",
 		failure: { code: "model", message: "The fixture model failed." },

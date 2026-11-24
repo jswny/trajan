@@ -150,7 +150,7 @@ export class TurnTools extends Context.Service<
 >()("@trajan/harness/TurnTools") {}
 
 /** Run a turn until the model replies, with a checkpoint for each decision and tool result. */
-export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
+export const runTurn = Effect.fn("harness.runTurn")(function* (
 	submission: typeof TurnSubmission.Type,
 	journal: TurnJournal,
 	context: ReadonlyArray<typeof ConversationMessage.Type> = [],

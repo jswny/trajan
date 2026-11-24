@@ -17,7 +17,7 @@ export default defineConfig({
 			!(
 				"durableObjectReset" in error &&
 				error.durableObjectReset === true &&
-				error.message === "Forced Effect harness fixture restart"
+				error.message === "Forced chat fixture restart"
 			),
 	},
 });

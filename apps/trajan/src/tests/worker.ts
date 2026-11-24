@@ -1,5 +1,5 @@
-export { EffectHarnessTestObject } from "./effect-harness-fixture";
-import { isEffectChatPath } from "../effect-harness/chat-protocol";
+export { ChatTestObject } from "./chat-runtime-fixture";
+import { isChatPath } from "../chat/protocol";
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -14,12 +14,12 @@ export default {
 		const fixture = /(?:^|;\s*)trajan-fixture=([a-f0-9-]+)(?:;|$)/.exec(
 			request.headers.get("Cookie") ?? "",
 		)?.[1];
-		const stub = env.EFFECT_HARNESS_TEST.getByName(fixture ?? "test-chat");
-		if (isEffectChatPath(url.pathname)) {
+		const stub = env.CHAT_TEST.getByName(fixture ?? "test-chat");
+		if (isChatPath(url.pathname)) {
 			return stub.fetch(request);
 		}
 		const action =
-			/^\/__browser-smoke\/effect-stream\/(pause|pause-replay|pause-replay-edit|pause-replay-git|release|crash|state)$/.exec(
+			/^\/__browser-smoke\/chat\/(pause|pause-replay|pause-replay-edit|pause-replay-git|release|crash|state)$/.exec(
 				url.pathname,
 			)?.[1];
 		if (action && fixture && request.method === "POST") {

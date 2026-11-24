@@ -17,7 +17,7 @@ import { useEffect, useLayoutEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatMarkdown } from "./chat-markdown";
 import type { ChatEntry, ChatMessage, ChatPart } from "./chat-view";
-import type { ChatToolInfo } from "./effect-harness/chat-protocol";
+import type { ChatToolInfo } from "./chat/protocol";
 import { themePreference } from "./theme";
 import { useChatSession } from "./use-chat-session";
 import "./styles.css";

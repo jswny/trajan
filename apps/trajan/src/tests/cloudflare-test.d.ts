@@ -1,9 +1,9 @@
-import type { EffectHarnessTestObject } from "./effect-harness-fixture";
+import type { ChatTestObject } from "./chat-runtime-fixture";
 
 declare global {
 	namespace Cloudflare {
 		interface Env {
-			EFFECT_HARNESS_TEST: DurableObjectNamespace<EffectHarnessTestObject>;
+			CHAT_TEST: DurableObjectNamespace<ChatTestObject>;
 		}
 	}
 }

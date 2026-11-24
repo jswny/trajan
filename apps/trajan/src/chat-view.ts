@@ -1,6 +1,6 @@
 import type { ToolActivity } from "@trajan/harness";
 import { Schema } from "effect";
-import type { ChatPage } from "./effect-harness/chat-protocol";
+import type { ChatPage } from "./chat/protocol";
 
 const ContentParts = Schema.Array(
 	Schema.Union([

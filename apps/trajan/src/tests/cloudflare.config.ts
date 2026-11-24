@@ -10,13 +10,13 @@ export default defineConfig(() => ({
 		compatibilityFlags: ["nodejs_compat"],
 		env: {
 			LOADER: bindings.workerLoader(),
-			EFFECT_HARNESS_TEST: bindings.durableObject({
+			CHAT_TEST: bindings.durableObject({
 				worker: "trajan-test",
-				exportName: "EffectHarnessTestObject",
+				exportName: "ChatTestObject",
 			}),
 		},
 		exports: {
-			EffectHarnessTestObject: exports.durableObject({ storage: "sqlite" }),
+			ChatTestObject: exports.durableObject({ storage: "sqlite" }),
 		},
 	},
 }));

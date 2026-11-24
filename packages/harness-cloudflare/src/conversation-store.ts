@@ -7,7 +7,7 @@ const contextByteLimit = 32_000;
 const messageJson = Schema.fromJsonString(TurnMessage);
 const contextJson = Schema.fromJsonString(ConversationMessage);
 const transcriptJson = Schema.fromJsonString(TurnTranscript);
-const modelContextKey = "effect-model-context";
+const modelContextKey = "harness-model-context";
 const decodeModelContext = Schema.decodeUnknownSync(Schema.UndefinedOr(Schema.Json));
 
 export type HistoryQuery = {
@@ -35,7 +35,7 @@ export class ConversationStore {
 
 	initialize() {
 		this.storage.sql.exec(`
-			CREATE TABLE IF NOT EXISTS effect_submissions (
+			CREATE TABLE IF NOT EXISTS harness_submissions (
 				seq INTEGER PRIMARY KEY,
 				run_id TEXT UNIQUE NOT NULL,
 				submission_id TEXT UNIQUE NOT NULL,
@@ -44,16 +44,16 @@ export class ConversationStore {
 				context_through INTEGER,
 				error TEXT
 			);
-			CREATE INDEX IF NOT EXISTS effect_submissions_pending
-				ON effect_submissions(seq) WHERE state IN ('pending', 'running', 'stopping');
-			CREATE TABLE IF NOT EXISTS effect_entries (
+			CREATE INDEX IF NOT EXISTS harness_submissions_pending
+				ON harness_submissions(seq) WHERE state IN ('pending', 'running', 'stopping');
+			CREATE TABLE IF NOT EXISTS harness_entries (
 				seq INTEGER PRIMARY KEY,
-				submission_seq INTEGER NOT NULL REFERENCES effect_submissions(seq),
+				submission_seq INTEGER NOT NULL REFERENCES harness_submissions(seq),
 				role TEXT NOT NULL,
 				message TEXT NOT NULL
 			);
-			CREATE INDEX IF NOT EXISTS effect_entries_submission ON effect_entries(submission_seq, seq);
-			CREATE INDEX IF NOT EXISTS effect_entries_context ON effect_entries(seq)
+			CREATE INDEX IF NOT EXISTS harness_entries_submission ON harness_entries(submission_seq, seq);
+			CREATE INDEX IF NOT EXISTS harness_entries_context ON harness_entries(seq)
 				WHERE role IN ('user', 'assistant');
 		`);
 	}
@@ -62,7 +62,7 @@ export class ConversationStore {
 		return this.storage.transactionSync(() => {
 			const existing = this.storage.sql
 				.exec<Pick<SubmissionRow, "run_id" | "prompt">>(
-					"SELECT run_id, prompt FROM effect_submissions WHERE submission_id = ?",
+					"SELECT run_id, prompt FROM harness_submissions WHERE submission_id = ?",
 					submission.id,
 				)
 				.toArray()[0];
@@ -78,7 +78,7 @@ export class ConversationStore {
 
 			const runId = crypto.randomUUID();
 			this.storage.sql.exec(
-				"INSERT INTO effect_submissions (run_id, submission_id, prompt) VALUES (?, ?, ?)",
+				"INSERT INTO harness_submissions (run_id, submission_id, prompt) VALUES (?, ?, ?)",
 				runId,
 				submission.id,
 				submission.prompt,
@@ -90,7 +90,7 @@ export class ConversationStore {
 	head(): SubmissionRow | undefined {
 		return this.storage.sql
 			.exec<SubmissionRow>(`
-			SELECT * FROM effect_submissions WHERE state IN ('pending', 'running', 'stopping') ORDER BY seq LIMIT 1
+			SELECT * FROM harness_submissions WHERE state IN ('pending', 'running', 'stopping') ORDER BY seq LIMIT 1
 		`)
 			.toArray()[0];
 	}
@@ -112,8 +112,8 @@ export class ConversationStore {
 			return this.storage.sql
 				.exec<SubmissionRow>(
 					`
-				UPDATE effect_submissions SET state = 'running',
-					context_through = (SELECT COALESCE(MAX(seq), 0) FROM effect_entries)
+				UPDATE harness_submissions SET state = 'running',
+					context_through = (SELECT COALESCE(MAX(seq), 0) FROM harness_entries)
 				WHERE run_id = ? RETURNING *
 			`,
 					runId,
@@ -129,15 +129,15 @@ export class ConversationStore {
 				`
 			WITH recent AS (
 				SELECT submission_seq, length(CAST(message AS BLOB)) AS bytes
-				FROM effect_entries JOIN effect_submissions ON effect_submissions.seq = submission_seq
-				WHERE effect_entries.seq <= ? AND role IN ('user', 'assistant')
-					AND effect_submissions.state = 'completed'
-				ORDER BY effect_entries.seq DESC LIMIT ?
+				FROM harness_entries JOIN harness_submissions ON harness_submissions.seq = submission_seq
+				WHERE harness_entries.seq <= ? AND role IN ('user', 'assistant')
+					AND harness_submissions.state = 'completed'
+				ORDER BY harness_entries.seq DESC LIMIT ?
 			), budget AS (
 				SELECT submission_seq, SUM(SUM(bytes)) OVER (ORDER BY submission_seq DESC) AS bytes
 				FROM recent GROUP BY submission_seq
 			)
-			SELECT message FROM effect_entries JOIN budget USING (submission_seq)
+			SELECT message FROM harness_entries JOIN budget USING (submission_seq)
 			WHERE budget.bytes <= ? AND role IN ('user', 'assistant')
 			ORDER BY seq
 		`,
@@ -172,14 +172,14 @@ export class ConversationStore {
 
 			for (const message of messages) {
 				this.storage.sql.exec(
-					"INSERT INTO effect_entries (submission_seq, role, message) VALUES (?, ?, ?)",
+					"INSERT INTO harness_entries (submission_seq, role, message) VALUES (?, ?, ?)",
 					row.seq,
 					message.role,
 					message.json,
 				);
 			}
 			this.storage.sql.exec(
-				"UPDATE effect_submissions SET state = 'completed' WHERE seq = ?",
+				"UPDATE harness_submissions SET state = 'completed' WHERE seq = ?",
 				row.seq,
 			);
 			if (transcript.modelContext !== undefined) {
@@ -200,7 +200,7 @@ export class ConversationStore {
 				return false;
 			}
 			this.storage.sql.exec(
-				"UPDATE effect_submissions SET state = 'stopping' WHERE run_id = ?",
+				"UPDATE harness_submissions SET state = 'stopping' WHERE run_id = ?",
 				runId,
 			);
 			return true;
@@ -223,13 +223,13 @@ export class ConversationStore {
 				return;
 			}
 			this.storage.sql.exec(
-				"UPDATE effect_submissions SET state = ?, error = ? WHERE seq = ?",
+				"UPDATE harness_submissions SET state = ?, error = ? WHERE seq = ?",
 				status,
 				status === "failed" ? text : null,
 				row.seq,
 			);
 			this.storage.sql.exec(
-				"INSERT INTO effect_entries (submission_seq, role, message) VALUES (?, 'user', ?), (?, 'notice', ?)",
+				"INSERT INTO harness_entries (submission_seq, role, message) VALUES (?, 'user', ?), (?, 'notice', ?)",
 				row.seq,
 				Schema.encodeSync(messageJson)({ role: "user", text: row.prompt }),
 				row.seq,
@@ -252,7 +252,7 @@ export class ConversationStore {
 				: null;
 		const queued = this.storage.sql
 			.exec<{ count: number }>(
-				"SELECT COUNT(*) AS count FROM effect_submissions WHERE state = 'pending'",
+				"SELECT COUNT(*) AS count FROM harness_submissions WHERE state = 'pending'",
 			)
 			.one().count;
 		return {
@@ -278,7 +278,7 @@ export class ConversationStore {
 		if (row?.state === "completed") {
 			const messages = this.storage.sql
 				.exec<Pick<EntryRow, "message">>(
-					"SELECT message FROM effect_entries WHERE submission_seq = ? ORDER BY seq",
+					"SELECT message FROM harness_entries WHERE submission_seq = ? ORDER BY seq",
 					row.seq,
 				)
 				.toArray()
@@ -293,7 +293,7 @@ export class ConversationStore {
 			.exec<EntryRow>(
 				`
 			SELECT entries.seq, submissions.submission_id, entries.message
-			FROM effect_entries AS entries JOIN effect_submissions AS submissions ON submissions.seq = entries.submission_seq
+			FROM harness_entries AS entries JOIN harness_submissions AS submissions ON submissions.seq = entries.submission_seq
 			WHERE entries.seq < ? ORDER BY entries.seq DESC LIMIT ?
 		`,
 				before ?? Number.MAX_SAFE_INTEGER,
@@ -313,7 +313,7 @@ export class ConversationStore {
 
 	#find(runId: string): SubmissionRow | undefined {
 		return this.storage.sql
-			.exec<SubmissionRow>("SELECT * FROM effect_submissions WHERE run_id = ?", runId)
+			.exec<SubmissionRow>("SELECT * FROM harness_submissions WHERE run_id = ?", runId)
 			.toArray()[0];
 	}
 }

@@ -1,13 +1,7 @@
 import { Context, Effect, Layer, Queue, Schedule, Schema, SubscriptionRef } from "effect";
 import { Socket } from "effect/socket";
-import {
-	ChatEvent,
-	ChatPage,
-	ChatPath,
-	ChatReceipt,
-	ChatStopReceipt,
-} from "./effect-harness/chat-protocol";
-import type { ChatSnapshot } from "./effect-harness/chat-protocol";
+import { ChatEvent, ChatPage, ChatPath, ChatReceipt, ChatStopReceipt } from "./chat/protocol";
+import type { ChatSnapshot } from "./chat/protocol";
 
 export type PromptDraft = { readonly text: string };
 type Submission = {

@@ -32,7 +32,7 @@ function markInterrupted(activity: ReadonlyArray<typeof ToolActivity.Type>) {
 	);
 }
 
-export function effectWorkspaceTools(
+export function createChatTools(
 	loader: WorkerLoader,
 	storage: DurableObjectStorage,
 	schedules: TurnSchedules,
@@ -45,7 +45,7 @@ export function effectWorkspaceTools(
 		...catalog,
 		"codemode:tools": { ...catalog["codemode:tools"], ...schedules.tools },
 	});
-	const execute = Effect.fn("effect-harness.exec")(
+	const execute = Effect.fn("chat.exec")(
 		function* (...[call, attempt, publishActivity]: Parameters<TurnTools["Service"]["execute"]>) {
 			if (call.name !== Exec.name) {
 				return { status: "failed" as const, message: `Unknown tool: ${call.name}` };

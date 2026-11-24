@@ -2,7 +2,6 @@ import { TurnModel, TurnModelError } from "@trajan/harness";
 import type { TurnModelEvent } from "@trajan/harness";
 import { Effect, Schema, Stream } from "effect";
 import { decode as decodeSse } from "effect/encoding/Sse";
-import { modelConfig } from "../model-config";
 
 const Item = Schema.StructWithRest(Schema.Struct({ type: Schema.NonEmptyString }), [
 	Schema.JsonObject,
@@ -46,6 +45,38 @@ type Tool = {
 	readonly description: string;
 	readonly parameters: object;
 };
+type OpenAiTurnOptions = {
+	readonly model: string;
+	readonly reasoningEffort: string;
+	readonly compactThreshold: number;
+	readonly instructions: string;
+	readonly tool: Tool;
+};
+
+function requestBody(
+	{ model, reasoningEffort, compactThreshold, instructions, tool }: OpenAiTurnOptions,
+	input: ReadonlyArray<Item>,
+	allowTools: boolean,
+) {
+	return {
+		model,
+		instructions,
+		input,
+		store: false,
+		stream: true,
+		reasoning: { effort: reasoningEffort },
+		include: ["reasoning.encrypted_content"],
+		context_management: [{ type: "compaction", compact_threshold: compactThreshold }],
+		tools: [{ type: "function", ...tool, strict: true }],
+		tool_choice: allowTools ? "auto" : "none",
+		parallel_tool_calls: false,
+	} as const;
+}
+
+export type OpenAiResponsesTransport = (
+	body: ReturnType<typeof requestBody>,
+	signal: AbortSignal,
+) => Promise<Response>;
 
 function modelError(message: string) {
 	return new TurnModelError({ message });
@@ -151,13 +182,9 @@ const completedResponse = Effect.fnUntraced(function* (
 	};
 }, Effect.mapError(transportError));
 
-export function openAiTurnModel(
-	gateway: Pick<AiGateway, "run">,
-	tool: Tool,
-	systemPrompt: string,
-	compactThreshold: number = modelConfig.compactThreshold,
-) {
-	const openStream = Effect.fn("effect-harness.openai.openStream")(function* (
+export function openAiTurnModel(request: OpenAiResponsesTransport, options: OpenAiTurnOptions) {
+	const { tool } = options;
+	const openStream = Effect.fn("model-openai.openStream")(function* (
 		history: History,
 		{ allowTools, modelContext }: Parameters<TurnModel["Service"]["stream"]>[1],
 	) {
@@ -167,46 +194,20 @@ export function openAiTurnModel(
 			(activeRequest) => Effect.sync(() => activeRequest.abort()),
 		);
 		const response = yield* Effect.tryPromise({
-			try: () =>
-				gateway.run(
-					[
-						{
-							provider: "openai",
-							endpoint: "v1/responses",
-							headers: {
-								"Content-Type": "application/json",
-								"cf-aig-skip-cache": "true",
-								"cf-aig-collect-log-payload": "false",
-								"cf-aig-metadata": '{"app":"trajan"}',
-							},
-							query: {
-								model: modelConfig.id,
-								instructions: systemPrompt,
-								input,
-								store: false,
-								stream: true,
-								reasoning: { effort: modelConfig.reasoningEffort },
-								include: ["reasoning.encrypted_content"],
-								context_management: [{ type: "compaction", compact_threshold: compactThreshold }],
-								tools: [{ type: "function", ...tool, strict: true }],
-								tool_choice: allowTools ? "auto" : "none",
-								parallel_tool_calls: false,
-							},
-						},
-					],
-					{ signal: controller.signal },
-				),
+			try: () => request(requestBody(options, input, allowTools), controller.signal),
 			catch: transportError,
 		});
 		if (!response.ok) {
 			const body = yield* Effect.tryPromise({ try: () => response.text(), catch: transportError });
 			const decoded = decodeErrorBody(body);
 			const detail = decoded._tag === "Some" ? decoded.value.error?.message : undefined;
-			return yield* modelError(detail ?? `AI Gateway returned HTTP ${response.status}.`);
+			return yield* modelError(
+				detail ?? `OpenAI Responses request returned HTTP ${response.status}.`,
+			);
 		}
 		const body = response.body;
 		if (!body || !response.headers.get("content-type")?.includes("text/event-stream")) {
-			return yield* modelError("AI Gateway did not return an OpenAI Responses stream.");
+			return yield* modelError("Expected an OpenAI Responses event stream.");
 		}
 
 		return Stream.fromReadableStream({ evaluate: () => body, onError: transportError }).pipe(

@@ -24,6 +24,7 @@
 		"@trajan/code-mode": "0.1.0",
 		"@trajan/harness": "0.1.0",
 		"@trajan/harness-cloudflare": "0.1.0",
+		"@trajan/model-openai": "0.1.0",
 		"agents": "^0.34.0",
 		"effect": "4.1.5",
 		"react": "19.3.0",

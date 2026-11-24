@@ -12,7 +12,7 @@ import type { HistoryQuery } from "./conversation-store";
 
 // Tasks and jobs use these names to look up work persisted by prior isolates.
 const turnDefinition = "turn@v3";
-const inboxJob = "effect-harness-inbox";
+const inboxJob = "harness-inbox";
 const TurnTaskInput = Schema.Struct({ runId: Schema.NonEmptyString });
 
 class TurnTaskInputError extends Schema.TaggedError<
@@ -60,7 +60,7 @@ function taskJournal(runId: string, step: TaskStep): TurnJournal {
 								}).pipe(
 									Effect.flatMap(Schema.decodeUnknownEffect(result)),
 									Effect.flatMap(Schema.encodeEffect(checkpointJson)),
-									Effect.withSpan("effect-harness.step.attempt", {
+									Effect.withSpan("harness.step.attempt", {
 										attributes: { runId, name, attempt },
 									}),
 								),
@@ -81,7 +81,7 @@ function taskJournal(runId: string, step: TaskStep): TurnJournal {
 					}),
 					Effect.flatMap(Schema.decodeEffect(checkpointJson)),
 				);
-			}).pipe(Effect.withSpan("effect-harness.checkpoint", { attributes: { runId, name } }));
+			}).pipe(Effect.withSpan("harness.checkpoint", { attributes: { runId, name } }));
 		},
 	};
 }
@@ -137,9 +137,7 @@ export abstract class CloudflareHarness<
 		}
 	}
 
-	#drainInbox = Effect.fn("effect-harness.drainInbox")(function* (
-		this: CloudflareHarness<Bindings>,
-	) {
+	#drainInbox = Effect.fn("harness.drainInbox")(function* (this: CloudflareHarness<Bindings>) {
 		const head = yield* conversationEffect("read inbox", () => this.#conversation.head());
 		if (!head) {
 			return;
@@ -177,7 +175,7 @@ export abstract class CloudflareHarness<
 			const code = task.state === "failed" ? failureCode(task.error.name) : task.state;
 			yield* conversationEffect("fail turn", () => this.#conversation.fail(runId, message));
 			yield* Effect.sync(() => this.onStateChange?.(runId));
-			yield* Effect.logWarning("Effect harness turn ended without a transcript").pipe(
+			yield* Effect.logWarning("Harness turn ended without a transcript").pipe(
 				Effect.annotateLogs({ runId, code }),
 			);
 			return "yield" as const;
@@ -186,7 +184,7 @@ export abstract class CloudflareHarness<
 		return { rescheduleAt: (yield* Clock.currentTimeMillis) + 30_000 };
 	});
 
-	#runSubmission = Effect.fn("effect-harness.runSubmission")(function* (
+	#runSubmission = Effect.fn("harness.runSubmission")(function* (
 		this: CloudflareHarness<Bindings>,
 		runId: string,
 		step: TaskStep,

@@ -3,12 +3,12 @@ import { TurnSubmission } from "@trajan/harness";
 import { devices, expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { Schema } from "effect";
-import { ChatEvent, ChatPath, ChatReceipt } from "../../effect-harness/chat-protocol";
+import { ChatEvent, ChatPath, ChatReceipt } from "../../chat/protocol";
 
 const decodeFrame = Schema.decodeUnknownOption(Schema.fromJsonString(ChatEvent));
 const decodeSubmission = Schema.decodeUnknownSync(Schema.fromJsonString(TurnSubmission));
 const decodeReceipt = Schema.decodeUnknownSync(ChatReceipt);
-const control = "/__browser-smoke/effect-stream";
+const control = "/__browser-smoke/chat";
 
 test.beforeEach(async ({ context, baseURL }) => {
 	await context.addCookies([

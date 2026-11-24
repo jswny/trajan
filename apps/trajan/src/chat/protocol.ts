@@ -2,7 +2,7 @@ import { ToolActivity, TurnMessage } from "@trajan/harness";
 import { Schema } from "effect";
 
 export const ChatPath = "/api/chat";
-export function isEffectChatPath(pathname: string) {
+export function isChatPath(pathname: string) {
 	return [ChatPath, `${ChatPath}/live`, `${ChatPath}/history`, `${ChatPath}/stop`].includes(
 		pathname,
 	);

@@ -4,8 +4,8 @@ import { CloudflareHarness } from "@trajan/harness-cloudflare";
 import { WebSockets } from "agents/websockets";
 import { Schema } from "effect";
 import { TurnSchedules } from "../turn-schedules";
-import { ChatEvent, ChatHistoryQuery, ChatPath, ChatStop } from "./chat-protocol";
-import type { ChatPreview, ChatSnapshot, ChatToolInfo } from "./chat-protocol";
+import { ChatEvent, ChatHistoryQuery, ChatPath, ChatStop } from "./protocol";
+import type { ChatPreview, ChatSnapshot, ChatToolInfo } from "./protocol";
 import { clearToolState } from "./tool-activity";
 
 const chatEventJson = Schema.encodeSync(Schema.fromJsonString(ChatEvent));
