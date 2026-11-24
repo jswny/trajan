@@ -69,6 +69,7 @@ const ModelReply = Schema.Struct({
 	continuation: Schema.optionalKey(Schema.Json),
 });
 const ModelResponse = Schema.Union([ModelReply, ModelToolCall]);
+export type TurnModelResponse = typeof ModelResponse.Type;
 
 type ModelHistoryEntry =
 	| typeof ConversationMessage.Type
@@ -130,7 +131,7 @@ export class TurnModel extends Context.Service<
 
 export type TurnModelEvent =
 	| { readonly type: "text-delta"; readonly text: string }
-	| { readonly type: "response"; readonly response: unknown };
+	| { readonly type: "response"; readonly response: TurnModelResponse };
 
 export type TurnProgress =
 	| Extract<TurnModelEvent, { type: "text-delta" }>
@@ -145,7 +146,7 @@ export class TurnTools extends Context.Service<
 			call: typeof ToolCall.Type,
 			attempt: StepAttempt,
 			publishActivity: (activity: ReadonlyArray<typeof ToolActivity.Type>) => Effect.Effect<void>,
-		) => Effect.Effect<unknown, TurnError>;
+		) => Effect.Effect<typeof ToolResult.Type, TurnError>;
 	}
 >()("@trajan/harness/TurnTools") {}
 

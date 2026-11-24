@@ -1,7 +1,7 @@
 import { expect, it, vi } from "@effect/vitest";
 import { Effect, Layer, Result, Schema, Stream } from "effect";
 import { runTurn, TurnModel, TurnModelError, TurnTools } from "./index";
-import type { TurnJournal } from "./index";
+import type { TurnJournal, TurnModelResponse } from "./index";
 
 const submission = { id: "s1", prompt: "Say hello" };
 
@@ -14,7 +14,7 @@ const journal: TurnJournal = {
 
 type Complete = (
 	...args: Parameters<TurnModel["Service"]["stream"]>
-) => Effect.Effect<unknown, TurnModelError>;
+) => Effect.Effect<TurnModelResponse, TurnModelError>;
 
 function turnLayer(complete: Complete, execute: TurnTools["Service"]["execute"]) {
 	return Layer.merge(
@@ -34,7 +34,9 @@ function turnLayer(complete: Complete, execute: TurnTools["Service"]["execute"])
 
 it.effect("stores a direct reply without calling a tool", () =>
 	Effect.gen(function* () {
-		const execute = vi.fn(() => Effect.succeed({ status: "completed", output: null }));
+		const execute = vi.fn<TurnTools["Service"]["execute"]>(() =>
+			Effect.succeed({ status: "completed", output: null }),
+		);
 		const result = yield* runTurn(submission, journal).pipe(
 			Effect.provide(
 				turnLayer(() => Effect.succeed({ role: "assistant", text: "Hello" }), execute),
@@ -76,12 +78,20 @@ it.effect("publishes draft text but fails when the stream has no terminal respon
 
 it.effect("rejects a malformed tool result before sending it back to the model", () =>
 	Effect.gen(function* () {
-		const complete = vi.fn(() =>
+		const complete = vi.fn<Complete>(() =>
 			Effect.succeed({ role: "tool-call", name: "test", id: "call-1", input: null }),
 		);
-		const result = yield* runTurn(submission, journal).pipe(
+		const malformedJournal: TurnJournal = {
+			checkpoint: (name, schema, run) =>
+				journal.checkpoint(name, schema, (attempt) =>
+					name.startsWith("tool:")
+						? run(attempt).pipe(Effect.as({ status: "completed", output: undefined }))
+						: run(attempt),
+				),
+		};
+		const result = yield* runTurn(submission, malformedJournal).pipe(
 			Effect.provide(
-				turnLayer(complete, () => Effect.succeed({ status: "completed", output: undefined })),
+				turnLayer(complete, () => Effect.succeed({ status: "completed", output: null })),
 			),
 			Effect.result,
 		);
@@ -93,7 +103,7 @@ it.effect("rejects a malformed tool result before sending it back to the model",
 
 it.effect("passes each continuation back to the model and omits it from the transcript", () =>
 	Effect.gen(function* () {
-		const first = { role: "tool-call", id: "call-1", name: "test", input: null };
+		const first = { role: "tool-call" as const, id: "call-1", name: "test", input: null };
 		const second = { ...first, id: "call-2" };
 		const firstContinuation = { opaque: "first context" };
 		const secondContinuation = { opaque: "second context" };

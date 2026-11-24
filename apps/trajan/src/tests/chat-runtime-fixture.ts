@@ -9,7 +9,7 @@ import {
 	TurnSubmission,
 	TurnTools,
 } from "@trajan/harness";
-import type { TurnMessage, TurnModelEvent } from "@trajan/harness";
+import type { TurnModelEvent, TurnModelResponse } from "@trajan/harness";
 import { Effect, Layer, Option, Predicate, Schema, Stream } from "effect";
 import { clearToolState } from "../chat/tool-activity";
 import { TrajanChatObject } from "../chat/worker-host";
@@ -201,7 +201,7 @@ export class ChatTestObject extends TrajanChatObject {
 	readonly #fakeComplete = Effect.fnUntraced(function* (
 		this: ChatTestObject,
 		messages: Parameters<TurnModel["Service"]["stream"]>[0],
-	): Effect.fn.Return<typeof TurnMessage.Type, TurnModelError> {
+	): Effect.fn.Return<TurnModelResponse, TurnModelError> {
 		const user = messages.findLast((message) => message.role === "user");
 		const last = messages.at(-1);
 		const appendTwice = user?.text === "Append hello, then world.";
