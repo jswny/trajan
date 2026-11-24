@@ -1,7 +1,8 @@
 import { bindings, defineConfig, exports } from "cf/config";
-import codemode from "./codemode.config.ts";
+import codemode from "@trajan/codemode/cloudflare.config";
 import * as entrypoint from "./src/server.ts" with { type: "cf-worker" };
 
+// Use npm run deploy --workspace=@trajan/app as the Workers Builds deploy command.
 // The deploy script uses --force because dashboard secret updates have triggered false
 // configuration conflicts in Workers Builds. See cloudflare/cf#69 and cloudflare/cf#466.
 export default defineConfig(({ mode }) => {

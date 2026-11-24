@@ -1,6 +1,7 @@
 import { defineConfig, exports } from "cf/config";
-import * as entrypoint from "./src/codemode-sandbox.ts" with { type: "cf-worker" };
+import * as entrypoint from "./src/server.ts" with { type: "cf-worker" };
 
+// Use npm run deploy --workspace=@trajan/codemode as the Workers Builds deploy command.
 export default defineConfig({
 	worker: {
 		name: "trajan-codemode",

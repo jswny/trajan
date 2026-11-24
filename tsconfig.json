@@ -1,11 +1,4 @@
 {
-	"extends": "agents/tsconfig",
-	"compilerOptions": {
-		"types": ["@cloudflare/vitest-plugin/types", "vite/client"],
-		"lib": ["ES2024", "DOM", "DOM.Iterable"],
-		"jsx": "react-jsx",
-		"allowImportingTsExtensions": true,
-		"module": "preserve"
-	},
-	"include": ["src/**/*.ts", "src/**/*.tsx", "cloudflare.config.ts", ".cloudflare/types"]
+	"extends": "./tsconfig.base.json",
+	"include": ["vite.config.ts"]
 }

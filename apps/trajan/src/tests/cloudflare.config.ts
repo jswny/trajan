@@ -1,5 +1,5 @@
 import { bindings, defineConfig, exports } from "cf/config";
-import codemode from "../../codemode.config.ts";
+import codemode from "@trajan/codemode/cloudflare.config";
 import * as entrypoint from "./worker.ts" with { type: "cf-worker" };
 
 export default defineConfig(({ mode }) => ({
