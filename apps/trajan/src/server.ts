@@ -64,7 +64,7 @@ export class Trajan extends DurableObject<Env> {
 						// Pi doubles the delay before each retry, for about 30 seconds total.
 						retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
 					},
-					onReport: (report) => console.warn(JSON.stringify({ event: "pi_report", report })),
+					onReport: (report) => Effect.runSync(Effect.logWarning({ event: "pi_report", report })),
 				},
 				context,
 			);
@@ -91,7 +91,9 @@ export default {
 		if (url.pathname === "/api/health") {
 			return Response.json({ ok: true, service: "trajan" });
 		}
-		if (!isMainChatUrl(url)) return new Response("Not found", { status: 404 });
+		if (!isMainChatUrl(url)) {
+			return new Response("Not found", { status: 404 });
+		}
 		const origin = request.headers.get("Origin");
 		if (origin !== null && origin !== url.origin) {
 			return new Response("Forbidden", { status: 403 });
@@ -103,9 +105,9 @@ export default {
 			}).pipe(
 				Effect.map((response) => response ?? new Response("Not found", { status: 404 })),
 				Effect.catch((error) =>
-					Effect.sync(() => {
+					Effect.gen(function* () {
 						const message = error instanceof Error ? error.message : String(error);
-						console.error(JSON.stringify({ event: "request_failed", error: message }));
+						yield* Effect.logError({ event: "request_failed", error: message });
 						return Response.json({ error: message }, { status: 500 });
 					}),
 				),

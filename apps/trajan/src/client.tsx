@@ -197,7 +197,7 @@ function AssistantMessage({
 }: {
 	message: EntryMessage;
 	streaming?: boolean;
-	runningTools: readonly string[];
+	runningTools: ReadonlyArray<string>;
 }) {
 	return (
 		<div className="flex items-start gap-3">
@@ -266,7 +266,7 @@ function Message({
 }: {
 	message: TranscriptMessage;
 	streaming?: boolean;
-	runningTools: readonly string[];
+	runningTools: ReadonlyArray<string>;
 	loading?: boolean;
 	onFillGap?: (gap: Extract<TranscriptMessage, { role: "gap" }>) => void;
 }) {
@@ -314,8 +314,8 @@ function ToolsDialog({
 	tools,
 	activeTools,
 }: {
-	tools: readonly ToolInfo[];
-	activeTools: readonly string[];
+	tools: ReadonlyArray<ToolInfo>;
+	activeTools: ReadonlyArray<string>;
 }) {
 	return (
 		<Dialog className="tools-dialog z-20 flex flex-col overflow-hidden">
@@ -406,10 +406,13 @@ function App() {
 	// Scrolling up stops following; scrolling back to the bottom resumes it.
 	const onScroll = () => {
 		const scroller = scrollRef.current;
-		if (scroller === null) return;
+		if (scroller === null) {
+			return;
+		}
 		const fromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-		if (fromBottom <= BOTTOM_THRESHOLD) following.current = true;
-		else if (scroller.scrollTop < lastScrollTop.current - 1) {
+		if (fromBottom <= BOTTOM_THRESHOLD) {
+			following.current = true;
+		} else if (scroller.scrollTop < lastScrollTop.current - 1) {
 			following.current = false;
 		}
 		lastScrollTop.current = scroller.scrollTop;
@@ -421,7 +424,9 @@ function App() {
 		if (scroller !== null && keepFromBottom.current !== null) {
 			scroller.scrollTop = scroller.scrollHeight - keepFromBottom.current;
 		}
-		if (!loading) keepFromBottom.current = null;
+		if (!loading) {
+			keepFromBottom.current = null;
+		}
 	}, [oldestId, loading]);
 
 	const showEarlier = () => {
@@ -437,7 +442,9 @@ function App() {
 
 	/** While a run is going, Enter queues a follow-up and Steer joins the run. */
 	const submit = (whenBusy: "followUp" | "steer" = "followUp") => {
-		if (!canSubmit) return;
+		if (!canSubmit) {
+			return;
+		}
 		// Sending a message always brings the conversation back to the bottom.
 		following.current = true;
 		submitPrompt(whenBusy);
@@ -681,5 +688,7 @@ function App() {
 }
 
 const root = document.getElementById("root");
-if (!root) throw new Error("Missing #root element");
+if (!root) {
+	throw new Error("Missing #root element");
+}
 createRoot(root).render(<App />);

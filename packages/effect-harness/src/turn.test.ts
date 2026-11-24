@@ -1,6 +1,7 @@
 import { expect, it, vi } from "@effect/vitest";
 import { Effect, Layer, Result, Schema } from "effect";
-import { runTurn, type TurnJournal, TurnModel, TurnTools } from "./index";
+import { runTurn, TurnModel, TurnTools } from "./index";
+import type { TurnJournal } from "./index";
 
 const submission = { id: "s1", prompt: "Say hello" };
 

@@ -13,6 +13,7 @@
 		"ready": "vp run check && vp run -r build"
 	},
 	"devDependencies": {
+		"@cloudflare/oxlint-config": "0.2.0",
 		"@effect/tsgo": "0.73.4",
 		"typescript": "^7.0.2",
 		"vite": "npm:@voidzero-dev/vite-plus-core@8.3.8001",

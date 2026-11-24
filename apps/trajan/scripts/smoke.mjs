@@ -1,3 +1,4 @@
+import { stdout } from "node:process";
 import assert from "node:assert/strict";
 import { applyImmutable } from "@earendil-works/chord/delta";
 import { MAIN_CHAT_PATH } from "../src/main-chat.ts";
@@ -20,8 +21,11 @@ function connect(prompt, expectedTools) {
 		function finish(error) {
 			clearTimeout(timer);
 			socket.close();
-			if (error) reject(error);
-			else resolve();
+			if (error) {
+				reject(error);
+			} else {
+				resolve();
+			}
 		}
 		socket.addEventListener("error", () => finish(new Error("WebSocket failed")));
 		socket.addEventListener("open", () => {
@@ -34,12 +38,20 @@ function connect(prompt, expectedTools) {
 		socket.addEventListener("message", ({ data }) => {
 			try {
 				const message = JSON.parse(String(data));
-				if (message.type === "error") throw new Error(message.message);
-				if (message.type === "view") view = message.view;
-				else if (message.type === "ops" && view) view = applyImmutable(view, message.ops);
-				else return;
+				if (message.type === "error") {
+					throw new Error(message.message);
+				}
+				if (message.type === "view") {
+					view = message.view;
+				} else if (message.type === "ops" && view) {
+					view = applyImmutable(view, message.ops);
+				} else {
+					return;
+				}
 				const live = view.docs["pi.live"] ?? {};
-				if (live.runFailure) throw new Error(JSON.stringify(live.runFailure));
+				if (live.runFailure) {
+					throw new Error(JSON.stringify(live.runFailure));
+				}
 				const messages = view.entries.flatMap((entry) => entry.model ?? []);
 				const text =
 					messages
@@ -48,21 +60,24 @@ function connect(prompt, expectedTools) {
 						?.content.filter((part) => part.type === "text")
 						.map((part) => part.text)
 						.join("") ?? "";
-				const tools = messages
-					.filter(
-						(m) =>
-							m.role === "toolResult" &&
-							!m.isError &&
-							(m.toolName !== "codemode" ||
-								m.content.some((part) => part.type === "text" && part.text.includes(marker))),
-					)
-					.map((m) => m.toolName);
+				const tools = new Set(
+					messages
+						.filter(
+							(m) =>
+								m.role === "toolResult" &&
+								!m.isError &&
+								(m.toolName !== "codemode" ||
+									m.content.some((part) => part.type === "text" && part.text.includes(marker))),
+						)
+						.map((m) => m.toolName),
+				);
 				if (
 					live.run === undefined &&
 					text.includes(marker) &&
-					expectedTools.every((t) => tools.includes(t))
-				)
+					expectedTools.every((t) => tools.has(t))
+				) {
 					finish();
+				}
 			} catch (error) {
 				finish(error);
 			}
@@ -74,13 +89,13 @@ await connect(
 	`Use write to save exactly ${marker} to ${file}, then use read to read that file back. Reply only with the file contents.`,
 	["write", "read"],
 );
-console.log("Passed: Workers AI, Pi tool loop, durable workspace write/read");
+stdout.write("Passed: Workers AI, Pi tool loop, durable workspace write/read\n");
 await connect(undefined, ["write", "read"]);
-console.log("Passed: WebSocket reconnect restores the conversation");
+stdout.write("Passed: WebSocket reconnect restores the conversation\n");
 const command = `import { readFile } from "node:fs/promises"; export default async function () { return await readFile(${JSON.stringify(file)}, "utf8"); }`;
 const code = `return await tools.exec({ command: ${JSON.stringify(command)} });`;
 await connect(`Run this script with codemode and reply only with the file contents:\n${code}`, [
 	"codemode",
 ]);
-console.log("Passed: Pi Code Mode calling Cloudflare Computer exec");
-console.log(`Verified ${base.origin}`);
+stdout.write("Passed: Pi Code Mode calling Cloudflare Computer exec\n");
+stdout.write(`Verified ${base.origin}\n`);

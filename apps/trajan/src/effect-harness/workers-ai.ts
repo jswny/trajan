@@ -45,7 +45,7 @@ export function workersAiTurnModel(binding: Env["AI"], tool: Tool) {
 	return TurnModel.of({
 		complete: Effect.fn("effect-harness.workersAi.complete")(function* (messages, { allowTools }) {
 			const timestamp = yield* Clock.currentTimeMillis;
-			const context: Message[] = [];
+			const context: Array<Message> = [];
 			let pendingCall: { id: string; name: string } | undefined;
 
 			for (const message of messages) {
@@ -134,7 +134,9 @@ export function workersAiTurnModel(binding: Env["AI"], tool: Tool) {
 					.filter((part) => part.type === "text")
 					.map((part) => part.text)
 					.join("");
-				if (text.trim()) return { role: "assistant", text };
+				if (text.trim()) {
+					return { role: "assistant", text };
+				}
 				return yield* modelFailure("The model returned an empty reply.");
 			}
 

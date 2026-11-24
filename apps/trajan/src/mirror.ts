@@ -1,21 +1,18 @@
-import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
+import type { Context } from "@earendil-works/chord/context";
 import { applyImmutable } from "@earendil-works/chord/delta";
-import {
-	ConversationTranscript,
-	type ConversationView,
-	type EntryId,
-	type EntryQuery,
-	type TranscriptView,
+import { ConversationTranscript } from "@earendil-works/pi-durable";
+import type {
+	ConversationView,
+	EntryId,
+	EntryQuery,
+	TranscriptView,
 } from "@earendil-works/pi-durable";
 import { Data, Deferred, Effect, Option } from "effect";
-import {
-	decodeEntriesPage,
-	isConversationView,
-	type PiClientMessage,
-	type PiEntriesPage,
-	type PiServerMessage,
-} from "./protocol";
-import { EMPTY_VIEW, projectView, type PiSessionView } from "./view";
+import { decodeEntriesPage, isConversationView } from "./protocol";
+import type { PiClientMessage, PiEntriesPage, PiServerMessage } from "./protocol";
+import { EMPTY_VIEW, projectView } from "./view";
+import type { PiSessionView } from "./view";
 
 /** Entries one "load earlier" or "load missing" asks the server for. */
 const PAGE_SIZE = 50;
@@ -72,7 +69,7 @@ export class PiSessionMirror {
 		// Keep the transcript, but wait for this watch's snapshot before applying its patches.
 		this.#view = null;
 		const from = this.#transcript.resume?.from;
-		send({ type: "watch", ...(from === undefined ? {} : { from }) });
+		send({ type: "watch", ...(from !== undefined && { from }) });
 	}
 
 	/** The socket closed: pages it was loading will not arrive. */
@@ -82,7 +79,9 @@ export class PiSessionMirror {
 			this.#view = null;
 			const pages = [...this.#pages.values()];
 			this.#pages.clear();
-			for (const page of pages) yield* Deferred.fail(page, new HistoryDisconnected());
+			for (const page of pages) {
+				yield* Deferred.fail(page, new HistoryDisconnected());
+			}
 		});
 	}
 
@@ -97,10 +96,16 @@ export class PiSessionMirror {
 			}
 			return yield* Effect.try({
 				try: () => {
-					if (message.type === "view" && this.#send !== undefined) return this.#merge(message.view);
-					if (message.type !== "ops" || this.#view === null) return;
+					if (message.type === "view" && this.#send !== undefined) {
+						return this.#merge(message.view);
+					}
+					if (message.type !== "ops" || this.#view === null) {
+						return;
+					}
 					const next = applyImmutable(this.#view, message.ops);
-					if (!isConversationView(next)) throw new InvalidTranscriptUpdate();
+					if (!isConversationView(next)) {
+						throw new InvalidTranscriptUpdate();
+					}
 					return this.#merge(next);
 				},
 				catch: () => new InvalidTranscriptUpdate(),
@@ -152,7 +157,9 @@ export class PiSessionMirror {
 		const id = `${HISTORY_REQUEST_PREFIX}${crypto.randomUUID()}`;
 		const request = Effect.gen({ self: this }, function* () {
 			const send = this.#send;
-			if (send === undefined) return yield* new HistoryDisconnected();
+			if (send === undefined) {
+				return yield* new HistoryDisconnected();
+			}
 			const page = yield* Deferred.make<PiEntriesPage, Error>();
 			this.#pages.set(id, page);
 			if (!send({ type: "entries", id, query, limit })) {
@@ -170,16 +177,23 @@ export class PiSessionMirror {
 		message: Extract<PiServerMessage, { type: "result" | "error" }>,
 	): Effect.Effect<void> {
 		return Effect.gen({ self: this }, function* () {
-			if (message.id === undefined) return;
+			if (message.id === undefined) {
+				return;
+			}
 			const page = this.#pages.get(message.id);
-			if (page === undefined) return;
+			if (page === undefined) {
+				return;
+			}
 			if (message.type === "error") {
 				yield* Deferred.fail(page, new Error(message.message));
 				return;
 			}
 			const decoded = decodeEntriesPage(message.result);
-			if (Option.isSome(decoded)) yield* Deferred.succeed(page, decoded.value);
-			else yield* Deferred.fail(page, new Error("Invalid history page"));
+			if (Option.isSome(decoded)) {
+				yield* Deferred.succeed(page, decoded.value);
+			} else {
+				yield* Deferred.fail(page, new Error("Invalid history page"));
+			}
 		});
 	}
 }

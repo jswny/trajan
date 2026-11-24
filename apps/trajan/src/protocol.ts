@@ -1,4 +1,5 @@
-import { assertValidOp, type Op } from "@earendil-works/chord/delta";
+import { assertValidOp } from "@earendil-works/chord/delta";
+import type { Op } from "@earendil-works/chord/delta";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import type {
 	ConversationView,
@@ -187,6 +188,7 @@ const serverMessage = Schema.Union([
 	Schema.Struct({ type: Schema.Literal("error"), ...requestId.fields, message: Schema.String }),
 ]);
 
+export const decodeEntryId = Schema.decodeUnknownSync(entryId);
 export const decodeClientMessage = Schema.decodeUnknownResult(clientMessage);
 export const decodeRequestId = Schema.decodeUnknownResult(requestId);
 export const decodeServerMessage = Schema.decodeUnknownOption(Schema.fromJsonString(serverMessage));

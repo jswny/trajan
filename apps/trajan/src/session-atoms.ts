@@ -1,6 +1,7 @@
 import { Effect, Stream } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { PiSession, type PromptDraft, type SubmitMode } from "./pi-session";
+import { PiSession } from "./pi-session";
+import type { PromptDraft, SubmitMode } from "./pi-session";
 
 type ComposerAction = { type: "edit"; text: string } | { type: "submit"; whenBusy: SubmitMode };
 type ComposerView = { text: string; submitting: boolean; canSubmit: boolean };
@@ -46,7 +47,9 @@ export function makeSessionAtoms(live = PiSession.live()) {
 				ctx.set(draftAtom, { text: action.text });
 				return;
 			}
-			if (!ctx.get(composerAtom).canSubmit) return;
+			if (!ctx.get(composerAtom).canSubmit) {
+				return;
+			}
 			const session = AsyncResult.getOrElse(ctx.get(sessionAtom), () => undefined);
 			session?.dispatch({ type: "submit", draft: ctx.get(draftAtom), whenBusy: action.whenBusy });
 		},

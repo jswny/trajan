@@ -1,6 +1,7 @@
 import type { TranscriptItem, TranscriptView } from "@earendil-works/pi-durable";
 import type { TranscriptDocs } from "./protocol";
-import { projectEntry, projectMessage, type PiMessage } from "./transcript";
+import { projectEntry, projectMessage } from "./transcript";
+import type { PiMessage } from "./transcript";
 
 /** A tool call running now, with its streamed output. */
 export type PiRunningTool = {
@@ -15,7 +16,7 @@ export type PiRunningTool = {
  */
 export type PiSessionView = {
 	/** The active context as far as the client has it, gaps included. */
-	readonly messages: readonly PiMessage[];
+	readonly messages: ReadonlyArray<PiMessage>;
 	/**
 	 * Whether the context continues above the oldest message: the UI offers
 	 * to load the page before it (`ConversationTranscript.loadEarlier`).
@@ -24,7 +25,7 @@ export type PiSessionView = {
 	/** The assistant message being streamed, or null. */
 	readonly live: PiMessage | null;
 	readonly running: boolean;
-	readonly tools: readonly PiRunningTool[];
+	readonly tools: ReadonlyArray<PiRunningTool>;
 	/** Submissions queued in pi's inbox behind the running work. */
 	readonly queued: number;
 	/** Retry backoff pi is waiting out, if any. */
@@ -52,7 +53,9 @@ const LIVE_ID = "live";
 
 /** Why a run ended without an answer, unless the user stopped it. */
 function failure(failed: NonNullable<TranscriptDocs["pi.live"]>["runFailure"]): string | null {
-	if (failed === undefined || failed.reason === "aborted") return null;
+	if (failed === undefined || failed.reason === "aborted") {
+		return null;
+	}
 	return failed.detail === undefined
 		? `Not answered: ${failed.reason}`
 		: `Not answered: ${failed.reason}: ${failed.detail}`;
@@ -64,7 +67,7 @@ function failure(failed: NonNullable<TranscriptDocs["pi.live"]>["runFailure"]): 
  * may reach further. Nothing before that reset shows, so there is nothing
  * earlier to load either.
  */
-function activeItems(items: readonly TranscriptItem[]): readonly TranscriptItem[] {
+function activeItems(items: ReadonlyArray<TranscriptItem>): ReadonlyArray<TranscriptItem> {
 	for (let i = items.length - 1; i >= 0; i--) {
 		const item = items[i];
 		if (item.kind === "entry" && item.entry.kind === "pi.reset") {
@@ -80,13 +83,15 @@ type ProjectedItems = Pick<PiSessionView, "messages" | "earlier">;
  * The messages of a transcript's items. A merge that adds no entries keeps
  * the same items array, so a streamed token does not project them again.
  */
-const projected = new WeakMap<readonly TranscriptItem[], ProjectedItems>();
+const projected = new WeakMap<ReadonlyArray<TranscriptItem>, ProjectedItems>();
 
-function projectItems(all: readonly TranscriptItem[]): ProjectedItems {
+function projectItems(all: ReadonlyArray<TranscriptItem>): ProjectedItems {
 	const cached = projected.get(all);
-	if (cached) return cached;
+	if (cached) {
+		return cached;
+	}
 	const items = activeItems(all);
-	const messages = items.flatMap((item): PiMessage[] => {
+	const messages = items.flatMap((item): Array<PiMessage> => {
 		switch (item.kind) {
 			case "earlier":
 				return [];
@@ -105,6 +110,8 @@ function projectItems(all: readonly TranscriptItem[]): ProjectedItems {
 				const message = projectEntry(item.entry);
 				return message ? [message] : [];
 			}
+			default:
+				throw new Error("Unsupported transcript item");
 		}
 	});
 	const result = { messages, earlier: items[0]?.kind === "earlier" };

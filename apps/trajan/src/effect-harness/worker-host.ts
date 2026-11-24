@@ -1,17 +1,14 @@
 import { DurableObject } from "cloudflare:workers";
-import {
-	runTurn,
-	TurnIoError,
-	type TurnJournal,
-	type TurnModel,
-	TurnModelError,
-	TurnSubmission,
-	type TurnTools,
-} from "@trajan/effect-harness";
-import { Lifecycle, type LifecycleJobContext, type LifecycleJobOutcome } from "agents/lifecycle";
-import { Tasks, type TaskStep } from "agents/tasks";
-import { Clock, Effect, type Layer, Schema } from "effect";
-import { ConversationStore, type HistoryQuery } from "./conversation-store";
+import { runTurn, TurnIoError, TurnModelError, TurnSubmission } from "@trajan/effect-harness";
+import type { TurnJournal, TurnModel, TurnTools } from "@trajan/effect-harness";
+import { Lifecycle } from "agents/lifecycle";
+import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
+import { Tasks } from "agents/tasks";
+import type { TaskStep } from "agents/tasks";
+import { Clock, Effect, Schema } from "effect";
+import type { Layer } from "effect";
+import { ConversationStore } from "./conversation-store";
+import type { HistoryQuery } from "./conversation-store";
 
 const turnDefinition = "turn@v3";
 const inboxJob = "effect-harness-inbox";
@@ -63,16 +60,16 @@ function taskJournal(runId: string, step: TaskStep): TurnJournal {
 						),
 					catch: (cause) => cause,
 				}).pipe(
-					Effect.catch((cause) => {
+					Effect.catch((error) => {
 						if (
-							cause instanceof TurnModelError ||
-							cause instanceof TurnIoError ||
-							Schema.isSchemaError(cause)
+							error instanceof TurnModelError ||
+							error instanceof TurnIoError ||
+							Schema.isSchemaError(error)
 						) {
-							return Effect.fail(cause);
+							return Effect.fail(error);
 						}
 						// Preserve SDK suspension, cancellation, and isolate reset signals.
-						return Effect.die(cause);
+						return Effect.die(error);
 					}),
 					Effect.flatMap(Schema.decodeEffect(checkpointJson)),
 				);
@@ -117,12 +114,16 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 	});
 
 	onJob({ job }: LifecycleJobContext): Promise<LifecycleJobOutcome> | undefined {
-		if (job.fn === inboxJob) return Effect.runPromise(this.#drainInbox());
+		if (job.fn === inboxJob) {
+			return Effect.runPromise(this.#drainInbox());
+		}
 	}
 
 	#drainInbox = Effect.fn("effect-harness.drainInbox")(function* (this: EffectHarnessObject) {
 		const head = yield* conversationEffect("read inbox", () => this.#conversation.head());
-		if (!head) return;
+		if (!head) {
+			return;
+		}
 		const runId = head.run_id;
 		yield* Effect.annotateCurrentSpan("runId", runId);
 		const task = yield* Effect.promise(() => this.#tasks.handle(turnDefinition).get(runId));
@@ -157,7 +158,9 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 	) {
 		yield* Effect.annotateCurrentSpan("runId", runId);
 		const row = yield* conversationEffect("start turn", () => this.#conversation.start(runId));
-		if (row.state === "completed" || row.state === "failed") return;
+		if (row.state === "completed" || row.state === "failed") {
+			return;
+		}
 		const through = row.context_through;
 		if (through === null) {
 			return yield* new TurnIoError({
@@ -203,7 +206,9 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 	async turn(runId: string) {
 		await this.lifecycle.start();
 		const turn = this.#conversation.turn(runId);
-		if (turn.state !== "failed") return { ...turn, failure: null };
+		if (turn.state !== "failed") {
+			return { ...turn, failure: null };
+		}
 		// Tasks already retains the error name. Keep the transcript database's format.
 		const task = await this.#tasks.handle(turnDefinition).get(runId);
 		const code =

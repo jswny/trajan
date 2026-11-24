@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
-import { Markdown, type MarkdownProps } from "@pierre/words/react";
+import { Markdown } from "@pierre/words/react";
+import type { MarkdownProps } from "@pierre/words/react";
 import { Effect } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";
 
@@ -11,7 +12,7 @@ const plainMarkdown = Atom.make(AsyncResult.success<MarkdownProps["plugins"]>(un
 const highlightedMarkdown = Atom.make(
 	Effect.tryPromise(() => import("./markdown-highlights")).pipe(
 		Effect.map(({ markdownPlugins }): MarkdownProps["plugins"] => markdownPlugins),
-		Effect.catch(() =>
+		Effect.catchTag("UnknownError", () =>
 			Effect.logWarning("Could not load Markdown syntax highlighting").pipe(Effect.as(undefined)),
 		),
 	),

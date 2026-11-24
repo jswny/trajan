@@ -1,7 +1,24 @@
 import { readFile } from "node:fs/promises";
-import { devices, expect, test, type Page } from "@playwright/test";
+import { devices, expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { Option, Result, Schema } from "effect";
 import { MAIN_CHAT_PATH } from "../../main-chat";
+import { decodeClientMessage, decodeServerMessage } from "../../protocol";
 import type { PiClientMessage, PiServerMessage } from "../../protocol";
+
+const decodeCodemodeState = Schema.decodeUnknownSync(
+	Schema.Struct({ executions: Schema.Int, gateRuns: Schema.Int }),
+);
+
+// Agent SDK control frames share the transport and pass through the test proxy.
+function readClientFrame(data: string): PiClientMessage | undefined {
+	const frame = decodeClientMessage(JSON.parse(data));
+	return Result.isSuccess(frame) ? frame.success : undefined;
+}
+
+function readServerFrame(data: string): PiServerMessage | undefined {
+	return Option.getOrUndefined(decodeServerMessage(data));
+}
 
 const workerLog = new URL("../../../.cloudflare/browser-smoke.log", import.meta.url);
 
@@ -19,13 +36,15 @@ test("ignores invalid receipts, then replays the pending submit once", async ({ 
 	await page.routeWebSocket(/\/agents\/trajan\//, (client) => {
 		const server = client.connectToServer();
 		client.onMessage((data) => {
-			const message = JSON.parse(String(data)) as PiClientMessage;
-			if (message.type === "submit") submissions.push(message);
+			const message = readClientFrame(String(data));
+			if (message?.type === "submit") {
+				submissions.push(message);
+			}
 			server.send(data);
 		});
 		server.onMessage((data) => {
-			const message = JSON.parse(String(data)) as PiServerMessage;
-			if (message.type === "result" && message.id === submissions[0]?.id) {
+			const message = readServerFrame(String(data));
+			if (message?.type === "result" && message.id === submissions[0]?.id) {
 				receipts.push(message);
 				if (receipts.length === 1) {
 					// Replace Pi's real receipt with invalid frames that carry the right request ID.
@@ -103,21 +122,25 @@ for (const lostReceipts of [1, 2]) {
 		const prompt = "gate browser recovery";
 		const submissions: Array<Extract<PiClientMessage, { type: "submit" }>> = [];
 		const receipts: Array<Extract<PiServerMessage, { type: "result" }>> = [];
-		const connections: string[] = [];
+		const connections: Array<string> = [];
 		await page.clock.install();
 		await page.routeWebSocket(/\/agents\/trajan\//, (client) => {
 			connections.push(client.url());
 			const server = client.connectToServer();
 			client.onMessage((data) => {
-				const message = JSON.parse(String(data)) as PiClientMessage;
-				if (message.type === "submit") submissions.push(message);
+				const message = readClientFrame(String(data));
+				if (message?.type === "submit") {
+					submissions.push(message);
+				}
 				server.send(data);
 			});
 			server.onMessage((data) => {
-				const message = JSON.parse(String(data)) as PiServerMessage;
-				if (message.type === "result" && message.id === submissions[0]?.id) {
+				const message = readServerFrame(String(data));
+				if (message?.type === "result" && message.id === submissions[0]?.id) {
 					receipts.push(message);
-					if (receipts.length <= lostReceipts) return;
+					if (receipts.length <= lostReceipts) {
+						return;
+					}
 				}
 				client.send(data);
 			});
@@ -130,17 +153,17 @@ for (const lostReceipts of [1, 2]) {
 		await composer.press("Enter");
 		await expect.poll(() => receipts[0]?.result).toMatchObject({ accepted: true });
 		await expect(page.locator("form")).toHaveAttribute("aria-busy", "true");
-		await page.clock.fastForward(6_000);
+		await page.clock.fastForward(6000);
 		await expect.poll(() => receipts[1]?.result).toMatchObject({ accepted: false });
 
 		const retry = page.getByRole("button", { name: "Retry sending" });
 		if (lostReceipts === 2) {
-			await page.clock.fastForward(6_000);
+			await page.clock.fastForward(6000);
 			await expect(retry).toBeVisible();
 			await expect(page.locator("form")).toHaveAttribute("aria-busy", "false");
 			await expect(composer).toHaveValue(prompt);
 			await composer.press("Enter");
-			await page.clock.fastForward(6_000);
+			await page.clock.fastForward(6000);
 			expect(submissions).toHaveLength(2);
 			await retry.click();
 			await expect.poll(() => receipts[2]?.result).toMatchObject({ accepted: false });
@@ -149,7 +172,7 @@ for (const lostReceipts of [1, 2]) {
 		await expect(composer).toHaveValue("");
 		await expect(retry).toHaveCount(0);
 		await expect(page.locator("form")).toHaveAttribute("aria-busy", "false");
-		await page.clock.fastForward(6_000);
+		await page.clock.fastForward(6000);
 		expect(submissions).toEqual(Array.from({ length: lostReceipts + 1 }, () => submissions[0]));
 		expect(connections).toHaveLength(1);
 
@@ -163,23 +186,27 @@ for (const lostReceipts of [1, 2]) {
 	});
 }
 
-async function dropWatchSnapshots(page: Page, dropped: readonly number[]) {
-	const connections: string[] = [];
+async function dropWatchSnapshots(page: Page, dropped: ReadonlyArray<number>) {
+	const connections: Array<string> = [];
 	const watches: Array<Extract<PiClientMessage, { type: "watch" }>> = [];
 	const snapshots: Array<Extract<PiServerMessage, { type: "view" }>> = [];
 	await page.routeWebSocket(/\/agents\/trajan\//, (client) => {
 		connections.push(client.url());
 		const server = client.connectToServer();
 		client.onMessage((data) => {
-			const message = JSON.parse(String(data)) as PiClientMessage;
-			if (message.type === "watch") watches.push(message);
+			const message = readClientFrame(String(data));
+			if (message?.type === "watch") {
+				watches.push(message);
+			}
 			server.send(data);
 		});
 		server.onMessage((data) => {
-			const message = JSON.parse(String(data)) as PiServerMessage;
-			if (message.type === "view") {
+			const message = readServerFrame(String(data));
+			if (message?.type === "view") {
 				snapshots.push(message);
-				if (dropped.includes(snapshots.length)) return;
+				if (dropped.includes(snapshots.length)) {
+					return;
+				}
 			}
 			client.send(data);
 		});
@@ -200,7 +227,7 @@ test("waits for a snapshot before going Live and retries the watch on the same s
 	await composer.fill("Draft while syncing");
 	await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
 
-	await page.clock.fastForward(6_000);
+	await page.clock.fastForward(6000);
 	await expect(page.getByText("Live", { exact: true })).toBeVisible();
 	await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
 	await expect(composer).toHaveValue("Draft while syncing");
@@ -215,8 +242,8 @@ test("retries an invalid snapshot before making its transcript visible", async (
 	await page.routeWebSocket(/\/agents\/trajan\//, (client) => {
 		const server = client.connectToServer();
 		server.onMessage((data) => {
-			const message = JSON.parse(String(data)) as PiServerMessage;
-			if (message.type === "view" && ++snapshots === 1) {
+			const message = readServerFrame(String(data));
+			if (message?.type === "view" && ++snapshots === 1) {
 				const { view } = message;
 				client.send(
 					JSON.stringify({
@@ -244,7 +271,7 @@ test("retries an invalid snapshot before making its transcript visible", async (
 	await page.goto("/");
 	await expect.poll(() => snapshots).toBe(1);
 	await expect(page.getByText("Syncing", { exact: true })).toBeVisible();
-	await page.clock.fastForward(6_000);
+	await page.clock.fastForward(6000);
 	await expect(page.getByText("Live", { exact: true })).toBeVisible();
 	await expect(page.getByText("Malformed snapshot entry", { exact: true })).toHaveCount(0);
 	expect(snapshots).toBe(2);
@@ -267,9 +294,9 @@ test("keeps the transcript and offers manual sync after two snapshots go missing
 	await expect.poll(() => snapshots.length).toBe(2);
 	await expect(page.getByText("Syncing", { exact: true })).toBeVisible();
 	await expect(answer).toBeVisible();
-	await page.clock.fastForward(6_000);
+	await page.clock.fastForward(6000);
 	await expect.poll(() => snapshots.length).toBe(3);
-	await page.clock.fastForward(6_000);
+	await page.clock.fastForward(6000);
 	const retry = page.getByRole("button", { name: "Retry sync" });
 	await expect(retry).toBeVisible();
 	const title = page.getByRole("heading", { name: "Trajan", exact: true });
@@ -400,7 +427,8 @@ test("wraps a long prompt and keeps a wide code block scrollable inside the tran
 });
 
 async function codemodeState(page: Page) {
-	return (await page.request.post("/__browser-smoke/codemode-state")).json();
+	const response = await page.request.post("/__browser-smoke/codemode-state");
+	return decodeCodemodeState(await response.json());
 }
 
 for (const exec of ["completed", "running"]) {

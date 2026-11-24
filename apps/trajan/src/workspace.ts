@@ -1,9 +1,6 @@
 import type { Workspace } from "@cloudflare/computer";
-import {
-	createPiTools,
-	type CreatePiToolsOptions,
-	type PiTool,
-} from "@cloudflare/computer/tools/pi-ai";
+import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
+import type { CreatePiToolsOptions, PiTool } from "@cloudflare/computer/tools/pi-ai";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 
 /**
@@ -97,7 +94,7 @@ function describeExec(tool: PiTool): PiTool {
 export function createWorkspaceTools(
 	workspace: Workspace,
 	options: Omit<CreatePiToolsOptions, "workspace" | "exec" | "shell"> = {},
-): ToolRegistration[] {
+): Array<ToolRegistration> {
 	const { tools, execute } = createPiTools({
 		...options,
 		workspace,
@@ -119,8 +116,8 @@ export function createWorkspaceTools(
 			// Plain JSON Schema: pi validates it with pi-schema, but
 			// computer's schema type is untyped, so `args` is too.
 			parameters: tool.parameters,
-			...(tool.constrainedSampling ? { constrainedSampling: tool.constrainedSampling } : {}),
-			...(tool.name === "exec" ? { callers: ["tools"] } : {}),
+			...(tool.constrainedSampling && { constrainedSampling: tool.constrainedSampling }),
+			...(tool.name === "exec" && { callers: ["tools"] }),
 			replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
 			async execute(args, api, context) {
 				const { content, isError } = await execute(

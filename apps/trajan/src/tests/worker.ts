@@ -1,36 +1,21 @@
 export { EffectHarnessTestObject } from "./effect-harness-fixture";
 import { serveEffectHarness } from "./effect-harness-fixture";
-import {
-	fauxAssistantMessage,
-	fauxProvider,
-	fauxText,
-	fauxToolCall,
-	type AssistantMessage,
-	type Message,
-	type TranscriptContext,
-} from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, TranscriptContext } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT as BG } from "@earendil-works/chord/context";
 import { num, obj } from "@earendil-works/pi-schema";
 import { createModels } from "@earendil-works/pi-ai/models";
-import {
-	ConversationTranscript,
-	createRegistry,
-	Harness,
-	type Extension,
-	type ToolRegistration,
-} from "@earendil-works/pi-durable";
+import { ConversationTranscript, createRegistry, Harness } from "@earendil-works/pi-durable";
+import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
-import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
+import { Workspace } from "@cloudflare/computer";
 import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { routeAgentRequest } from "agents";
-import {
-	PiHarness,
-	type PiOperationResult,
-	type PiReceipt,
-	type PiWhenBusy,
-} from "agents/harness/pi";
+import { PiHarness } from "agents/harness/pi";
+import type { PiOperationResult, PiReceipt, PiWhenBusy } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
+import { Effect, Predicate } from "effect";
 import { workspaceCodemode } from "../codemode";
 import { isMainChatUrl } from "../main-chat";
 import { PiSessionSockets } from "../sockets";
@@ -42,8 +27,12 @@ const GATE_RUNS_KEY = "test:gate:runs";
 const CODEMODE_COUNT_PATH = "/workspace/codemode-count.txt";
 
 function textOf(content: Message["content"] | undefined): string {
-	if (content === undefined) return "";
-	if (typeof content === "string") return content;
+	if (content === undefined) {
+		return "";
+	}
+	if (typeof content === "string") {
+		return content;
+	}
 	return content
 		.map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
 		.join("");
@@ -115,7 +104,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 	});
 	// The example's workspace, over the object's SQLite.
 	readonly workspace = new Workspace({
-		storage: this.ctx.storage as unknown as DurableObjectStorageLike,
+		storage: this.ctx.storage,
 		backends: [
 			new CodemodeBackend({
 				loader: this.env.LOADER,
@@ -129,7 +118,9 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 	#failOpens = false;
 	readonly harness = new PiHarness({
 		harness: async ({ storage, context, onWake }) => {
-			if (this.#failOpens) throw new Error("pi failed to open");
+			if (this.#failOpens) {
+				throw new Error("pi failed to open");
+			}
 			this.registry.install(this.#testTools());
 			this.registry.install({
 				name: "workspace",
@@ -153,7 +144,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 						// short transcript has something to summarize.
 						compaction: { enabled: false, keepRecentTokens: 1 },
 					},
-					onReport: (report) => console.warn("pi report", report),
+					onReport: (report) => Effect.runSync(Effect.logWarning("pi report", report)),
 				},
 				context,
 			);
@@ -211,8 +202,12 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 	async gateStarted(runs: number): Promise<number> {
 		for (let i = 0; i < 200; i++) {
 			const count = (await this.ctx.storage.get<number>(GATE_RUNS_KEY)) ?? 0;
-			if (count >= runs) return count;
-			await new Promise((resolve) => setTimeout(resolve, 20));
+			if (count >= runs) {
+				return count;
+			}
+			await new Promise((resolve) => {
+				setTimeout(resolve, 20);
+			});
 		}
 		throw new Error("The gate tool never started");
 	}
@@ -222,7 +217,9 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 	}
 
 	disconnect(): void {
-		for (const socket of this.ctx.getWebSockets()) socket.close(1012, "Lost submit receipt");
+		for (const socket of this.ctx.getWebSockets()) {
+			socket.close(1012, "Lost submit receipt");
+		}
 	}
 
 	crash(): void {
@@ -232,8 +229,10 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 	async codemodeState() {
 		const contents = await this.workspace.fs
 			.readFile(CODEMODE_COUNT_PATH, "utf8")
-			.catch((error) => {
-				if ((error as { code?: string }).code === "ENOENT") return "";
+			.catch((error: unknown) => {
+				if (Predicate.hasProperty(error, "code") && error.code === "ENOENT") {
+					return "";
+				}
 				throw error;
 			});
 		return {
@@ -250,14 +249,20 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 		let view = projectView(transcript.merge(watch.value));
 		await new Promise<void>((resolve) => {
 			watch.start(async (call) => {
-				if (call.kind !== "value") return;
+				if (call.kind !== "value") {
+					return;
+				}
 				view = projectView(transcript.merge(call.value));
-				if (view.running) sawRun = true;
-				if (sawRun && !view.running) resolve();
+				if (view.running) {
+					sawRun = true;
+				}
+				if (sawRun && !view.running) {
+					resolve();
+				}
 			});
 		});
 		await watch.stop();
-		// JSON, so the RPC type stays shallow for the test's type checker.
+		// Keep the RPC return shallow for serializability checking.
 		return JSON.stringify(view);
 	}
 
@@ -310,7 +315,9 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 			throw new Error(`Compaction did not complete: ${JSON.stringify(state)}`);
 		}
 		const { submissionId } = state.outcome.result;
-		if (submissionId === undefined) throw new Error("Nothing was compacted");
+		if (submissionId === undefined) {
+			throw new Error("Nothing was compacted");
+		}
 		await (await pi.submission(submissionId, BG))?.wait(BG);
 	}
 
@@ -336,7 +343,9 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 				api.output(`run ${runs}\n`);
 				while (!(await storage.get<boolean>(RELEASE_KEY))) {
 					context.abortSignal?.throwIfAborted();
-					await new Promise((resolve) => setTimeout(resolve, 20));
+					await new Promise((resolve) => {
+						setTimeout(resolve, 20);
+					});
 				}
 				return {
 					output: [{ type: "text", text: `released after ${runs} runs` }],
@@ -378,16 +387,22 @@ function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
-		if (env.EFFECT_HARNESS_AI) return serveEffectHarness(request, env);
+		if (env.EFFECT_HARNESS_AI) {
+			return serveEffectHarness(request, env);
+		}
 		const url = new URL(request.url);
 		const { pathname } = url;
-		if (pathname === "/__browser-smoke/ready") return new Response("Trajan browser fixture");
+		if (pathname === "/__browser-smoke/ready") {
+			return new Response("Trajan browser fixture");
+		}
 		// Give each browser test a fresh main chat while keeping the app URL fixed.
 		const fixture = /(?:^|;\s*)trajan-fixture=([a-f0-9-]+)(?:;|$)/.exec(
 			request.headers.get("Cookie") ?? "",
 		)?.[1];
 		if (pathname.startsWith("/agents/trajan/")) {
-			if (!isMainChatUrl(url)) return new Response("Not found", { status: 404 });
+			if (!isMainChatUrl(url)) {
+				return new Response("Not found", { status: 404 });
+			}
 			if (fixture) {
 				url.pathname = `/agents/trajan/${fixture}`;
 				request = new Request(url, request);

@@ -1,20 +1,22 @@
-import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
-import { Effect, Exit, Layer, Scope, Stream } from "effect";
+import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { Effect, Exit, Layer, Result, Scope, Stream } from "effect";
 import { AtomRegistry } from "effect/reactivity";
 import { TestClock } from "effect/testing";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { openPiSession, PiSession, type INITIAL_SESSION_STATE } from "../pi-session";
+import { openPiSession, PiSession } from "../pi-session";
+import type { INITIAL_SESSION_STATE } from "../pi-session";
 import {
+	decodeClientMessage,
 	decodeEntriesPage,
+	decodeEntryId,
 	decodeServerMessage,
-	type PiClientMessage,
-	type PiServerMessage,
 } from "../protocol";
+import type { PiClientMessage, PiServerMessage } from "../protocol";
 import { makeSessionAtoms } from "../session-atoms";
 
 class TestSocket extends EventTarget {
 	readyState: number = WebSocket.CLOSED;
-	readonly sent: PiClientMessage[] = [];
+	readonly sent: Array<PiClientMessage> = [];
 
 	reconnect() {
 		this.readyState = WebSocket.OPEN;
@@ -27,7 +29,11 @@ class TestSocket extends EventTarget {
 	}
 
 	send(data: string) {
-		this.sent.push(JSON.parse(data));
+		const decoded = decodeClientMessage(JSON.parse(data));
+		if (Result.isFailure(decoded)) {
+			throw decoded.failure;
+		}
+		this.sent.push(decoded.success);
 	}
 
 	receive(message: unknown) {
@@ -43,8 +49,8 @@ class TestSocket extends EventTarget {
 	}
 }
 
-function snapshot(id: EntryId, before?: EntryId): Extract<PiServerMessage, { type: "view" }> {
-	const conversationId = 1 as ConversationId;
+function snapshot(id: number, before?: number): Extract<PiServerMessage, { type: "view" }> {
+	const conversationId = ROOT_CONVERSATION_ID;
 	return {
 		type: "view",
 		session: "1",
@@ -52,13 +58,13 @@ function snapshot(id: EntryId, before?: EntryId): Extract<PiServerMessage, { typ
 			conversation: { id: conversationId },
 			entries: [
 				{
-					id,
+					id: decodeEntryId(id),
 					conversationId,
 					kind: "test.note",
 					model: [{ role: "user", content: "Note " + id, timestamp: 0 }],
 				},
 			],
-			before,
+			...(before !== undefined && { before: decodeEntryId(before) }),
 			docs: {},
 		},
 	};
@@ -74,13 +80,14 @@ function pageRequest(socket: TestSocket, index: number) {
 	const requests = () => socket.sent.filter((message) => message.type === "entries");
 	return Effect.promise(async () => {
 		await expect.poll(() => requests().length).toBe(index + 1);
-		return requests()[index]!;
+		return requests()[index];
 	});
 }
 
 describe("the scoped browser session", () => {
 	it("shares one socket between the chat and composer and closes it when they are released", async () => {
-		const openSocket = vi.fn(() => new TestSocket());
+		const socket = new TestSocket();
+		const openSocket = vi.fn(() => socket);
 		const { sessionAtom, composerAtom } = makeSessionAtoms(
 			Layer.effect(PiSession, openPiSession(openSocket)),
 		);
@@ -88,9 +95,8 @@ describe("the scoped browser session", () => {
 		try {
 			const unmountSession = registry.mount(sessionAtom);
 			const unmountComposer = registry.mount(composerAtom);
-			await expect.poll(() => openSocket.mock.results[0]?.value?.sent).toEqual([{ type: "watch" }]);
-			const socket = openSocket.mock.results[0]!.value!;
-			socket.receive(snapshot(5 as EntryId));
+			await expect.poll(() => socket.sent).toEqual([{ type: "watch" }]);
+			socket.receive(snapshot(5));
 			await expect
 				.poll(() => registry.get(sessionAtom))
 				.toMatchObject({
@@ -123,7 +129,7 @@ describe("the scoped browser session", () => {
 			edit("same text");
 			await expect.poll(() => socket.sent).toEqual([{ type: "watch" }]);
 			expect(registry.get(composer).canSubmit).toBe(false);
-			socket.receive(snapshot(1 as EntryId));
+			socket.receive(snapshot(1));
 			await expect.poll(() => registry.get(composer).canSubmit).toBe(true);
 			submit();
 			await expect.poll(() => registry.get(composer).submitting).toBe(true);
@@ -171,9 +177,9 @@ describe("the scoped browser session", () => {
 					const session = yield* openPiSession(() => socket);
 					socket.receive({ type: "hello", session: "1", tools: null });
 					socket.receive({ type: "view", session: "1", view: null });
-					const malformed = snapshot(2 as EntryId);
+					const malformed = snapshot(2);
 					socket.receive({ ...malformed, view: { ...malformed.view, docs: { "pi.inbox": {} } } });
-					socket.receive(snapshot(1 as EntryId));
+					socket.receive(snapshot(1));
 					socket.receive({ type: "ops", session: "1", ops: [["invalid"]] });
 					socket.receive({
 						type: "hello",
@@ -196,7 +202,7 @@ describe("the scoped browser session", () => {
 			Effect.scoped(
 				Effect.gen(function* () {
 					const session = yield* openPiSession(() => socket);
-					socket.receive(snapshot(1 as EntryId));
+					socket.receive(snapshot(1));
 					yield* waitFor(session.changes, (state) => state.messages.length === 1);
 					expect(socket.sent).toEqual([{ type: "watch" }]);
 
@@ -217,7 +223,7 @@ describe("the scoped browser session", () => {
 					socket.receive({
 						type: "ops",
 						session: "1",
-						ops: [["p", ["entries"], 1, 0, snapshot(9 as EntryId).view.entries]],
+						ops: [["p", ["entries"], 1, 0, snapshot(9).view.entries]],
 					});
 					socket.receive({
 						type: "hello",
@@ -229,7 +235,7 @@ describe("the scoped browser session", () => {
 						value: { transcriptStatus: "syncing", messages: [{ parts: [{ text: "Note 1" }] }] },
 					});
 
-					socket.receive(snapshot(2 as EntryId, 1 as EntryId));
+					socket.receive(snapshot(2, 1));
 					socket.acknowledge(submit, false);
 					const acknowledged = yield* waitFor(
 						session.changes,
@@ -246,7 +252,7 @@ describe("the scoped browser session", () => {
 					yield* waitFor(session.changes, (state) => state.status === "closed");
 					socket.reconnect();
 					yield* waitFor(session.changes, (state) => state.status === "open");
-					socket.receive(snapshot(2 as EntryId, 1 as EntryId));
+					socket.receive(snapshot(2, 1));
 					yield* waitFor(session.changes, (state) => state.transcriptStatus === "synced");
 					yield* TestClock.adjust("10 seconds");
 					expect(socket.sent.slice(4)).toEqual([{ type: "watch", from: 3 }]);
@@ -261,7 +267,7 @@ describe("the scoped browser session", () => {
 		{
 			field: "pi.inbox",
 			ops: [
-				["p", ["entries"], 1, 0, snapshot(9 as EntryId).view.entries],
+				["p", ["entries"], 1, 0, snapshot(9).view.entries],
 				["s", ["docs", "pi.inbox"], {}],
 			],
 		},
@@ -273,7 +279,7 @@ describe("the scoped browser session", () => {
 				Effect.scoped(
 					Effect.gen(function* () {
 						const session = yield* openPiSession(() => socket);
-						socket.receive(snapshot(5 as EntryId));
+						socket.receive(snapshot(5));
 						yield* waitFor(session.changes, (state) => state.transcriptStatus === "synced");
 
 						socket.receive({ type: "ops", session: "1", ops });
@@ -289,7 +295,7 @@ describe("the scoped browser session", () => {
 								.poll(() => socket.sent)
 								.toEqual([{ type: "watch" }, { type: "watch", from: 6 }]),
 						);
-						socket.receive(snapshot(6 as EntryId, 5 as EntryId));
+						socket.receive(snapshot(6, 5));
 						const restored = yield* waitFor(
 							session.changes,
 							(state) => state.transcriptStatus === "synced",
@@ -306,7 +312,7 @@ describe("the scoped browser session", () => {
 	);
 
 	it("preserves additional Pi fields when validating snapshots and history pages", () => {
-		const frame = snapshot(5 as EntryId, 4 as EntryId);
+		const frame = snapshot(5, 4);
 		const entry = { ...frame.view.entries[0], data: { extensionField: "kept" } };
 		const view = {
 			...frame.view,
@@ -328,14 +334,14 @@ describe("the scoped browser session", () => {
 			Effect.scoped(
 				Effect.gen(function* () {
 					const session = yield* openPiSession(() => socket);
-					socket.receive(snapshot(1 as EntryId));
+					socket.receive(snapshot(1));
 					yield* waitFor(session.changes, (state) => state.transcriptStatus === "synced");
 					const latestDraft = { text: "latest" };
 					session.dispatch({ type: "submit", draft: { text: "older" } });
 					session.dispatch({ type: "submit", draft: latestDraft });
 					yield* waitFor(session.changes, (state) => state.submission?.draft === latestDraft);
 					const [older, latest] = socket.sent.filter((frame) => frame.type === "submit");
-					socket.acknowledge(latest!);
+					socket.acknowledge(latest);
 					yield* waitFor(session.changes, (state) => state.submission?.status === "accepted");
 
 					yield* TestClock.adjust("10 seconds");
@@ -346,7 +352,7 @@ describe("the scoped browser session", () => {
 					expect(unconfirmed).toMatchObject({ value: { unconfirmedSubmissions: [older] } });
 					expect(socket.sent.slice(1)).toEqual([older, latest, older]);
 
-					socket.acknowledge(older!, false);
+					socket.acknowledge(older, false);
 					const confirmed = yield* waitFor(
 						session.changes,
 						(state) => state.unconfirmedSubmissions.length === 0,
@@ -365,7 +371,7 @@ describe("the scoped browser session", () => {
 			Effect.scoped(
 				Effect.gen(function* () {
 					const session = yield* openPiSession(() => socket);
-					socket.receive(snapshot(5 as EntryId, 4 as EntryId));
+					socket.receive(snapshot(5, 4));
 					yield* waitFor(session.changes, (state) => state.earlier);
 					session.dispatch({ type: "loadEarlier" });
 					const page = yield* pageRequest(socket, 0);
@@ -380,14 +386,14 @@ describe("the scoped browser session", () => {
 					expect(submissions.map((frame) => frame.input)).toEqual(["first draft", "second draft"]);
 					expect(submissions[1]?.whenBusy).toBe("steer");
 
-					socket.acknowledge(submissions[0]!);
+					socket.acknowledge(submissions[0]);
 					socket.receive({ type: "result", id: page.id, result: { items: [] } });
 					const loaded = yield* waitFor(session.changes, (state) => !state.loading);
 					expect(loaded).toMatchObject({
 						value: { submission: { status: "pending", draft: secondDraft } },
 					});
 
-					socket.receive({ type: "error", id: submissions[1]!.id, message: "Prompt rejected" });
+					socket.receive({ type: "error", id: submissions[1].id, message: "Prompt rejected" });
 					const rejected = yield* waitFor(
 						session.changes,
 						(state) => state.submission?.status === "rejected",
@@ -406,7 +412,7 @@ describe("the scoped browser session", () => {
 			Effect.scoped(
 				Effect.gen(function* () {
 					const session = yield* openPiSession(() => socket);
-					socket.receive(snapshot(5 as EntryId, 4 as EntryId));
+					socket.receive(snapshot(5, 4));
 					yield* waitFor(session.changes, (state) => state.earlier);
 					vi.spyOn(socket, "send").mockImplementationOnce(() => {
 						throw new Error("Socket send failed");
@@ -426,7 +432,7 @@ describe("the scoped browser session", () => {
 					socket.receive({
 						type: "result",
 						id: current.id,
-						result: { items: snapshot(4 as EntryId).view.entries },
+						result: { items: snapshot(4).view.entries },
 					});
 					const loaded = yield* waitFor(session.changes, (state) => !state.loading);
 					expect(loaded).toMatchObject({
@@ -446,7 +452,7 @@ describe("the scoped browser session", () => {
 			Effect.scoped(
 				Effect.gen(function* () {
 					const session = yield* openPiSession(() => socket);
-					socket.receive(snapshot(5 as EntryId, 4 as EntryId));
+					socket.receive(snapshot(5, 4));
 					yield* waitFor(session.changes, (state) => state.earlier);
 
 					session.dispatch({ type: "loadEarlier" });
@@ -473,7 +479,7 @@ describe("the scoped browser session", () => {
 					socket.receive({
 						type: "result",
 						id: expired.id,
-						result: { items: snapshot(1 as EntryId).view.entries },
+						result: { items: snapshot(1).view.entries },
 					});
 					socket.receive({ type: "error", id: expired.id, message: "late history error" });
 					socket.receive({
@@ -494,7 +500,7 @@ describe("the scoped browser session", () => {
 					socket.receive({
 						type: "result",
 						id: current.id,
-						result: { items: snapshot(4 as EntryId).view.entries },
+						result: { items: snapshot(4).view.entries },
 					});
 					const loaded = yield* waitFor(
 						session.changes,
@@ -518,7 +524,7 @@ describe("the scoped browser session", () => {
 			Effect.scoped(
 				Effect.gen(function* () {
 					const session = yield* openPiSession(() => socket);
-					socket.receive(snapshot(5 as EntryId, 4 as EntryId));
+					socket.receive(snapshot(5, 4));
 					yield* waitFor(session.changes, (state) => state.earlier);
 					session.dispatch({ type: "loadEarlier" });
 					yield* pageRequest(socket, 0);
@@ -532,11 +538,11 @@ describe("the scoped browser session", () => {
 					});
 
 					socket.reconnect();
-					socket.receive(snapshot(5 as EntryId, 4 as EntryId));
+					socket.receive(snapshot(5, 4));
 					yield* waitFor(session.changes, (state) => state.transcriptStatus === "synced");
 					session.dispatch({ type: "loadEarlier" });
 					const current = yield* pageRequest(socket, 1);
-					const [entry] = snapshot(4 as EntryId).view.entries;
+					const [entry] = snapshot(4).view.entries;
 					socket.receive({
 						type: "result",
 						id: current.id,
@@ -581,7 +587,7 @@ describe("the scoped browser session", () => {
 					const oldSocket = new TestSocket();
 					const oldScope = yield* Effect.acquireRelease(Scope.make(), Scope.close);
 					const oldSession = yield* openPiSession(() => oldSocket).pipe(Scope.provide(oldScope));
-					oldSocket.receive(snapshot(5 as EntryId, 4 as EntryId));
+					oldSocket.receive(snapshot(5, 4));
 					yield* waitFor(oldSession.changes, (state) => state.earlier);
 
 					oldSession.dispatch({ type: "loadEarlier" });

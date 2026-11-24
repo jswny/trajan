@@ -7,25 +7,26 @@ import {
 	Fiber,
 	Layer,
 	Option,
+	Predicate,
 	Queue,
 	Result,
+	Schema,
 	Stream,
 	SubscriptionRef,
 } from "effect";
 import { MAIN_CHAT_NAME } from "./main-chat";
-import { HistoryDisconnected, isHistoryRequest, PiSessionMirror } from "./mirror";
-import { PiCommandOutbox, type PiOutboxSubmit } from "./outbox";
-import {
-	decodeServerMessage,
-	type ClientMessage,
-	type SessionView,
-	type ToolInfo,
-} from "./protocol";
+import { isHistoryRequest, PiSessionMirror } from "./mirror";
+import { PiCommandOutbox } from "./outbox";
+import type { PiOutboxSubmit } from "./outbox";
+import { decodeServerMessage } from "./protocol";
+import type { ClientMessage, SessionView, ToolInfo } from "./protocol";
 import { EMPTY_VIEW } from "./view";
 
 /** Each edit creates a new draft, so equal text can belong to different revisions. */
 export type PromptDraft = { readonly text: string };
 export type SubmitMode = "followUp" | "steer";
+
+const isMessageEvent = Schema.is(Schema.instanceOf(MessageEvent));
 
 const RECEIPT_TIMEOUT = "5 seconds";
 const WATCH_TIMEOUT = "5 seconds";
@@ -38,11 +39,11 @@ type Submission = { readonly id: string; readonly draft: PromptDraft } & (
 type SessionState = SessionView & {
 	readonly status: "connecting" | "open" | "closed";
 	readonly transcriptStatus: "syncing" | "synced" | "failed";
-	readonly catalog: readonly ToolInfo[];
+	readonly catalog: ReadonlyArray<ToolInfo>;
 	readonly loading: boolean;
 	readonly historyError: string | null;
 	readonly submission: Submission | null;
-	readonly unconfirmedSubmissions: readonly PiOutboxSubmit[];
+	readonly unconfirmedSubmissions: ReadonlyArray<PiOutboxSubmit>;
 };
 
 export const INITIAL_SESSION_STATE: SessionState = {
@@ -108,8 +109,9 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 		Queue.offerUnsafe(events, { type: "close" });
 	};
 	const onMessage = (event: Event) => {
-		if (event instanceof MessageEvent)
+		if (isMessageEvent(event)) {
 			Queue.offerUnsafe(events, { type: "message", data: event.data });
+		}
 	};
 	const socket = yield* Effect.acquireRelease(Effect.sync(connect), (socket) =>
 		Effect.sync(() => {
@@ -122,7 +124,9 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 	);
 
 	const send = (message: ClientMessage) => {
-		if (socket.readyState !== WebSocket.OPEN) return false;
+		if (socket.readyState !== WebSocket.OPEN) {
+			return false;
+		}
 		try {
 			socket.send(JSON.stringify(message));
 			return true;
@@ -151,7 +155,9 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 
 	const cancelDeadline = Effect.fnUntraced(function* (id: string) {
 		const deadline = deadlines.get(id);
-		if (deadline === undefined) return;
+		if (deadline === undefined) {
+			return;
+		}
 		deadlines.delete(id);
 		yield* Fiber.interrupt(deadline.fiber);
 	});
@@ -176,13 +182,17 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 						? [false, current]
 						: [true, { ...current, loading: true, historyError: null }],
 				);
-				if (!started) return;
+				if (!started) {
+					return;
+				}
 
 				yield* restore(
 					request.pipe(
 						Effect.flatMap((view) => (view === undefined ? Effect.void : publishView())),
 						Effect.catch((error) => {
-							if (error instanceof HistoryDisconnected) return Effect.void;
+							if (Predicate.isTagged(error, "HistoryDisconnected")) {
+								return Effect.void;
+							}
 							const historyError = Cause.isTimeoutError(error)
 								? "Loading messages timed out. Try again."
 								: error instanceof Error
@@ -205,18 +215,25 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 						!text ||
 						((submission?.status === "pending" || submission?.status === "unconfirmed") &&
 							submission.draft === command.draft)
-					)
+					) {
 						return;
+					}
 					const submit = outbox.submit(text, command.whenBusy ?? "followUp");
-					if (status === "open") yield* sendSubmit(submit, true);
+					if (status === "open") {
+						yield* sendSubmit(submit, true);
+					}
 					yield* update({ submission: { id: submit.id, draft: command.draft, status: "pending" } });
 					return;
 				}
 				case "retrySubmit": {
 					const { status, submission, unconfirmedSubmissions } = yield* SubscriptionRef.get(state);
-					if (status !== "open") return;
+					if (status !== "open") {
+						return;
+					}
 					const submit = unconfirmedSubmissions.find(({ id }) => id === command.id);
-					if (submit === undefined) return;
+					if (submit === undefined) {
+						return;
+					}
 					yield* sendSubmit(submit, false);
 					yield* update({
 						submission:
@@ -227,7 +244,9 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 				}
 				case "retryWatch": {
 					const { status, transcriptStatus } = yield* SubscriptionRef.get(state);
-					if (status === "open" && transcriptStatus === "failed") yield* startWatch(false);
+					if (status === "open" && transcriptStatus === "failed") {
+						yield* startWatch(false);
+					}
 					return;
 				}
 				case "abort":
@@ -254,7 +273,9 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 						break;
 					case "open": {
 						yield* startWatch(true);
-						for (const submit of outbox.pending()) yield* sendSubmit(submit, true);
+						for (const submit of outbox.pending()) {
+							yield* sendSubmit(submit, true);
+						}
 						const { submission } = yield* SubscriptionRef.get(state);
 						yield* update({
 							status: "open",
@@ -276,16 +297,23 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 						break;
 					}
 					case "watchTimeout": {
-						if (watchDeadline?.event !== event) break;
+						if (watchDeadline?.event !== event) {
+							break;
+						}
 						watchDeadline = undefined;
-						if (event.canRetry) yield* startWatch(false);
-						else yield* update({ transcriptStatus: "failed" });
+						if (event.canRetry) {
+							yield* startWatch(false);
+						} else {
+							yield* update({ transcriptStatus: "failed" });
+						}
 						break;
 					}
 					case "receiptTimeout": {
 						const { submit, canReplay } = event;
 						// A receipt, disconnect or fresh send can invalidate a queued timeout.
-						if (deadlines.get(submit.id)?.event !== event) break;
+						if (deadlines.get(submit.id)?.event !== event) {
+							break;
+						}
 						deadlines.delete(submit.id);
 						if (canReplay) {
 							yield* sendSubmit(submit, false);
@@ -303,12 +331,16 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 					}
 					case "message": {
 						const decoded = decodeServerMessage(event.data);
-						if (Option.isNone(decoded)) break;
+						if (Option.isNone(decoded)) {
+							break;
+						}
 						const message = decoded.value;
 						const received = yield* Effect.result(mirror.receive(message));
 						if (Result.isFailure(received)) {
 							const { status, transcriptStatus } = yield* SubscriptionRef.get(state);
-							if (status === "open" && transcriptStatus === "synced") yield* startWatch(true);
+							if (status === "open" && transcriptStatus === "synced") {
+								yield* startWatch(true);
+							}
 							break;
 						}
 						if (message.type === "view") {
@@ -318,9 +350,15 @@ export const openPiSession = Effect.fn("openPiSession")(function* (connect: () =
 							}
 							break;
 						}
-						if (received.success !== undefined) yield* publishView();
-						if (message.type === "hello") yield* update({ catalog: message.tools });
-						if (message.type !== "result" && message.type !== "error") break;
+						if (received.success !== undefined) {
+							yield* publishView();
+						}
+						if (message.type === "hello") {
+							yield* update({ catalog: message.tools });
+						}
+						if (message.type !== "result" && message.type !== "error") {
+							break;
+						}
 						const settledId = outbox.receive(message) ? message.id : undefined;
 						const { submission, unconfirmedSubmissions } = yield* SubscriptionRef.get(state);
 						const settledLatest = settledId !== undefined && submission?.id === settledId;

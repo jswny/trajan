@@ -13,7 +13,9 @@ export const themePreference = Atom.writable<typeof ThemeMode.Type, string>(
 		return isThemeMode(saved) ? saved : "auto";
 	},
 	(ctx, mode) => {
-		if (!isThemeMode(mode)) return;
+		if (!isThemeMode(mode)) {
+			return;
+		}
 		document.documentElement.dataset.theme = mode;
 		writePreference(THEME_KEY, mode);
 		ctx.setSelf(mode);

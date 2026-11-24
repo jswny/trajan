@@ -1,9 +1,5 @@
-import {
-	ConversationMessage,
-	TurnMessage,
-	type TurnSubmission,
-	TurnTranscript,
-} from "@trajan/effect-harness";
+import { ConversationMessage, TurnMessage, TurnTranscript } from "@trajan/effect-harness";
+import type { TurnSubmission } from "@trajan/effect-harness";
 import { Schema } from "effect";
 
 const contextTurnLimit = 16;
@@ -65,7 +61,9 @@ export class ConversationStore {
 					submission.id,
 				)
 				.toArray()[0];
-			if (existing) return { runId: existing.run_id, accepted: false };
+			if (existing) {
+				return { runId: existing.run_id, accepted: false };
+			}
 
 			const runId = crypto.randomUUID();
 			this.storage.sql.exec(
@@ -89,9 +87,15 @@ export class ConversationStore {
 	start(runId: string) {
 		return this.storage.transactionSync(() => {
 			const row = this.#find(runId);
-			if (!row) throw new Error("The accepted submission is missing.");
-			if (row.state !== "pending") return row;
-			if (this.head()?.run_id !== runId) throw new Error("Only the first pending turn can start.");
+			if (!row) {
+				throw new Error("The accepted submission is missing.");
+			}
+			if (row.state !== "pending") {
+				return row;
+			}
+			if (this.head()?.run_id !== runId) {
+				throw new Error("Only the first pending turn can start.");
+			}
 
 			// The committed prefix remains the model's context across journal replay.
 			return this.storage.sql
@@ -139,10 +143,15 @@ export class ConversationStore {
 		}));
 		return this.storage.transactionSync(() => {
 			const row = this.#find(runId);
-			if (row?.submission_id !== transcript.submissionId)
+			if (row?.submission_id !== transcript.submissionId) {
 				throw new Error("Transcript submission does not match its run.");
-			if (row.state === "completed") return;
-			if (row.state !== "running") throw new Error("The turn is not running.");
+			}
+			if (row.state === "completed") {
+				return;
+			}
+			if (row.state !== "running") {
+				throw new Error("The turn is not running.");
+			}
 
 			for (const message of messages) {
 				this.storage.sql.exec(

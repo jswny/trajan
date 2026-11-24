@@ -2,21 +2,19 @@ import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Watch } from "@earendil-works/chord/watch";
-import {
-	createRegistry,
-	type ConversationId,
-	type ConversationView,
-	type EntryId,
-} from "@earendil-works/pi-durable";
+import { createRegistry, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import type { ConversationView } from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
 import { PiHarness, ROOT_SESSION } from "agents/harness/pi";
 import type { Connection } from "agents/lifecycle";
 import { Effect, Option } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { PiSessionMirror } from "../mirror";
-import { decodeServerMessage, type PiServerMessage } from "../protocol";
+import { decodeEntryId, decodeServerMessage } from "../protocol";
+import type { PiServerMessage } from "../protocol";
 import { PiSessionSockets } from "../sockets";
 import type { PiMessage } from "../transcript";
+import { readSessionView } from "./session-view";
 
 async function connect(name: string, query = ""): Promise<WebSocket> {
 	const response = await routeAgentRequest(
@@ -26,14 +24,19 @@ async function connect(name: string, query = ""): Promise<WebSocket> {
 		env,
 	);
 	expect(response?.status).toBe(101);
-	const socket = response!.webSocket as WebSocket;
+	const socket = response?.webSocket;
+	if (!socket) {
+		throw new Error("Expected the upgraded WebSocket");
+	}
 	socket.accept();
 	return socket;
 }
 
 /** The close code `socket` gets. */
 function closed(socket: WebSocket): Promise<number> {
-	return new Promise((resolve) => socket.addEventListener("close", (event) => resolve(event.code)));
+	return new Promise((resolve) => {
+		socket.addEventListener("close", (event) => resolve(event.code));
+	});
 }
 
 /**
@@ -42,19 +45,25 @@ function closed(socket: WebSocket): Promise<number> {
  */
 function follow(socket: WebSocket) {
 	const mirror = new PiSessionMirror();
-	const frames: PiServerMessage[] = [];
+	const frames: Array<PiServerMessage> = [];
 	const waiters: Array<() => void> = [];
 	const attach = (next: WebSocket) => {
 		next.addEventListener("message", (event) => {
 			const decoded = decodeServerMessage(event.data);
-			if (Option.isNone(decoded)) return;
+			if (Option.isNone(decoded)) {
+				return;
+			}
 			const frame = decoded.value;
 			frames.push(frame);
 			Effect.runSync(mirror.receive(frame));
-			for (const waiter of waiters.splice(0)) waiter();
+			for (const waiter of waiters.splice(0)) {
+				waiter();
+			}
 		});
 		mirror.open((message) => {
-			if (next.readyState !== WebSocket.OPEN) return false;
+			if (next.readyState !== WebSocket.OPEN) {
+				return false;
+			}
 			next.send(JSON.stringify(message));
 			return true;
 		});
@@ -72,7 +81,9 @@ function follow(socket: WebSocket) {
 				setTimeout(resolve, 20);
 			});
 		}
-		if (!check()) throw new Error("Condition never held");
+		if (!check()) {
+			throw new Error("Condition never held");
+		}
 	};
 	const views = () => frames.filter((frame) => frame.type === "view").length;
 	return { view: () => mirror.view, mirror, frames, views, until, reconnect };
@@ -83,18 +94,21 @@ function textOf(message: PiMessage): string {
 }
 
 /** The texts of the messages that start with `prefix `. */
-function notes(messages: readonly PiMessage[], prefix: string): string[] {
-	return messages.map(textOf).filter((text) => text.startsWith(`${prefix} `));
+function notes(messages: ReadonlyArray<PiMessage>, prefix: string): Array<string> {
+	return messages.flatMap((message) => {
+		const text = textOf(message);
+		return text.startsWith(`${prefix} `) ? [text] : [];
+	});
 }
 
-function numbered(prefix: string, count: number): string[] {
+function numbered(prefix: string, count: number): Array<string> {
 	return Array.from({ length: count }, (_, i) => `${prefix} ${i + 1}`);
 }
 
 function watchView(before: number): ConversationView {
 	return {
-		conversation: { id: 1 as ConversationId },
-		before: before as EntryId,
+		conversation: { id: ROOT_CONVERSATION_ID },
+		before: decodeEntryId(before),
 		entries: [],
 		docs: {},
 	};
@@ -118,7 +132,7 @@ function watchFixture() {
 		setState: () => null,
 		tags: ["connection", "pi-session:" + ROOT_SESSION],
 	});
-	const frames: PiServerMessage[] = [];
+	const frames: Array<PiServerMessage> = [];
 	client.addEventListener("message", (event) => {
 		frames.push(JSON.parse(event.data));
 	});
@@ -134,7 +148,9 @@ describe("the session WebSocket protocol", () => {
 		const getTags = sockets.options().getConnectionTags!;
 		const tagsFor = (session?: string) => {
 			const url = new URL("https://example.com/agents/pi-harness-test/chat");
-			if (session !== undefined) url.searchParams.set("session", session);
+			if (session !== undefined) {
+				url.searchParams.set("session", session);
+			}
 			return getTags(socket, { request: new Request(url) });
 		};
 		try {
@@ -191,13 +207,18 @@ describe("the session WebSocket protocol", () => {
 						},
 					}),
 				);
-				if (outcome === "resolves") pending.resolve(stale);
-				else pending.reject(new Error("Superseded watch failed"));
+				if (outcome === "resolves") {
+					pending.resolve(stale);
+				} else {
+					pending.reject(new Error("Superseded watch failed"));
+				}
 				await wake;
 
 				expect(socket.readyState).toBe(WebSocket.OPEN);
 				expect(watch.mock.calls[0]?.[1]?.abortSignal?.aborted).toBe(true);
-				if (outcome === "resolves") expect(await stale.closed).toEqual({ kind: "stopped" });
+				if (outcome === "resolves") {
+					expect(await stale.closed).toEqual({ kind: "stopped" });
+				}
 				current.advance(
 					{ kind: "value", value: watchView(11), retired: false, ops: [["s", ["before"], 11]] },
 					BACKGROUND_CONTEXT,
@@ -298,7 +319,9 @@ describe("the session WebSocket protocol", () => {
 		];
 		socket.send("{");
 		socket.send("null");
-		for (const request of invalid) socket.send(JSON.stringify(request));
+		for (const request of invalid) {
+			socket.send(JSON.stringify(request));
+		}
 		await client.until(() => client.frames.filter((frame) => frame.type === "error").length === 7);
 		expect(client.frames.filter((frame) => frame.type === "error")).toEqual([
 			{ type: "error", message: "Malformed JSON" },
@@ -340,7 +363,7 @@ describe("the session WebSocket protocol", () => {
 		});
 		// The operations rebuilt the same view a client joining now gets.
 		const stub = env.PI_HARNESS_TEST.getByName(name);
-		expect(client.view()).toEqual(JSON.parse(await stub.snapshotView()));
+		expect(client.view()).toEqual(readSessionView(await stub.snapshotView()));
 		socket.close();
 	});
 

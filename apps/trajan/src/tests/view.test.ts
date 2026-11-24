@@ -1,6 +1,10 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
-import type { PiSessionView } from "../view";
+import { readSessionView } from "./session-view";
+
+function text(message: ReturnType<typeof readSessionView>["messages"][number]): string {
+	return message.parts.map((part) => part.text ?? "").join("");
+}
 
 /**
  * `projectView` turns pi's conversation view into this app's, on the server
@@ -13,8 +17,8 @@ describe("the session view", () => {
 		const watching = stub.watch();
 		const receipt = await stub.submit("multiply 5");
 		await stub.wait(receipt.operationId);
-		const view = JSON.parse(await watching) as PiSessionView;
-		const late = JSON.parse(await stub.snapshotView()) as PiSessionView;
+		const view = readSessionView(await watching);
+		const late = readSessionView(await stub.snapshotView());
 		expect(view.messages).toEqual(late.messages);
 		expect(late.running).toBe(false);
 		expect(late.error).toBeNull();
@@ -25,10 +29,8 @@ describe("the session view", () => {
 		await stub.wait((await stub.submit("before the reset")).operationId);
 		await stub.reset();
 		await stub.wait((await stub.submit("after the reset")).operationId);
-		const view = JSON.parse(await stub.snapshotView()) as PiSessionView;
-		const texts = view.messages.map((message) =>
-			message.parts.map((part) => ("text" in part ? part.text : "")).join(""),
-		);
+		const view = readSessionView(await stub.snapshotView());
+		const texts = view.messages.map(text);
 		expect(texts[0]).toBe("Context reset");
 		expect(texts).toContain("after the reset");
 		expect(texts).not.toContain("before the reset");
@@ -39,9 +41,7 @@ describe("the session view", () => {
 		await stub.wait((await stub.submit("first question")).operationId);
 		await stub.wait((await stub.submit("second question")).operationId);
 		await stub.compact();
-		const view = JSON.parse(await stub.snapshotView()) as PiSessionView;
-		const text = (message: PiSessionView["messages"][number]) =>
-			message.parts.map((part) => ("text" in part ? part.text : "")).join("");
+		const view = readSessionView(await stub.snapshotView());
 		const summaries = view.messages.filter((message) => message.role === "summary");
 		expect(summaries).toHaveLength(1);
 		// The faux model echoes the summarization prompt: the summary, unwrapped.

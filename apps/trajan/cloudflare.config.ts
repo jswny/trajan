@@ -1,5 +1,6 @@
 import { bindings, defineConfig, exports } from "cf/config";
 import codemode from "@trajan/codemode/cloudflare.config";
+// oxlint-disable-next-line import/no-namespace -- The cf-worker namespace import preserves the typed Durable Object exports.
 import * as entrypoint from "./src/server.ts" with { type: "cf-worker" };
 
 // Use npm run deploy --workspace=@trajan/app as the Workers Builds deploy command.
@@ -17,7 +18,7 @@ export default defineConfig(({ mode }) => {
 			compatibilityFlags: ["nodejs_compat"],
 			workersDev: !development,
 			previewUrls: false,
-			...(!development ? { domains: ["trajan.j1.io"] } : {}),
+			...(!development && { domains: ["trajan.j1.io"] }),
 			assets: {
 				notFoundHandling: "single-page-application",
 				runWorkerFirst: ["/api/*", "/agents/*"],

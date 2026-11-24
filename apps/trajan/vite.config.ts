@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { loadAndParseConfig } from "@cloudflare/config";
-import { cloudflare, type PluginConfig } from "@cloudflare/vite-plugin";
+import { cloudflare } from "@cloudflare/vite-plugin";
+import type { PluginConfig } from "@cloudflare/vite-plugin";
 import pierreDark from "@pierre/theme/pierre-dark";
 import pierreLight from "@pierre/theme/pierre-light";
 import tailwindcss from "@tailwindcss/vite";
@@ -30,9 +31,13 @@ async function fixtureWorker(mode: "browser-smoke" | "effect-harness-live"): Pro
 		isPreview: false,
 		mode,
 	});
-	if (!result.success) throw result.error;
+	if (!result.success) {
+		throw result.error;
+	}
 	const worker = result.data.worker;
-	if (!worker) throw new Error("Missing Trajan test Worker");
+	if (!worker) {
+		throw new Error("Missing Trajan test Worker");
+	}
 	return {
 		config: () => ({
 			worker: {
@@ -52,13 +57,17 @@ async function fixtureWorker(mode: "browser-smoke" | "effect-harness-live"): Pro
 async function cloudflareWorkers(command: string, mode: string): Promise<PluginConfig> {
 	const sandboxPath = fileURLToPath(import.meta.resolve("@trajan/codemode/cloudflare.config"));
 	const { result } = await loadAndParseConfig(sandboxPath, { isPreview: false, mode });
-	if (!result.success) throw result.error;
+	if (!result.success) {
+		throw result.error;
+	}
 	const sandbox = result.data.worker;
-	if (!sandbox) throw new Error("Missing Pi Code Mode sandbox Worker");
+	if (!sandbox) {
+		throw new Error("Missing Pi Code Mode sandbox Worker");
+	}
 	const fixtureMode =
 		command === "serve" && (mode === "browser-smoke" || mode === "effect-harness-live");
 	return {
-		...(fixtureMode ? await fixtureWorker(mode) : {}),
+		...(fixtureMode && (await fixtureWorker(mode))),
 		auxiliaryWorkers: [{ config: sandbox, devOnly: true }],
 	};
 }
@@ -75,7 +84,9 @@ export default defineConfig(async ({ command, mode }) => ({
 				const properties = Object.entries(paletteRoles).map(([role, key]) => {
 					const light = pierreLight.colors[key];
 					const dark = pierreDark.colors[key];
-					if (!light || !dark) throw new Error(`Pierre theme is missing ${key}`);
+					if (!light || !dark) {
+						throw new Error(`Pierre theme is missing ${key}`);
+					}
 					return `--pierre-${role}:${light === dark ? light : `light-dark(${light},${dark})`};`;
 				});
 				return [

@@ -21,7 +21,9 @@ function openFixture() {
 
 async function submit(stub: ReturnType<typeof openFixture>, input = submission) {
 	const receipt = await stub.submit(input);
-	if (receipt.runId === null) throw new Error(receipt.error);
+	if (receipt.runId === null) {
+		throw new Error(receipt.error);
+	}
 	return receipt;
 }
 
@@ -115,7 +117,9 @@ test.each([
 	const { executionId, instance } = await stub.state();
 	expect(await stub.turn(runId)).toMatchObject({ state: "running" });
 	if (discardExecution) {
-		if (executionId === undefined) throw new Error("Expected the tool execution ID");
+		if (executionId === undefined) {
+			throw new Error("Expected the tool execution ID");
+		}
 		await stub.discardExecution(executionId);
 	}
 
@@ -258,7 +262,9 @@ test("a turn committed before the task settles appears once in history and in th
 	expect(await stub.submit(recall)).toMatchObject({ accepted: false, runId: second.runId });
 
 	const newest = await stub.history({ limit: 2 });
-	if (newest.nextBefore === null) throw new Error("Expected an earlier history page");
+	if (newest.nextBefore === null) {
+		throw new Error("Expected an earlier history page");
+	}
 	const older = await stub.history({ before: newest.nextBefore, limit: 2 });
 	expect(older.nextBefore).toBeNull();
 	expect(

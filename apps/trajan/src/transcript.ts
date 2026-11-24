@@ -21,7 +21,7 @@ export type PiMessagePart =
 			readonly type: "tool-result";
 			readonly id: string;
 			readonly name: string;
-			readonly content: readonly (TextContent | ImageContent)[];
+			readonly content: ReadonlyArray<TextContent | ImageContent>;
 			readonly details?: JsonValue;
 			readonly error: boolean;
 	  };
@@ -41,7 +41,7 @@ export type PiMessage =
 			/** The pi entry id, or `live` for the message being streamed. */
 			readonly id: string;
 			readonly role: "user" | "assistant" | "tool" | "notice" | "summary";
-			readonly parts: readonly PiMessagePart[];
+			readonly parts: ReadonlyArray<PiMessagePart>;
 			readonly timestamp: number;
 			readonly stopReason?: string;
 			readonly error?: string;
@@ -58,13 +58,13 @@ export type PiMessage =
 
 function userParts(
 	content: Extract<TranscriptModelMessage, { role: "user" }>["content"],
-): PiMessagePart[] {
+): Array<PiMessagePart> {
 	return typeof content === "string" ? [{ type: "text", text: content }] : content;
 }
 
 function assistantParts(
 	content: Extract<TranscriptModelMessage, { role: "assistant" }>["content"],
-): PiMessagePart[] {
+): Array<PiMessagePart> {
 	return content.map((part): PiMessagePart => {
 		switch (part.type) {
 			case "text":
@@ -78,6 +78,8 @@ function assistantParts(
 					name: part.name,
 					arguments: part.arguments,
 				};
+			default:
+				throw new Error("Unsupported assistant message part");
 		}
 	});
 }
@@ -102,7 +104,7 @@ export function projectMessage(message: TranscriptModelMessage, id: string): PiM
 				parts: assistantParts(message.content),
 				timestamp: message.timestamp,
 				stopReason: message.stopReason,
-				...(message.errorMessage === undefined ? {} : { error: message.errorMessage }),
+				...(message.errorMessage !== undefined && { error: message.errorMessage }),
 			};
 		case "toolResult":
 			return {
@@ -114,7 +116,7 @@ export function projectMessage(message: TranscriptModelMessage, id: string): PiM
 						id: message.toolCallId,
 						name: message.toolName,
 						content: message.content,
-						...(message.details === undefined ? {} : { details: message.details }),
+						...(message.details !== undefined && { details: message.details }),
 						error: message.isError,
 					},
 				],
@@ -128,7 +130,9 @@ export function projectMessage(message: TranscriptModelMessage, id: string): PiM
  * summary in `<summary>` tags; this is the summary inside them.
  */
 function summaryText(message: Message | undefined): string {
-	if (message?.role !== "user") return "";
+	if (message?.role !== "user") {
+		return "";
+	}
 	const text = userParts(message.content)
 		.map((part) => (part.type === "text" ? part.text : ""))
 		.join("");
@@ -159,12 +163,14 @@ export function projectEntry(entry: EntryRecord): PiMessage | undefined {
 			timestamp: 0,
 		};
 	}
-	if (entry.kind === "pi.system" || message === undefined) return undefined;
+	if (entry.kind === "pi.system" || message === undefined) {
+		return undefined;
+	}
 	return projectMessage(message, String(entry.id));
 }
 
 /** Project entries, such as `session.messages()`, the active context. */
-export function projectEntries(entries: readonly EntryRecord[]): PiMessage[] {
+export function projectEntries(entries: ReadonlyArray<EntryRecord>): Array<PiMessage> {
 	return entries.flatMap((entry) => {
 		const message = projectEntry(entry);
 		return message ? [message] : [];

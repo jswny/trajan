@@ -1,9 +1,11 @@
 import { env } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { describe, expect, it } from "vite-plus/test";
+import { Option } from "effect";
 import { PiCommandOutbox } from "../outbox";
+import { decodeServerMessage } from "../protocol";
 import type { PiServerMessage } from "../protocol";
-import type { PiSessionView } from "../view";
+import { readSessionView } from "./session-view";
 
 async function connect(name: string): Promise<WebSocket> {
 	const response = await routeAgentRequest(
@@ -13,7 +15,10 @@ async function connect(name: string): Promise<WebSocket> {
 		env,
 	);
 	expect(response?.status).toBe(101);
-	const socket = response!.webSocket as WebSocket;
+	const socket = response?.webSocket;
+	if (!socket) {
+		throw new Error("Expected the upgraded WebSocket");
+	}
 	socket.accept();
 	return socket;
 }
@@ -25,14 +30,22 @@ async function connect(name: string): Promise<WebSocket> {
 function replay(socket: WebSocket, outbox: PiCommandOutbox, id: string): Promise<PiServerMessage> {
 	const answered = new Promise<PiServerMessage>((resolve) => {
 		socket.addEventListener("message", (event) => {
-			if (typeof event.data !== "string") return;
-			const message = JSON.parse(event.data) as PiServerMessage;
+			if (typeof event.data !== "string") {
+				return;
+			}
+			const decoded = decodeServerMessage(event.data);
+			if (Option.isNone(decoded)) {
+				return;
+			}
+			const message = decoded.value;
 			if ((message.type === "result" || message.type === "error") && message.id === id) {
 				resolve(message);
 			}
 		});
 	});
-	for (const submit of outbox.pending()) socket.send(JSON.stringify(submit));
+	for (const submit of outbox.pending()) {
+		socket.send(JSON.stringify(submit));
+	}
 	return answered;
 }
 
@@ -102,7 +115,7 @@ describe("the client command outbox", () => {
 		expect(outbox.pending()).toEqual([]);
 		const stub = env.PI_HARNESS_TEST.getByName(name);
 		await stub.wait(submit.operationId);
-		const view = JSON.parse(await stub.snapshotView()) as PiSessionView;
+		const view = readSessionView(await stub.snapshotView());
 		const prompts = view.messages.filter(
 			(message) =>
 				message.role === "user" &&

@@ -2,7 +2,6 @@ import { Workspace } from "@cloudflare/computer";
 import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import {
 	TurnIoError,
-	type StepAttempt,
 	ToolResult,
 	TurnMessage,
 	TurnModel,
@@ -10,6 +9,7 @@ import {
 	TurnTools,
 	TurnTranscript,
 } from "@trajan/effect-harness";
+import type { StepAttempt } from "@trajan/effect-harness";
 import { Context, Effect, Layer, Option, Predicate, Schema, Stream } from "effect";
 import { Tool, Toolkit } from "effect/ai";
 import { HistoryQuery } from "../effect-harness/conversation-store";
@@ -214,21 +214,27 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		const text = await this.#workspace.fs
 			.readFile(workspaceFile, "utf8")
 			.catch((error: unknown) => {
-				if (isMissing(error)) return "";
+				if (isMissing(error)) {
+					return "";
+				}
 				throw error;
 			});
 		return { instance: this.#instance, executionId, pausedAt, text };
 	}
 
 	async #pauseAt(point: PausePoint, signal: AbortSignal, executionId?: string) {
-		if ((await this.ctx.storage.get("pause")) !== point) return;
+		if ((await this.ctx.storage.get("pause")) !== point) {
+			return;
+		}
 		await this.ctx.storage.put({
 			pausedAt: point,
-			...(executionId === undefined ? {} : { executionId }),
+			...(executionId !== undefined && { executionId }),
 		});
 		while ((await this.ctx.storage.get("pause")) === point) {
 			signal.throwIfAborted();
-			await new Promise((resolve) => setTimeout(resolve, 10));
+			await new Promise((resolve) => {
+				setTimeout(resolve, 10);
+			});
 		}
 	}
 
@@ -262,16 +268,18 @@ export async function serveEffectHarness(request: Request, env: Env) {
 
 	const stub = env.EFFECT_HARNESS_TEST.getByName("live-model");
 	if (url.pathname === "/__effect-harness/history") {
-		if (request.method !== "GET")
+		if (request.method !== "GET") {
 			return new Response(null, { status: 405, headers: { Allow: "GET" } });
+		}
 		const before = url.searchParams.get("before");
 		const limit = url.searchParams.get("limit");
 		const query = Schema.decodeUnknownOption(HistoryQuery)({
-			...(before === null ? {} : { before: Number(before) }),
-			...(limit === null ? {} : { limit: Number(limit) }),
+			...(before !== null && { before: Number(before) }),
+			...(limit !== null && { limit: Number(limit) }),
 		});
-		if (query._tag === "None")
+		if (query._tag === "None") {
 			return Response.json({ error: "Invalid history cursor or limit." }, { status: 400 });
+		}
 		const { entries, nextBefore } = await stub.history(query.value);
 		return Response.json({
 			entries: entries.map((entry) => ({
@@ -295,7 +303,9 @@ export async function serveEffectHarness(request: Request, env: Env) {
 
 	if (request.method === "GET") {
 		const runId = url.searchParams.get("runId");
-		if (!runId) return Response.json({ error: "Expected a runId." }, { status: 400 });
+		if (!runId) {
+			return Response.json({ error: "Expected a runId." }, { status: 400 });
+		}
 		const { transcript, ...turn } = await stub.turn(runId);
 		return Response.json(
 			{

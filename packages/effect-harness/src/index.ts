@@ -110,7 +110,7 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 ) {
 	const model = yield* TurnModel;
 	const tools = yield* TurnTools;
-	const history: ModelHistoryEntry[] = [...context, { role: "user", text: submission.prompt }];
+	const history: Array<ModelHistoryEntry> = [...context, { role: "user", text: submission.prompt }];
 
 	for (let index = 0; ; index++) {
 		const allowTools = index < MAX_TOOL_CALLS;

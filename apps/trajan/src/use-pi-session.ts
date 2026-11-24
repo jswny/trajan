@@ -1,7 +1,8 @@
 import { useAtom, useAtomValue } from "@effect/atom-react";
 import type { EntryId } from "@earendil-works/pi-durable";
 import { AsyncResult } from "effect/reactivity";
-import { INITIAL_SESSION_STATE, type SessionCommand, type SubmitMode } from "./pi-session";
+import { INITIAL_SESSION_STATE } from "./pi-session";
+import type { SessionCommand, SubmitMode } from "./pi-session";
 import { composerAtom, sessionAtom } from "./session-atoms";
 
 export function usePiSession() {

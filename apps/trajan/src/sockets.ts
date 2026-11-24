@@ -2,21 +2,16 @@ import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/conte
 import type {
 	ConversationView,
 	ConversationWindow,
-	EntryId,
 	RegistryReader,
 	WatchEnd,
 } from "@earendil-works/pi-durable";
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
-import { ROOT_SESSION, type PiHarness, type PiSessionId } from "agents/harness/pi";
+import { ROOT_SESSION } from "agents/harness/pi";
+import type { PiHarness, PiSessionId } from "agents/harness/pi";
 import { Effect, Exit, Logger, Result, Schema, Scope } from "effect";
-import {
-	decodeClientMessage,
-	decodeRequestId,
-	type PiClientMessage,
-	type PiCommandResult,
-	type PiServerMessage,
-} from "./protocol";
+import { decodeClientMessage, decodeEntryId, decodeRequestId } from "./protocol";
+import type { PiClientMessage, PiCommandResult, PiServerMessage } from "./protocol";
 
 const SESSION_TAG_PREFIX = "pi-session:";
 const SESSION_QUERY = "session";
@@ -68,7 +63,9 @@ function watchReporter(trigger: WatchTrigger, replaced: boolean) {
 	let reported = false;
 	return (outcome: WatchOutcome) =>
 		Effect.suspend(() => {
-			if (reported) return Effect.void;
+			if (reported) {
+				return Effect.void;
+			}
 			reported = true;
 			return watchLog("pi_session_watch", outcome, startedAt, { ...trigger, replaced });
 		});
@@ -80,14 +77,16 @@ function sessionTag(session: PiSessionId): string {
 
 function sessionFromRequest(request: Request, fallback: PiSessionId): string {
 	const session = new URL(request.url).searchParams.get(SESSION_QUERY);
-	if (session === null || session === "") return fallback;
+	if (session === null || session === "") {
+		return fallback;
+	}
 	if (Result.isFailure(decodePiSessionId(session))) {
 		throw new Error(`Invalid pi session ${JSON.stringify(session)}`);
 	}
 	return session;
 }
 
-function sessionOf(tags: readonly string[]): string | undefined {
+function sessionOf(tags: ReadonlyArray<string>): string | undefined {
 	const tag = tags.find((candidate) => candidate.startsWith(SESSION_TAG_PREFIX));
 	return tag?.slice(SESSION_TAG_PREFIX.length);
 }
@@ -98,11 +97,13 @@ function sessionOf(tags: readonly string[]): string | undefined {
  */
 function resumeAfter(view: ConversationView): ConversationWindow {
 	const newest = view.entries.at(-1)?.id ?? view.before;
-	return newest === undefined ? {} : { from: (newest + 1) as EntryId };
+	return newest === undefined ? {} : { from: decodeEntryId(newest + 1) };
 }
 
 function send(socket: WebSocket, message: PiServerMessage): boolean {
-	if (socket.readyState !== OPEN) return false;
+	if (socket.readyState !== OPEN) {
+		return false;
+	}
 	try {
 		socket.send(JSON.stringify(message));
 		return true;
@@ -139,7 +140,7 @@ const closeWatchScope = Effect.fnUntraced(function* (scope: Scope.Closeable) {
 export class PiSessionSockets {
 	readonly #harness: PiHarness;
 	readonly #registry: RegistryReader;
-	readonly #getWebSockets: (tag?: string) => WebSocket[];
+	readonly #getWebSockets: (tag?: string) => Array<WebSocket>;
 	readonly #watchScopes = new Map<WebSocket, Scope.Closeable>();
 	#closed = false;
 
@@ -147,7 +148,7 @@ export class PiSessionSockets {
 		harness: PiHarness,
 		/** The registry pi was opened with, for the tool list sent on connect. */
 		registry: RegistryReader,
-		getWebSockets: (tag?: string) => WebSocket[],
+		getWebSockets: (tag?: string) => Array<WebSocket>,
 	) {
 		this.#harness = harness;
 		this.#registry = registry;
@@ -172,7 +173,9 @@ export class PiSessionSockets {
 	reattach(): Promise<void> {
 		return Effect.runPromise(
 			Effect.gen({ self: this }, function* () {
-				if (this.#getWebSockets().length === 0) return;
+				if (this.#getWebSockets().length === 0) {
+					return;
+				}
 				// Look up the sockets by each session's tag.
 				const sessions = yield* callPi(() => this.#harness.sessions.list());
 				for (const { id } of sessions) {
@@ -218,7 +221,9 @@ export class PiSessionSockets {
 		window: ConversationWindow = {},
 	): Effect.Effect<void> {
 		return Effect.gen({ self: this }, function* () {
-			if (this.#closed || socket.readyState !== OPEN) return;
+			if (this.#closed || socket.readyState !== OPEN) {
+				return;
+			}
 			const scope = Scope.makeUnsafe();
 			const abort = new AbortController();
 			const previous = this.#watchScopes.get(socket);
@@ -232,8 +237,12 @@ export class PiSessionSockets {
 			);
 
 			yield* Effect.gen({ self: this }, function* () {
-				if (previous) yield* closeWatchScope(previous);
-				if (!ownsWatch()) return;
+				if (previous) {
+					yield* closeWatchScope(previous);
+				}
+				if (!ownsWatch()) {
+					return;
+				}
 				const watch = yield* Effect.acquireRelease(
 					Effect.tryPromise({
 						try: () =>
@@ -245,14 +254,18 @@ export class PiSessionSockets {
 					(watch) => Effect.promise(() => watch.stop()),
 				).pipe(Scope.provide(scope));
 				// A late acquisition is released by its already closed scope.
-				if (!ownsWatch()) return;
+				if (!ownsWatch()) {
+					return;
+				}
 				let last = watch.value;
 				if (!send(socket, { type: "view", session, view: last })) {
 					yield* report("failed");
 					return yield* this.#disconnectWatch(socket, scope);
 				}
 				watch.start(async (call) => {
-					if (call.kind !== "value" || !ownsWatch()) return;
+					if (call.kind !== "value" || !ownsWatch()) {
+						return;
+					}
 					if (!send(socket, { type: "ops", session, ops: call.ops })) {
 						return Effect.runPromise(this.#disconnectWatch(socket, scope));
 					}
@@ -266,7 +279,9 @@ export class PiSessionSockets {
 			}).pipe(
 				Effect.catchCause(() =>
 					Effect.gen({ self: this }, function* () {
-						if (!ownsWatch()) return;
+						if (!ownsWatch()) {
+							return;
+						}
 						yield* report("failed");
 						yield* this.#disconnectWatch(socket, scope);
 					}),
@@ -288,9 +303,15 @@ export class PiSessionSockets {
 		last: ConversationView,
 	): Effect.Effect<void> {
 		return Effect.suspend(() => {
-			if (end.kind === "stopped" || end.kind === "aborted") return Effect.void;
-			if (this.#watchScopes.get(socket) !== scope) return Effect.void;
-			if (socket.readyState !== OPEN) return this.#unwatch(socket);
+			if (end.kind === "stopped" || end.kind === "aborted") {
+				return Effect.void;
+			}
+			if (this.#watchScopes.get(socket) !== scope) {
+				return Effect.void;
+			}
+			if (socket.readyState !== OPEN) {
+				return this.#unwatch(socket);
+			}
 			return this.#watchOrClose(
 				socket,
 				session,
@@ -302,7 +323,9 @@ export class PiSessionSockets {
 
 	#disconnectWatch(socket: WebSocket, scope: Scope.Closeable): Effect.Effect<void> {
 		return Effect.suspend(() => {
-			if (this.#watchScopes.get(socket) !== scope) return Effect.void;
+			if (this.#watchScopes.get(socket) !== scope) {
+				return Effect.void;
+			}
 			// A missing delta breaks the sequence, so let the client reconnect from its own cursor.
 			return Effect.try(() => socket.close(1011, "Lost the session's watch")).pipe(
 				Effect.ignore,
@@ -314,7 +337,9 @@ export class PiSessionSockets {
 	#unwatch(socket: WebSocket, expected?: Scope.Closeable): Effect.Effect<void> {
 		return Effect.suspend(() => {
 			const scope = this.#watchScopes.get(socket);
-			if (!scope || (expected !== undefined && scope !== expected)) return Effect.void;
+			if (!scope || (expected !== undefined && scope !== expected)) {
+				return Effect.void;
+			}
 			this.#watchScopes.delete(socket);
 			return closeWatchScope(scope);
 		});
@@ -322,7 +347,9 @@ export class PiSessionSockets {
 
 	#onMessage(connection: Connection, raw: WebSocketMessage): Effect.Effect<void> {
 		return Effect.gen({ self: this }, function* () {
-			if (typeof raw !== "string") return;
+			if (typeof raw !== "string") {
+				return;
+			}
 			const parsed = parseFrame(raw);
 			if (Result.isFailure(parsed)) {
 				send(connection, { type: "error", message: "Malformed JSON" });
@@ -334,7 +361,7 @@ export class PiSessionSockets {
 				const id = Result.isSuccess(request) ? request.success.id : undefined;
 				send(connection, {
 					type: "error",
-					...(id === undefined ? {} : { id }),
+					...(id !== undefined && { id }),
 					message: "Invalid session message",
 				});
 				return;
@@ -346,7 +373,7 @@ export class PiSessionSockets {
 				const error = result.failure;
 				send(connection, {
 					type: "error",
-					...(message.id === undefined ? {} : { id: message.id }),
+					...(message.id !== undefined && { id: message.id }),
 					message: error instanceof Error ? error.message : String(error),
 				});
 			} else if (message.id !== undefined) {
@@ -369,8 +396,8 @@ export class PiSessionSockets {
 				case "submit":
 					return yield* callPi(() =>
 						handle.submit(message.input, {
-							...(message.whenBusy ? { whenBusy: message.whenBusy } : {}),
-							...(message.operationId ? { operationId: message.operationId } : {}),
+							...(message.whenBusy && { whenBusy: message.whenBusy }),
+							...(message.operationId && { operationId: message.operationId }),
 						}),
 					);
 				case "abort":
