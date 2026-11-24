@@ -90,6 +90,17 @@ export function createObservedToolBindings(bindings: () => ReadonlyArray<Workspa
 	};
 }
 
+export function workspaceToolset(workspace: Workspace) {
+	const tools = createPiTools({ workspace, root, exec: { backends: {} } });
+	return {
+		declarations: tools.tools,
+		bindings: forPiTools(tools)().map<WorkspaceToolBinding>((binding) => ({
+			...binding,
+			replay: replaySafeTools.has(binding.name) ? "safe" : "unsafe",
+		})),
+	};
+}
+
 export function createTrajanWorkspace(storage: DurableObjectStorage, loader: Env["LOADER"]) {
 	const git = createGitModule({ allowNetwork: true });
 	let bindings: ReadonlyArray<WorkspaceToolBinding> = [];
@@ -112,15 +123,12 @@ export function createTrajanWorkspace(storage: DurableObjectStorage, loader: Env
 		],
 	});
 
-	const tools = createPiTools({ workspace, root, exec: { backends: {} } });
-	bindings = forPiTools(tools)().map((binding) => ({
-		...binding,
-		replay: replaySafeTools.has(binding.name) ? "safe" : "unsafe",
-	}));
+	const tools = workspaceToolset(workspace);
+	bindings = tools.bindings;
 	const instructions = [
 		"Import workspace tools as named exports from codemode:tools. Each tool takes one object and returns { text, isError, details }. Check isError before using its result.",
 		"Prefer these tools for ordinary file operations so chat can show their progress.",
-		...tools.tools.map(
+		...tools.declarations.map(
 			({ name, description, parameters }) =>
 				`${name}: ${description}\nArguments: ${JSON.stringify(parameters)}`,
 		),

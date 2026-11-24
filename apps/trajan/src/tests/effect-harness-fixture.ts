@@ -12,7 +12,7 @@ import { Effect, Layer, Predicate, Schema, Stream } from "effect";
 import { RECENT_TOOL_CALLS, clearToolState } from "../effect-harness/tool-activity";
 import { EffectHarnessObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
-import { createObservedToolBindings, createTrajanWorkspace } from "../workspace";
+import { createObservedToolBindings, createTrajanWorkspace, workspaceToolset } from "../workspace";
 import type { WorkspaceToolBinding } from "../workspace";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
@@ -23,12 +23,12 @@ type PausePoint =
 	| "during-reply"
 	| "after-commit"
 	| "during-replay-read"
-	| "during-replay-append";
+	| "during-replay-edit";
 const workspaceFile = "/workspace/turn.txt";
 const replayPrompt = "Replay two reads.";
 const replayCall = "exec-replay";
-const appendReplayPrompt = "Recover an interrupted append.";
-const appendReplayCall = "exec-replay-append";
+const editReplayPrompt = "Recover an interrupted edit.";
+const editReplayCall = "exec-replay-edit";
 export function appendExecInput(text: string) {
 	return {
 		code: `
@@ -57,7 +57,7 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 	readonly #computer = createTrajanWorkspace(this.ctx.storage, this.env.LOADER);
 	readonly #effectTools = effectWorkspaceTools(this.#computer, this.ctx.storage);
 	#replayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
-	#appendReplayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
+	#editReplayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
 	protected override readonly toolCatalog = [this.#effectTools.declaration];
 
 	#createReplayTools(access: "read" | "read-write", bindings: ReadonlyArray<WorkspaceToolBinding>) {
@@ -108,44 +108,40 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		);
 	}
 
-	#createAppendReplayTools() {
-		return this.#createReplayTools("read-write", [
-			{
-				name: "append_once",
-				replay: "unsafe",
-				call: async (_input, { signal }) => {
-					const previous = await this.#readWorkspaceText();
-					await this.#computer.workspace.fs.mkdir("/workspace", { recursive: true });
-					await this.#computer.workspace.fs.writeFile(workspaceFile, `${previous}once`);
-					await this.#pauseAt("during-replay-append", signal);
-					return { text: "Appended", isError: false };
-				},
-			},
-			{
-				name: "read_after_append",
-				readOnly: true,
-				replay: "safe",
-				call: async (_input, { signal }) => {
-					let text = await this.#readWorkspaceText();
-					while (text === "") {
-						signal.throwIfAborted();
-						await new Promise((resolve) => {
-							setTimeout(resolve, 10);
-						});
-						text = await this.#readWorkspaceText();
-					}
-					return { text, isError: false };
-				},
-			},
-		]);
+	#createEditReplayTools() {
+		const { bindings } = workspaceToolset(this.#computer.workspace);
+		return this.#createReplayTools(
+			"read-write",
+			bindings
+				.filter(({ name }) => name === "edit" || name === "read" || name === "write")
+				.map((binding) => ({
+					...binding,
+					call: async (input, context) => {
+						if (binding.name === "read") {
+							// Let the edit land before the reads fill the recent activity list.
+							while ((await this.#readWorkspaceText()) === "seed") {
+								context.signal.throwIfAborted();
+								await new Promise((resolve) => {
+									setTimeout(resolve, 10);
+								});
+							}
+						}
+						const result = await binding.call(input, context);
+						if (binding.name === "edit" && !result.isError) {
+							await this.#pauseAt("during-replay-edit", context.signal);
+						}
+						return result;
+					},
+				})),
+		);
 	}
 
 	#toolsFor(callId: string) {
 		switch (callId) {
 			case replayCall:
 				return (this.#replayTools ??= this.#createReadReplayTools());
-			case appendReplayCall:
-				return (this.#appendReplayTools ??= this.#createAppendReplayTools());
+			case editReplayCall:
+				return (this.#editReplayTools ??= this.#createEditReplayTools());
 			default:
 				return this.#effectTools;
 		}
@@ -206,20 +202,24 @@ export default async function () {
 				},
 			};
 		}
-		if (last?.role === "user" && last.text === appendReplayPrompt) {
+		if (last?.role === "user" && last.text === editReplayPrompt) {
 			return {
 				role: "tool-call",
-				id: appendReplayCall,
+				id: editReplayCall,
 				name: "exec",
 				input: {
-					code: `import { append_once, read_after_append } from "codemode:tools";
+					code: `import { edit, read, write } from "codemode:tools";
 export default async function () {
-  const pending = append_once({});
-  // Move the still-running append out of the recent activity list.
-  for (let i = 0; i < ${RECENT_TOOL_CALLS}; i++) await read_after_append({});
-  const append = await pending;
-  const read = await read_after_append({});
-  return { append: append.isError ? append.details?.code : "completed", text: read.text };
+  const path = ${JSON.stringify(workspaceFile)};
+  const seed = await write({ path, content: "seed" });
+  if (seed.isError) throw new Error(seed.text);
+  const pending = edit({ path, edits: [{ oldText: "seed", newText: "seed!" }] });
+  // Move the still-running edit out of the recent activity list.
+  for (let i = 0; i < ${RECENT_TOOL_CALLS}; i++) await read({ path });
+  const changed = await pending;
+  const result = await read({ path });
+  if (result.isError) throw new Error(result.text);
+  return { edit: changed.isError ? changed.details?.code : "completed", text: result.text };
 }`,
 				},
 			};
@@ -321,7 +321,7 @@ export default async function () {
 			}
 			const { result } = last;
 			const verb =
-				last.callId === appendReplayCall
+				last.callId === editReplayCall
 					? "Recovered"
 					: user?.text === replayPrompt
 						? "Read"

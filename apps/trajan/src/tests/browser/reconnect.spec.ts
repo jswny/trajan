@@ -149,27 +149,27 @@ test("shows live tool progress and the final answer after replaying a read-only 
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Succeeded/]);
 });
 
-test("replay shows the interrupted append and finishes without repeating the write", async ({
+test("replay shows the interrupted stock edit and finishes without editing the file again", async ({
 	page,
 }) => {
 	const composer = await openChat(page);
-	expect((await page.request.post(`${control}/pause-replay-append`)).status()).toBe(204);
-	await composer.fill("Recover an interrupted append.");
+	expect((await page.request.post(`${control}/pause-replay-edit`)).status()).toBe(204);
+	await composer.fill("Recover an interrupted edit.");
 	await composer.press("Enter");
 	const calls = page.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
 	await expect(calls).toHaveText(
-		Array.from({ length: RECENT_TOOL_CALLS }, () => /read_after_append.*Succeeded/),
+		Array.from({ length: RECENT_TOOL_CALLS }, () => /read.*Succeeded/),
 	);
 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
 	const transcript = page.getByRole("main");
 	await expect(
-		transcript.getByText(/Recovered .*"append":"interrupted".*"text":"once"/),
+		transcript.getByText(/Recovered .*"edit":"interrupted".*"text":"seed!"/),
 	).toHaveCount(1);
 	await transcript.getByText("Done", { exact: true }).click();
-	await expect(calls.filter({ hasText: /append_once.*Interrupted/ })).toBeVisible();
-	await expect(calls.last()).toHaveText(/read_after_append.*Succeeded/);
+	await expect(calls.filter({ hasText: /edit.*Interrupted/ })).toBeVisible();
+	await expect(calls.last()).toHaveText(/read.*Succeeded/);
 });
 
 test("stops the active reply and continues a follow-up submitted from another tab", async ({

@@ -376,16 +376,16 @@ test("stopping a turn cancels its active Computer execution", async () => {
 	).toEqual([]);
 });
 
-test("replay reports an unsafe append as interrupted and continues after its activity row is evicted", async () => {
+test("replay reports a stock edit as interrupted and continues after its activity row is evicted", async () => {
 	let stub = openFixture();
-	await stub.pause("during-replay-append");
+	await stub.pause("during-replay-edit");
 	const { runId } = await submit(stub, {
-		id: "append-replay",
-		prompt: "Recover an interrupted append.",
+		id: "edit-replay",
+		prompt: "Recover an interrupted edit.",
 	});
 	await expect
 		.poll(() => stub.state())
-		.toMatchObject({ pausedAt: "during-replay-append", text: "once" });
+		.toMatchObject({ pausedAt: "during-replay-edit", text: "seed!" });
 	const { instance } = await stub.state();
 	await expect
 		.poll(() =>
@@ -393,7 +393,7 @@ test("replay reports an unsafe append as interrupted and continues after its act
 		)
 		.toMatchObject(
 			Array.from({ length: RECENT_TOOL_CALLS }, () => ({
-				name: "read_after_append",
+				name: "read",
 				status: "completed",
 			})),
 		);
@@ -401,7 +401,7 @@ test("replay reports an unsafe append as interrupted and continues after its act
 		runInDurableObject(stub, (_, { storage }) =>
 			Array.from(storage.kv.list({ prefix: toolIntentPrefix(runId) })),
 		);
-	expect(await readIntents()).toHaveLength(1);
+	expect(await readIntents()).toHaveLength(2);
 
 	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
 	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
@@ -419,10 +419,10 @@ test("replay reports an unsafe append as interrupted and continues after its act
 						role: "tool",
 						result: {
 							status: "completed",
-							output: { append: "interrupted", text: "once" },
+							output: { edit: "interrupted", text: "seed!" },
 							activity: expect.arrayContaining([
-								expect.objectContaining({ name: "append_once", status: "interrupted" }),
-								expect.objectContaining({ name: "read_after_append", status: "completed" }),
+								expect.objectContaining({ name: "edit", status: "interrupted" }),
+								expect.objectContaining({ name: "read", status: "completed" }),
 							]),
 						},
 					},
@@ -430,7 +430,7 @@ test("replay reports an unsafe append as interrupted and continues after its act
 				],
 			},
 		});
-	expect((await stub.state()).text).toBe("once");
+	expect((await stub.state()).text).toBe("seed!");
 	expect(await readIntents()).toEqual([]);
 });
 
