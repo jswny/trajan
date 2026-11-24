@@ -8,7 +8,7 @@ import type {
 	EntryQuery,
 	TranscriptView,
 } from "@earendil-works/pi-durable";
-import { Data, Deferred, Effect, Option } from "effect";
+import { Cause, Data, Deferred, Effect, Option, Predicate } from "effect";
 import { decodeEntriesPage, isConversationView } from "./protocol";
 import type { PiClientMessage, PiEntriesPage, PiServerMessage } from "./protocol";
 import { EMPTY_VIEW, projectView } from "./view";
@@ -20,7 +20,18 @@ const PAGE_TIMEOUT = "15 seconds";
 const HISTORY_REQUEST_PREFIX = "entries:";
 
 export class HistoryDisconnected extends Data.TaggedError("HistoryDisconnected") {}
+class HistoryPageError extends Data.TaggedError("HistoryPageError")<{
+	readonly message: string;
+	readonly cause?: unknown;
+}> {}
 class InvalidTranscriptUpdate extends Data.TaggedError("InvalidTranscriptUpdate") {}
+
+function historyPageError(cause: unknown): HistoryPageError {
+	return new HistoryPageError({
+		cause,
+		message: cause instanceof Error ? cause.message : "Could not load messages.",
+	});
+}
 
 export function isHistoryRequest(id: string | undefined): boolean {
 	return id?.startsWith(HISTORY_REQUEST_PREFIX) ?? false;
@@ -42,7 +53,10 @@ export class PiSessionMirror {
 	/** The open socket's send, between `open()` and `close()`. */
 	#send: PiSend | undefined;
 	readonly #transcript: ConversationTranscript;
-	readonly #pages = new Map<string, Deferred.Deferred<PiEntriesPage, Error>>();
+	readonly #pages = new Map<
+		string,
+		Deferred.Deferred<PiEntriesPage, HistoryDisconnected | HistoryPageError>
+	>();
 	readonly #runPage: typeof Effect.runPromise;
 	/** pi's view as the server last sent it; the operations apply to it. */
 	#view: ConversationView | null = null;
@@ -118,7 +132,7 @@ export class PiSessionMirror {
 		return Effect.suspend(() =>
 			this.#projected.earlier
 				? this.#load((context) => this.#transcript.loadEarlier(context))
-				: Effect.succeed(undefined),
+				: Effect.undefined,
 		);
 	}
 
@@ -130,10 +144,18 @@ export class PiSessionMirror {
 	#load(request: (context: Context) => Promise<TranscriptView>) {
 		return Effect.tryPromise({
 			try: (signal) => request(withAbortSignal(signal, BACKGROUND_CONTEXT)),
-			catch: (error) => error,
+			catch: (cause) => {
+				if (Cause.isTimeoutError(cause) || Predicate.isTagged(cause, "HistoryDisconnected")) {
+					return cause;
+				}
+				return historyPageError(cause);
+			},
 		}).pipe(
 			Effect.flatMap((view) =>
-				Effect.try({ try: () => this.#show(view), catch: (error) => error }),
+				Effect.try({
+					try: () => this.#show(view),
+					catch: historyPageError,
+				}),
 			),
 		);
 	}
@@ -160,10 +182,10 @@ export class PiSessionMirror {
 			if (send === undefined) {
 				return yield* new HistoryDisconnected();
 			}
-			const page = yield* Deferred.make<PiEntriesPage, Error>();
+			const page = yield* Deferred.make<PiEntriesPage, HistoryDisconnected | HistoryPageError>();
 			this.#pages.set(id, page);
 			if (!send({ type: "entries", id, query, limit })) {
-				return yield* Effect.fail(new Error("Could not request messages. Try again."));
+				return yield* new HistoryPageError({ message: "Could not request messages. Try again." });
 			}
 			return yield* Deferred.await(page);
 		}).pipe(
@@ -185,14 +207,14 @@ export class PiSessionMirror {
 				return;
 			}
 			if (message.type === "error") {
-				yield* Deferred.fail(page, new Error(message.message));
+				yield* Deferred.fail(page, new HistoryPageError({ message: message.message }));
 				return;
 			}
 			const decoded = decodeEntriesPage(message.result);
 			if (Option.isSome(decoded)) {
 				yield* Deferred.succeed(page, decoded.value);
 			} else {
-				yield* Deferred.fail(page, new Error("Invalid history page"));
+				yield* Deferred.fail(page, new HistoryPageError({ message: "Invalid history page" }));
 			}
 		});
 	}

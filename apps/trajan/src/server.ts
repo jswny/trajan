@@ -10,7 +10,7 @@ import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
-import { Effect } from "effect";
+import { Data, Effect } from "effect";
 import { workspaceCodemode } from "./codemode";
 import { isMainChatUrl } from "./main-chat";
 import { MODEL_ID } from "./model-id";
@@ -19,6 +19,11 @@ import { createWorkspaceTools } from "./workspace";
 
 const PREAMBLE =
 	"You are Trajan, a concise and capable assistant. You have a durable workspace at /workspace. Use the direct file tools for simple file operations. Use codemode to compose tools, and call tools.exec from a codemode script to run JavaScript modules against the workspace or use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
+
+class AgentRouteError extends Data.TaggedError("AgentRouteError")<{
+	readonly cause: unknown;
+	readonly message: string;
+}> {}
 
 /** Playable pi session backed by one Durable Object. */
 export class Trajan extends DurableObject<Env> {
@@ -101,12 +106,15 @@ export default {
 		return Effect.runPromise(
 			Effect.tryPromise({
 				try: () => routeAgentRequest(request, env),
-				catch: (error) => error,
+				catch: (cause) =>
+					new AgentRouteError({
+						cause,
+						message: cause instanceof Error ? cause.message : String(cause),
+					}),
 			}).pipe(
 				Effect.map((response) => response ?? new Response("Not found", { status: 404 })),
-				Effect.catch((error) =>
+				Effect.catchTag("AgentRouteError", ({ message }) =>
 					Effect.gen(function* () {
-						const message = error instanceof Error ? error.message : String(error);
 						yield* Effect.logError({ event: "request_failed", error: message });
 						return Response.json({ error: message }, { status: 500 });
 					}),

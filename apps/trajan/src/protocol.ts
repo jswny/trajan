@@ -62,7 +62,7 @@ const clientMessage = Schema.Union([
 const toolInfo = Schema.Struct({ name: Schema.String, description: Schema.String });
 const assistantMessage = Schema.Struct({
 	role: Schema.Literal("assistant"),
-	timestamp: Schema.Number,
+	timestamp: Schema.Finite,
 	stopReason: Schema.String,
 	errorMessage: Schema.optionalKey(Schema.String),
 	content: Schema.Array(
@@ -79,16 +79,16 @@ const assistantMessage = Schema.Struct({
 	),
 });
 const transcriptMessage = Schema.Union([
-	Schema.Struct({ role: Schema.Literal("system"), timestamp: Schema.Number }),
+	Schema.Struct({ role: Schema.Literal("system"), timestamp: Schema.Finite }),
 	Schema.Struct({
 		role: Schema.Literal("user"),
-		timestamp: Schema.Number,
+		timestamp: Schema.Finite,
 		content: userInput,
 	}),
 	assistantMessage,
 	Schema.Struct({
 		role: Schema.Literal("toolResult"),
-		timestamp: Schema.Number,
+		timestamp: Schema.Finite,
 		toolCallId: Schema.String,
 		toolName: Schema.String,
 		content: textOrImageContent,
@@ -116,7 +116,7 @@ const transcriptDocs = Schema.Struct({
 			generation: Schema.optionalKey(
 				Schema.Struct({
 					message: Schema.optionalKey(assistantMessage),
-					retry: Schema.optionalKey(Schema.Struct({ at: Schema.Number, error: Schema.String })),
+					retry: Schema.optionalKey(Schema.Struct({ at: Schema.Finite, error: Schema.String })),
 				}),
 			),
 			tools: Schema.optionalKey(

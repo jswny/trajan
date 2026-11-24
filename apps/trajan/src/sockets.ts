@@ -9,7 +9,7 @@ import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 import { ROOT_SESSION } from "agents/harness/pi";
 import type { PiHarness, PiSessionId } from "agents/harness/pi";
-import { Effect, Exit, Logger, Result, Schema, Scope } from "effect";
+import { Data, Effect, Exit, Logger, Result, Schema, Scope } from "effect";
 import { decodeClientMessage, decodeEntryId, decodeRequestId } from "./protocol";
 import type { PiClientMessage, PiCommandResult, PiServerMessage } from "./protocol";
 
@@ -27,8 +27,20 @@ const decodePiSessionId = Schema.decodeUnknownResult(
 	),
 );
 
+class PiSessionError extends Data.TaggedError("PiSessionError")<{
+	readonly cause: unknown;
+	readonly message: string;
+}> {}
+
+function piSessionError(cause: unknown): PiSessionError {
+	return new PiSessionError({
+		cause,
+		message: cause instanceof Error ? cause.message : String(cause),
+	});
+}
+
 function callPi<A>(run: () => Promise<A>) {
-	return Effect.tryPromise({ try: run, catch: (error) => error });
+	return Effect.tryPromise({ try: run, catch: piSessionError });
 }
 
 type WatchTrigger =
@@ -225,16 +237,13 @@ export class PiSessionSockets {
 				return;
 			}
 			const scope = Scope.makeUnsafe();
-			const abort = new AbortController();
 			const previous = this.#watchScopes.get(socket);
 			const report = watchReporter(trigger, previous !== undefined);
 			// Publish ownership before awaiting cleanup or asking Pi to open the watch.
 			this.#watchScopes.set(socket, scope);
 			const ownsWatch = () => this.#watchScopes.get(socket) === scope;
-			yield* Scope.addFinalizer(
-				scope,
-				Effect.sync(() => abort.abort()).pipe(Effect.andThen(report("cancelled"))),
-			);
+			yield* Scope.addFinalizer(scope, report("cancelled"));
+			const signal = yield* Effect.abortSignal.pipe(Scope.provide(scope));
 
 			yield* Effect.gen({ self: this }, function* () {
 				if (previous) {
@@ -244,13 +253,11 @@ export class PiSessionSockets {
 					return;
 				}
 				const watch = yield* Effect.acquireRelease(
-					Effect.tryPromise({
-						try: () =>
-							this.#harness
-								.session(session)
-								.watch(window, withAbortSignal(abort.signal, BACKGROUND_CONTEXT)),
-						catch: (error) => error,
-					}),
+					callPi(() =>
+						this.#harness
+							.session(session)
+							.watch(window, withAbortSignal(signal, BACKGROUND_CONTEXT)),
+					),
 					(watch) => Effect.promise(() => watch.stop()),
 				).pipe(Scope.provide(scope));
 				// A late acquisition is released by its already closed scope.
@@ -262,18 +269,19 @@ export class PiSessionSockets {
 					yield* report("failed");
 					return yield* this.#disconnectWatch(socket, scope);
 				}
+				const runCallback = Effect.runPromiseWith(yield* Effect.context<never>());
 				watch.start(async (call) => {
 					if (call.kind !== "value" || !ownsWatch()) {
 						return;
 					}
 					if (!send(socket, { type: "ops", session, ops: call.ops })) {
-						return Effect.runPromise(this.#disconnectWatch(socket, scope));
+						return runCallback(this.#disconnectWatch(socket, scope));
 					}
 					last = call.value;
 				});
 				// Pi settles this promise when the watch ends, including on scope cleanup.
 				void watch.closed.then((end) =>
-					Effect.runPromise(this.#ended(socket, session, scope, end, last)),
+					runCallback(this.#ended(socket, session, scope, end, last)),
 				);
 				yield* report("started");
 			}).pipe(
@@ -370,11 +378,10 @@ export class PiSessionSockets {
 			const session = sessionOf(connection.tags) ?? ROOT_SESSION;
 			const result = yield* Effect.result(this.#dispatch(connection, session, message));
 			if (Result.isFailure(result)) {
-				const error = result.failure;
 				send(connection, {
 					type: "error",
 					...(message.id !== undefined && { id: message.id }),
-					message: error instanceof Error ? error.message : String(error),
+					message: result.failure.message,
 				});
 			} else if (message.id !== undefined) {
 				send(connection, { type: "result", id: message.id, result: result.success });
@@ -386,11 +393,11 @@ export class PiSessionSockets {
 		connection: Connection,
 		session: PiSessionId,
 		message: PiClientMessage,
-	): Effect.Effect<PiCommandResult, unknown> {
+	): Effect.Effect<PiCommandResult, PiSessionError> {
 		return Effect.gen({ self: this }, function* () {
 			const handle = yield* Effect.try({
 				try: () => this.#harness.session(session),
-				catch: (error) => error,
+				catch: piSessionError,
 			});
 			switch (message.type) {
 				case "submit":

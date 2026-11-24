@@ -14,7 +14,10 @@ const turnDefinition = "turn@v3";
 const inboxJob = "effect-harness-inbox";
 const TurnTaskInput = Schema.Struct({ runId: Schema.NonEmptyString });
 
-class TurnTaskInputError extends Schema.TaggedError<TurnTaskInputError>()("TurnTaskInputError", {
+class TurnTaskInputError extends Schema.TaggedError<
+	TurnTaskInputError,
+	{ readonly brand: unique symbol }
+>()("TurnTaskInputError", {
 	message: Schema.String,
 }) {}
 
@@ -41,26 +44,24 @@ function taskJournal(runId: string, step: TaskStep): TurnJournal {
 			const checkpointJson = Schema.fromJsonString(result);
 			return Effect.gen(function* () {
 				const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
-				return yield* Effect.tryPromise({
-					try: () =>
-						step.do(name, { retries: { limit: 1 } }, ({ attempt, idempotencyKey, signal }) =>
-							runPromise(
-								run({
-									idempotencyKey,
-									recovering: step.interrupted?.name === name || attempt > 1,
-								}).pipe(
-									Effect.flatMap(Schema.decodeUnknownEffect(result)),
-									Effect.flatMap(Schema.encodeEffect(checkpointJson)),
-									Effect.withSpan("effect-harness.step.attempt", {
-										attributes: { runId, name, attempt },
-									}),
-								),
-								{ signal },
+				return yield* Effect.promise(() =>
+					step.do(name, { retries: { limit: 1 } }, ({ attempt, idempotencyKey, signal }) =>
+						runPromise(
+							run({
+								idempotencyKey,
+								recovering: step.interrupted?.name === name || attempt > 1,
+							}).pipe(
+								Effect.flatMap(Schema.decodeUnknownEffect(result)),
+								Effect.flatMap(Schema.encodeEffect(checkpointJson)),
+								Effect.withSpan("effect-harness.step.attempt", {
+									attributes: { runId, name, attempt },
+								}),
 							),
+							{ signal },
 						),
-					catch: (cause) => cause,
-				}).pipe(
-					Effect.catch((error) => {
+					),
+				).pipe(
+					Effect.catchDefect((error) => {
 						if (
 							error instanceof TurnModelError ||
 							error instanceof TurnIoError ||

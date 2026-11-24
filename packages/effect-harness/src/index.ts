@@ -54,13 +54,19 @@ export const TurnTranscript = Schema.Struct({
 	messages: Schema.Array(TurnMessage),
 });
 
-export class TurnIoError extends Schema.TaggedError<TurnIoError>()("TurnIoError", {
+export class TurnIoError extends Schema.TaggedError<
+	TurnIoError,
+	{ readonly brand: unique symbol }
+>()("TurnIoError", {
 	operation: Schema.String,
 	cause: Schema.Defect(),
 	message: Schema.optionalKey(Schema.String),
 }) {}
 
-export class TurnModelError extends Schema.TaggedError<TurnModelError>()("TurnModelError", {
+export class TurnModelError extends Schema.TaggedError<
+	TurnModelError,
+	{ readonly brand: unique symbol }
+>()("TurnModelError", {
 	message: Schema.String,
 	cause: Schema.optionalKey(Schema.Defect()),
 }) {}

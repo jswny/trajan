@@ -273,7 +273,7 @@ export async function serveEffectHarness(request: Request, env: Env) {
 		}
 		const before = url.searchParams.get("before");
 		const limit = url.searchParams.get("limit");
-		const query = Schema.decodeUnknownOption(HistoryQuery)({
+		const query = Schema.decodeOption(HistoryQuery)({
 			...(before !== null && { before: Number(before) }),
 			...(limit !== null && { limit: Number(limit) }),
 		});
