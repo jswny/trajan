@@ -19,7 +19,7 @@ export default {
 			return stub.fetch(request);
 		}
 		const action =
-			/^\/__browser-smoke\/effect-stream\/(pause|pause-replay|pause-replay-edit|release|crash|state)$/.exec(
+			/^\/__browser-smoke\/effect-stream\/(pause|pause-replay|pause-replay-edit|pause-replay-git|release|crash|state)$/.exec(
 				url.pathname,
 			)?.[1];
 		if (action && fixture && request.method === "POST") {
@@ -32,6 +32,9 @@ export default {
 					return new Response(null, { status: 204 });
 				case "pause-replay-edit":
 					await stub.pause("during-replay-edit");
+					return new Response(null, { status: 204 });
+				case "pause-replay-git":
+					await stub.pause("during-replay-git");
 					return new Response(null, { status: 204 });
 				case "release":
 					await stub.release();

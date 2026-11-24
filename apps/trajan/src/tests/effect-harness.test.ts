@@ -434,6 +434,49 @@ test("replay reports a stock edit as interrupted and continues after its activit
 	expect(await readIntents()).toEqual([]);
 });
 
+test("Git replay reports interrupted branch creation and continues with a status check", async () => {
+	let stub = openFixture();
+	await stub.pause("during-replay-git");
+	const { runId } = await submit(stub, {
+		id: "git-replay",
+		prompt: "Recover interrupted Git branch creation.",
+	});
+	await expect.poll(() => stub.state()).toMatchObject({ pausedAt: "during-replay-git" });
+	const { instance } = await stub.state();
+	const branchAttempts = () =>
+		runInDurableObject(stub, (_, { storage }) => storage.kv.get("git-branch-attempts"));
+	expect(await branchAttempts()).toBe(1);
+
+	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
+	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await runDurableObjectAlarm(stub);
+	expect((await stub.state()).instance).not.toBe(instance);
+	await expect
+		.poll(() => readTurn(stub, runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user" },
+					{ role: "tool-call", name: "exec" },
+					{
+						role: "tool",
+						result: {
+							status: "completed",
+							output: { interrupted: true, checkedStatus: true, branchExists: true },
+							activity: expect.arrayContaining([
+								expect.objectContaining({ name: "git.cli", status: "interrupted" }),
+								expect.objectContaining({ name: "git.status", status: "completed" }),
+							]),
+						},
+					},
+					{ role: "assistant", text: expect.stringMatching(/^Recovered /) },
+				],
+			},
+		});
+	expect(await branchAttempts()).toBe(1);
+});
+
 test("a restart between tool calls reuses the first result and still executes the second call", async () => {
 	const input = { id: "multi-tool", prompt: "Append hello, then world." };
 	let stub = openFixture();

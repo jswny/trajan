@@ -1,5 +1,8 @@
 import { Workspace } from "@cloudflare/computer";
+import type { WorkspaceModuleFactory } from "@cloudflare/computer";
 import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
+import { createGitClient } from "@cloudflare/computer/git";
+import { createGitModule } from "@cloudflare/computer/modules/git";
 import {
 	TurnIoError,
 	ToolResult,
@@ -12,7 +15,11 @@ import { Effect, Layer, Predicate, Schema, Stream } from "effect";
 import { RECENT_TOOL_CALLS, clearToolState } from "../effect-harness/tool-activity";
 import { EffectHarnessObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
-import { createObservedToolBindings, createTrajanWorkspace, workspaceToolset } from "../workspace";
+import {
+	createObservedWorkspaceTools,
+	createTrajanWorkspace,
+	workspaceToolset,
+} from "../workspace";
 import type { WorkspaceToolBinding } from "../workspace";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
@@ -23,12 +30,20 @@ type PausePoint =
 	| "during-reply"
 	| "after-commit"
 	| "during-replay-read"
-	| "during-replay-edit";
+	| "during-replay-edit"
+	| "during-replay-git";
 const workspaceFile = "/workspace/turn.txt";
 const replayPrompt = "Replay two reads.";
 const replayCall = "exec-replay";
 const editReplayPrompt = "Recover an interrupted edit.";
 const editReplayCall = "exec-replay-edit";
+const gitReplayPrompt = "Recover interrupted Git branch creation.";
+const gitReplayCall = "exec-replay-git";
+const branchArgs = Schema.Struct({
+	argv: Schema.Tuple([Schema.Literal("branch"), Schema.Literal("replay-proof")]),
+});
+const isBranchCreation = Schema.is(branchArgs);
+const succeeded = Schema.is(Schema.Struct({ exitCode: Schema.Literal(0) }));
 export function appendExecInput(text: string) {
 	return {
 		code: `
@@ -58,21 +73,28 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 	readonly #effectTools = effectWorkspaceTools(this.#computer, this.ctx.storage);
 	#replayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
 	#editReplayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
+	#gitReplayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
 	protected override readonly toolCatalog = [this.#effectTools.declaration];
 
-	#createReplayTools(access: "read" | "read-write", bindings: ReadonlyArray<WorkspaceToolBinding>) {
+	#createReplayTools(
+		access: "read" | "read-write",
+		bindings: ReadonlyArray<WorkspaceToolBinding>,
+		git?: WorkspaceModuleFactory,
+	) {
 		const storage = this.ctx.storage;
-		const tools = createObservedToolBindings(() => bindings);
+		const tools = createObservedWorkspaceTools(() => bindings);
+		const modules = { "codemode:tools": tools.tools };
 		const workspace = new Workspace({
 			storage,
+			git: git ? createGitClient() : undefined,
 			backends: [
 				new CodemodeBackend({
-					id: `fixture-replay-${access}`,
+					id: git ? "fixture-replay-git" : `fixture-replay-${access}`,
 					loader: this.env.LOADER,
 					root: "/workspace",
 					access,
 					onInterrupt: "replay",
-					modules: { "codemode:tools": tools.module },
+					modules: git ? { ...modules, "codemode:git": tools.git(git) } : modules,
 				}),
 			],
 		});
@@ -136,12 +158,43 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		);
 	}
 
+	#createGitReplayTools() {
+		const git = createGitModule({ allowNetwork: false });
+		return this.#createReplayTools("read-write", [], (host) => {
+			const functions = git(host);
+			const cli = functions.cli;
+			if (!cli) {
+				throw new Error("The Computer Git module did not export cli.");
+			}
+			return {
+				...functions,
+				cli: async (args, context) => {
+					const isBranch = isBranchCreation(args[0]);
+					if (isBranch) {
+						const storage = this.ctx.storage.kv;
+						storage.put(
+							"git-branch-attempts",
+							(storage.get<number>("git-branch-attempts") ?? 0) + 1,
+						);
+					}
+					const result = await cli(args, context);
+					if (isBranch && succeeded(result)) {
+						await this.#pauseAt("during-replay-git", context.signal);
+					}
+					return result;
+				},
+			};
+		});
+	}
+
 	#toolsFor(callId: string) {
 		switch (callId) {
 			case replayCall:
 				return (this.#replayTools ??= this.#createReadReplayTools());
 			case editReplayCall:
 				return (this.#editReplayTools ??= this.#createEditReplayTools());
+			case gitReplayCall:
+				return (this.#gitReplayTools ??= this.#createGitReplayTools());
 			default:
 				return this.#effectTools;
 		}
@@ -220,6 +273,42 @@ export default async function () {
   const result = await read({ path });
   if (result.isError) throw new Error(result.text);
   return { edit: changed.isError ? changed.details?.code : "completed", text: result.text };
+}`,
+				},
+			};
+		}
+		if (last?.role === "user" && last.text === gitReplayPrompt) {
+			return {
+				role: "tool-call",
+				id: gitReplayCall,
+				name: "exec",
+				input: {
+					code: `import { cli, status } from "codemode:git";
+import { mkdir, writeFile } from "node:fs/promises";
+const cwd = "/workspace";
+async function git(...argv) {
+  const result = await cli({ argv, cwd, env: {
+    GIT_AUTHOR_NAME: "Trajan fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid"
+  } });
+  if (result.exitCode !== 0) throw new Error(result.stderr);
+  return result.stdout;
+}
+export default async function () {
+  await mkdir(cwd, { recursive: true });
+  await writeFile(cwd + "/seed.txt", "seed");
+  await git("init");
+  await git("add", "seed.txt");
+  await git("commit", "-m", "Seed replay fixture");
+  let interrupted = false;
+  try {
+    await git("branch", "replay-proof");
+  } catch (error) {
+    if (!String(error).includes("This call was interrupted")) throw error;
+    interrupted = true;
+  }
+  const checkedStatus = Array.isArray(await status({ dir: cwd }));
+  const branchExists = (await git("branch")).includes("replay-proof");
+  return { interrupted, checkedStatus, branchExists };
 }`,
 				},
 			};
@@ -321,7 +410,7 @@ export default async function () {
 			}
 			const { result } = last;
 			const verb =
-				last.callId === editReplayCall
+				last.callId === editReplayCall || last.callId === gitReplayCall
 					? "Recovered"
 					: user?.text === replayPrompt
 						? "Read"
