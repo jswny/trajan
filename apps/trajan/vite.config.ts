@@ -43,7 +43,9 @@ async function fixtureWorker(mode: "browser-smoke" | "effect-harness-live"): Pro
 			worker: {
 				...worker,
 				assets: {
-					runWorkerFirst: live ? ["/__effect-harness/*"] : ["/agents/*", "/__browser-smoke/*"],
+					runWorkerFirst: live
+						? ["/__effect-harness/*"]
+						: ["/agents/*", "/__browser-smoke/*", "/__effect-harness/*"],
 				},
 			},
 		}),
@@ -73,6 +75,8 @@ async function cloudflareWorkers(command: string, mode: string): Promise<PluginC
 }
 
 export default defineConfig(async ({ command, mode }) => ({
+	// Intentional Worker crashes during recovery tests must not obscure other test pages.
+	server: mode === "browser-smoke" ? { hmr: { overlay: false } } : undefined,
 	plugins: [
 		agents(),
 		react(),

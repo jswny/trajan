@@ -1,6 +1,6 @@
 import { expect, it, vi } from "@effect/vitest";
-import { Effect, Layer, Result, Schema } from "effect";
-import { runTurn, TurnModel, TurnTools } from "./index";
+import { Effect, Layer, Result, Schema, Stream } from "effect";
+import { runTurn, TurnModel, TurnModelError, TurnTools } from "./index";
 import type { TurnJournal } from "./index";
 
 const submission = { id: "s1", prompt: "Say hello" };
@@ -12,12 +12,22 @@ const journal: TurnJournal = {
 		),
 };
 
-function turnLayer(
-	complete: TurnModel["Service"]["complete"],
-	execute: TurnTools["Service"]["execute"],
-) {
+type Complete = (
+	...args: Parameters<TurnModel["Service"]["stream"]>
+) => Effect.Effect<unknown, TurnModelError>;
+
+function turnLayer(complete: Complete, execute: TurnTools["Service"]["execute"]) {
 	return Layer.merge(
-		Layer.succeed(TurnModel, TurnModel.of({ complete })),
+		Layer.succeed(
+			TurnModel,
+			TurnModel.of({
+				stream: (...args) =>
+					complete(...args).pipe(
+						Effect.map((response) => ({ type: "response" as const, response })),
+						Stream.fromEffect,
+					),
+			}),
+		),
 		Layer.succeed(TurnTools, TurnTools.of({ execute })),
 	);
 }
@@ -39,6 +49,27 @@ it.effect("stores a direct reply without calling a tool", () =>
 			],
 		});
 		expect(execute).not.toHaveBeenCalled();
+	}),
+);
+
+it.effect("publishes draft text but fails when the stream has no terminal response", () =>
+	Effect.gen(function* () {
+		const publish = vi.fn(() => Effect.void);
+		const result = yield* runTurn(submission, journal, [], publish).pipe(
+			Effect.provideService(TurnModel, {
+				stream: () => Stream.succeed({ type: "text-delta", text: "Partial" }),
+			}),
+			Effect.provideService(TurnTools, {
+				execute: () => Effect.succeed({ status: "completed", output: null }),
+			}),
+			Effect.result,
+		);
+
+		expect(publish.mock.calls).toEqual([
+			[{ type: "reset" }],
+			[{ type: "text-delta", text: "Partial" }],
+		]);
+		expect(Result.isFailure(result) && result.failure).toBeInstanceOf(TurnModelError);
 	}),
 );
 
@@ -66,7 +97,7 @@ it.effect("passes each continuation back to the model and omits it from the tran
 		const firstContinuation = { opaque: "first context" };
 		const secondContinuation = { opaque: "second context" };
 		const complete = vi
-			.fn<TurnModel["Service"]["complete"]>()
+			.fn<Complete>()
 			.mockReturnValueOnce(Effect.succeed({ ...first, continuation: firstContinuation }))
 			.mockReturnValueOnce(Effect.succeed({ ...second, continuation: secondContinuation }))
 			.mockReturnValueOnce(Effect.succeed({ role: "assistant", text: "Finished" }));
@@ -87,7 +118,7 @@ it.effect("passes each continuation back to the model and omits it from the tran
 
 it.effect("bounds tool calls and gives the model a final reply opportunity", () =>
 	Effect.gen(function* () {
-		const complete = vi.fn<TurnModel["Service"]["complete"]>((messages, { allowTools }) =>
+		const complete = vi.fn<Complete>((messages, { allowTools }) =>
 			allowTools
 				? Effect.succeed({
 						role: "tool-call",

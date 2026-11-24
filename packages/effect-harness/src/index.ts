@@ -1,4 +1,4 @@
-import { Context, Effect, Schema } from "effect";
+import { Context, Effect, Option, Schema, Stream } from "effect";
 
 export const TurnSubmission = Schema.Struct({
 	id: Schema.NonEmptyString,
@@ -91,12 +91,18 @@ export interface TurnJournal {
 export class TurnModel extends Context.Service<
 	TurnModel,
 	{
-		readonly complete: (
+		readonly stream: (
 			messages: ReadonlyArray<ModelHistoryEntry>,
 			options: { readonly allowTools: boolean },
-		) => Effect.Effect<unknown, TurnModelError>;
+		) => Stream.Stream<TurnModelEvent, TurnModelError>;
 	}
 >()("@trajan/effect-harness/TurnModel") {}
+
+export type TurnModelEvent =
+	| { readonly type: "text-delta"; readonly text: string }
+	| { readonly type: "response"; readonly response: unknown };
+
+export type TurnProgress = Extract<TurnModelEvent, { type: "text-delta" }> | { type: "reset" };
 
 export class TurnTools extends Context.Service<
 	TurnTools,
@@ -113,6 +119,7 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 	submission: typeof TurnSubmission.Type,
 	journal: TurnJournal,
 	context: ReadonlyArray<typeof ConversationMessage.Type> = [],
+	publish: (event: TurnProgress) => Effect.Effect<void> = () => Effect.void,
 ) {
 	const model = yield* TurnModel;
 	const tools = yield* TurnTools;
@@ -123,7 +130,20 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 		const decision = yield* journal.checkpoint(
 			`model:${index}`,
 			allowTools ? ModelResponse : Reply,
-			() => model.complete([...history], { allowTools }),
+			() =>
+				Effect.gen(function* () {
+					yield* publish({ type: "reset" });
+					const last = yield* model.stream([...history], { allowTools }).pipe(
+						Stream.tap((event) => (event.type === "text-delta" ? publish(event) : Effect.void)),
+						Stream.runLast,
+					);
+					if (Option.isNone(last) || last.value.type !== "response") {
+						return yield* new TurnModelError({
+							message: "The model stream ended without a response.",
+						});
+					}
+					return last.value.response;
+				}),
 		);
 
 		if (decision.role === "assistant") {
@@ -134,6 +154,7 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 			});
 		}
 
+		yield* publish({ type: "reset" });
 		const { continuation: _continuation, ...call } = decision;
 		const result = yield* journal.checkpoint(`tool:${index}`, ToolResult, (attempt) =>
 			tools.execute(call, attempt),

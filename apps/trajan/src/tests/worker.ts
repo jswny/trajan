@@ -399,6 +399,27 @@ export default {
 		const fixture = /(?:^|;\s*)trajan-fixture=([a-f0-9-]+)(?:;|$)/.exec(
 			request.headers.get("Cookie") ?? "",
 		)?.[1];
+		if (fixture && pathname.startsWith("/__effect-harness/")) {
+			return serveEffectHarness(request, env, fixture);
+		}
+		const streamControl = /^\/__browser-smoke\/effect-stream\/(pause|release|crash)$/.exec(
+			pathname,
+		)?.[1];
+		if (streamControl && fixture && request.method === "POST") {
+			const stub = env.EFFECT_HARNESS_TEST.getByName(fixture);
+			switch (streamControl) {
+				case "pause":
+					await stub.pause("during-reply");
+					break;
+				case "release":
+					await stub.release();
+					break;
+				case "crash":
+					await stub.crash();
+					break;
+			}
+			return new Response(null, { status: 204 });
+		}
 		if (pathname.startsWith("/agents/trajan/")) {
 			if (!isMainChatUrl(url)) {
 				return new Response("Not found", { status: 404 });

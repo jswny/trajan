@@ -1,18 +1,22 @@
 import { DurableObject } from "cloudflare:workers";
 import { runTurn, TurnIoError, TurnModelError, TurnSubmission } from "@trajan/effect-harness";
-import type { TurnJournal, TurnModel, TurnTools } from "@trajan/effect-harness";
+import type { TurnJournal, TurnModel, TurnProgress, TurnTools } from "@trajan/effect-harness";
 import { Lifecycle } from "agents/lifecycle";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
 import { Tasks } from "agents/tasks";
 import type { TaskStep } from "agents/tasks";
-import { Clock, Effect, Schema } from "effect";
+import { Clock, Effect, PubSub, Schema, Stream } from "effect";
 import type { Layer } from "effect";
+import { Sse } from "effect/encoding";
 import { ConversationStore } from "./conversation-store";
 import type { HistoryQuery } from "./conversation-store";
+import { TurnStreamEvent } from "./turn-events";
 
 const turnDefinition = "turn@v3";
 const inboxJob = "effect-harness-inbox";
 const TurnTaskInput = Schema.Struct({ runId: Schema.NonEmptyString });
+const eventJson = Schema.encodeSync(Schema.fromJsonString(TurnStreamEvent));
+type Draft = { text: string; generation: symbol | undefined };
 
 class TurnTaskInputError extends Schema.TaggedError<
 	TurnTaskInputError,
@@ -85,6 +89,8 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 	protected onTurnPhase?(phase: "before-task" | "after-commit", signal: AbortSignal): Promise<void>;
 
 	readonly #conversation = new ConversationStore(this.ctx.storage);
+	readonly #updates = Effect.runSync(PubSub.sliding<void>(1));
+	#draft: (Draft & { runId: string }) | undefined;
 	readonly #tasks = new Tasks({
 		onError: () => Effect.runPromise(this.#wakeInbox()),
 		definitions: {
@@ -143,6 +149,7 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 				task.state === "failed" ? task.error.message : "The turn ended without a transcript.";
 			const code = task.state === "failed" ? failureCode(task.error.name) : task.state;
 			yield* conversationEffect("fail turn", () => this.#conversation.fail(runId, message));
+			yield* this.#settleDraft(runId);
 			yield* Effect.logWarning("Effect harness turn ended without a transcript").pipe(
 				Effect.annotateLogs({ runId, code }),
 			);
@@ -177,12 +184,78 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 			{ id: row.submission_id, prompt: row.prompt },
 			taskJournal(runId, step),
 			context,
+			(event) => this.#publishProgress(runId, event),
 		);
 
 		yield* conversationEffect("commit turn", () => this.#conversation.commit(runId, transcript));
+		yield* this.#settleDraft(runId);
 		yield* Effect.promise(async (signal) => this.onTurnPhase?.("after-commit", signal));
 		yield* this.#wakeInbox();
 	});
+
+	#publishProgress(runId: string, event: TurnProgress) {
+		return Effect.sync(() => {
+			if (event.type === "reset") {
+				this.#draft = { runId, generation: Symbol(), text: "" };
+			} else if (this.#draft?.runId === runId) {
+				this.#draft.text += event.text;
+			}
+			PubSub.publishUnsafe(this.#updates, undefined);
+		});
+	}
+
+	#settleDraft(runId: string) {
+		return Effect.sync(() => {
+			if (this.#draft?.runId === runId) {
+				this.#draft = undefined;
+			}
+			PubSub.publishUnsafe(this.#updates, undefined);
+		});
+	}
+
+	protected async streamTurn(runId: string) {
+		await this.lifecycle.start();
+		const events = Stream.unwrap(
+			Effect.map(PubSub.subscribe(this.#updates), (updates) =>
+				Stream.fromSubscription(updates).pipe(Stream.prepend([undefined])),
+			),
+		).pipe(
+			// Read the snapshot after subscribing so a concurrent commit can't be missed.
+			Stream.mapAccum(
+				(): Draft | undefined => undefined,
+				(previous, _): readonly [Draft | undefined, ReadonlyArray<typeof TurnStreamEvent.Type>] => {
+					const active = this.#draft;
+					let draft: Draft = { generation: undefined, text: "" };
+					if (active?.runId === runId) {
+						draft = { generation: active.generation, text: active.text };
+					} else {
+						const state = this.#conversation.state(runId);
+						if (state !== "pending" && state !== "running") {
+							return [undefined, [{ type: "settled", state }]];
+						}
+					}
+					if (!previous || previous.generation !== draft.generation) {
+						return [draft, [{ type: "draft", text: draft.text }]];
+					}
+					const text = draft.text.slice(previous.text.length);
+					return [draft, text ? [{ type: "text-delta", text }] : []];
+				},
+			),
+			Stream.takeUntil((event) => event.type === "settled"),
+			Stream.map((event) =>
+				Sse.encoder.write({
+					_tag: "Event",
+					event: "message",
+					id: undefined,
+					data: eventJson(event),
+				}),
+			),
+			Stream.encodeText,
+		);
+		return new Response(Stream.toReadableStream(events), {
+			headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" },
+		});
+	}
 
 	submit(input: unknown) {
 		return Effect.runPromise(
