@@ -296,6 +296,51 @@ test("does not restart a script interrupted while it is still running", async ()
 	expect(await stub.state()).toMatchObject({ text: "once" });
 });
 
+test("a read-only exec replays a completed call and retries an interrupted call with the same ID", async () => {
+	let stub = openFixture();
+	await stub.pause("during-replay-read");
+	const { runId } = await submit(stub, { id: "replay", prompt: "Replay two reads." });
+	await expect.poll(() => stub.state()).toMatchObject({ pausedAt: "during-replay-read" });
+	const { instance } = await stub.state();
+	const initial = await stub.replayCalls();
+	expect(initial).toEqual({ first: [expect.any(String)], second: [expect.any(String)] });
+	expect(await stub.turn(runId)).toMatchObject({ state: "running" });
+
+	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
+	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await runDurableObjectAlarm(stub);
+	expect((await stub.state()).instance).not.toBe(instance);
+	await expect
+		.poll(() => stub.replayCalls())
+		.toEqual({
+			first: initial.first,
+			second: [initial.second[0], initial.second[0]],
+		});
+	await stub.release();
+
+	await expect
+		.poll(() => readTurn(stub, runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user" },
+					{ role: "tool-call", name: "exec" },
+					{
+						role: "tool",
+						result: {
+							status: "completed",
+							output: ["first", "second"],
+							activity: [{ id: initial.second[0], name: "read_second", status: "completed" }],
+						},
+					},
+					{ role: "assistant", text: 'Read ["first","second"]' },
+				],
+			},
+		});
+	expect(await stub.state()).toMatchObject({ text: "" });
+});
+
 test("stopping a turn cancels its active Computer execution", async () => {
 	const stub = openFixture();
 	const { runId } = await submit(stub, { id: "stop-exec", prompt: "Interrupt after writing." });

@@ -124,6 +124,28 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	await expect(transcript.getByText('Wrote "oncehello"', { exact: true })).toBeVisible();
 });
 
+test("shows live tool progress and the final answer after replaying a read-only exec", async ({
+	page,
+}) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/pause-replay`)).status()).toBe(204);
+	await composer.fill("Replay two reads.");
+	await composer.press("Enter");
+	const calls = page.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
+	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Running/]);
+
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await page.reload();
+	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	await expect(calls).toHaveText([/read_second.*Running/]);
+	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
+
+	const transcript = page.getByRole("main");
+	await expect(transcript.getByText('Read ["first","second"]', { exact: true })).toHaveCount(1);
+	await transcript.getByText("Done", { exact: true }).click();
+	await expect(calls).toHaveText([/read_second.*Succeeded/]);
+});
+
 test("stops the active reply and continues a follow-up submitted from another tab", async ({
 	page,
 	context,

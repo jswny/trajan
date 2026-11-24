@@ -18,13 +18,17 @@ export default {
 		if (isEffectChatPath(url.pathname)) {
 			return stub.fetch(request);
 		}
-		const action = /^\/__browser-smoke\/effect-stream\/(pause|release|crash|state)$/.exec(
-			url.pathname,
-		)?.[1];
+		const action =
+			/^\/__browser-smoke\/effect-stream\/(pause|pause-replay|release|crash|state)$/.exec(
+				url.pathname,
+			)?.[1];
 		if (action && fixture && request.method === "POST") {
 			switch (action) {
 				case "pause":
 					await stub.pause("during-reply");
+					return new Response(null, { status: 204 });
+				case "pause-replay":
+					await stub.pause("during-replay-read");
 					return new Response(null, { status: 204 });
 				case "release":
 					await stub.release();

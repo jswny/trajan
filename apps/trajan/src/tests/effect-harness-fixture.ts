@@ -1,3 +1,5 @@
+import { Workspace } from "@cloudflare/computer";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import {
 	TurnIoError,
 	ToolResult,
@@ -9,11 +11,19 @@ import type { TurnMessage, TurnModelEvent } from "@trajan/effect-harness";
 import { Effect, Layer, Predicate, Schema, Stream } from "effect";
 import { EffectHarnessObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
-import { createTrajanWorkspace } from "../workspace";
+import { createObservedToolBindings, createTrajanWorkspace } from "../workspace";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
-type PausePoint = "before-task" | "after-write" | "between-tools" | "during-reply" | "after-commit";
+type PausePoint =
+	| "before-task"
+	| "after-write"
+	| "between-tools"
+	| "during-reply"
+	| "after-commit"
+	| "during-replay-read";
 const workspaceFile = "/workspace/turn.txt";
+const replayPrompt = "Replay two reads.";
+const replayCall = "exec-replay";
 export function appendExecInput(text: string) {
 	return {
 		code: `
@@ -41,7 +51,46 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 	readonly #instance = crypto.randomUUID();
 	readonly #computer = createTrajanWorkspace(this.ctx.storage, this.env.LOADER);
 	readonly #effectTools = effectWorkspaceTools(this.#computer);
+	#replayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
 	protected override readonly toolCatalog = [this.#effectTools.declaration];
+
+	#createReplayTools() {
+		const storage = this.ctx.storage;
+		const tools = createObservedToolBindings(() =>
+			(["first", "second"] as const).map((name) => ({
+				name: `read_${name}`,
+				readOnly: true,
+				call: async (_input, { callId, signal }) => {
+					const key = `replay-${name}`;
+					const calls = (await storage.get<Array<string>>(key)) ?? [];
+					// Store probe receipts in the host so the test can compare both attempts.
+					await storage.put(key, [...calls, callId]);
+					if (name === "second") {
+						await this.#pauseAt("during-replay-read", signal);
+					}
+					return { text: name, isError: false };
+				},
+			})),
+		);
+		const workspace = new Workspace({
+			storage,
+			backends: [
+				new CodemodeBackend({
+					id: "fixture-replay",
+					loader: this.env.LOADER,
+					root: "/workspace",
+					access: "read",
+					onInterrupt: "replay",
+					modules: { "codemode:tools": tools.module },
+				}),
+			],
+		});
+		return effectWorkspaceTools({
+			workspace,
+			instructions: "Read-only replay fixture.",
+			observeExecution: tools.observeExecution,
+		});
+	}
 
 	readonly #execute = Effect.fn("effect-harness.fixture.executeTool")(function* (
 		this: EffectHarnessTestObject,
@@ -51,7 +100,11 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		if (call.id === "exec-interrupt") {
 			yield* Effect.promise(() => this.ctx.storage.put("executionId", attempt.idempotencyKey));
 		}
-		const result = yield* this.#effectTools.service.execute(...args);
+		const tools =
+			call.id === replayCall
+				? (this.#replayTools ??= this.#createReplayTools())
+				: this.#effectTools;
+		const result = yield* tools.service.execute(...args);
 		if (result.status === "completed") {
 			// Pause after Computer settles while the turn's checkpoint is still open.
 			yield* Effect.tryPromise({
@@ -76,6 +129,27 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		}
 		if (last?.role === "user" && last.text.startsWith("Remember ")) {
 			return { role: "assistant", text: `Remembering ${last.text.slice("Remember ".length)}` };
+		}
+		if (last?.role === "user" && last.text === replayPrompt) {
+			return {
+				role: "tool-call",
+				id: replayCall,
+				name: "exec",
+				input: {
+					code: `import { read_first, read_second } from "codemode:tools";
+import { writeFile } from "node:fs/promises";
+export default async function () {
+  const first = await read_first({});
+  const second = await read_second({});
+  const writeBlocked = await writeFile("/workspace/turn.txt", "blocked").then(
+    () => false,
+    (error) => String(error).includes("Workspace code write access is not available"),
+  );
+  if (first.isError || second.isError || !writeBlocked) throw new Error("Unexpected replay result");
+  return [first.text, second.text];
+}`,
+				},
+			};
 		}
 		if (last?.role === "user" && last.text === "Run a workspace module.") {
 			return {
@@ -173,10 +247,13 @@ export default async function () {
 				};
 			}
 			const { result } = last;
+			const verb = user?.text === replayPrompt ? "Read" : "Wrote";
 			return {
 				role: "assistant",
 				text:
-					result.status === "completed" ? `Wrote ${JSON.stringify(result.output)}` : result.message,
+					result.status === "completed"
+						? `${verb} ${JSON.stringify(result.output)}`
+						: result.message,
 			};
 		}
 		return {
@@ -246,6 +323,14 @@ export default async function () {
 				throw error;
 			});
 		return { instance: this.#instance, executionId, pausedAt, text };
+	}
+
+	async replayCalls() {
+		const [first, second] = await Promise.all([
+			this.ctx.storage.get<Array<string>>("replay-first"),
+			this.ctx.storage.get<Array<string>>("replay-second"),
+		]);
+		return { first: first ?? [], second: second ?? [] };
 	}
 
 	workspaceTool(name: string, input: Schema.Json, recovering = false): Promise<string> {

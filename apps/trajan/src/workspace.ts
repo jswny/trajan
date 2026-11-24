@@ -16,8 +16,7 @@ const root = "/workspace";
 type ToolCall = typeof ToolActivity.Type;
 type ToolObserver = (call: ToolCall) => Effect.Effect<void>;
 
-export function createTrajanWorkspace(storage: DurableObjectStorage, loader: Env["LOADER"]) {
-	const git = createGitModule({ allowNetwork: true });
+export function createObservedToolBindings(bindings: () => ReadonlyArray<ToolBinding>) {
 	const observers = new Map<string, ToolObserver>();
 	const callTool = Effect.fn("workspace.toolCall")(function* (
 		binding: ToolBinding,
@@ -49,42 +48,14 @@ export function createTrajanWorkspace(storage: DurableObjectStorage, loader: Env
 			}),
 		);
 	});
-	let bindings: ReadonlyArray<ToolBinding> = [];
-	const workspace = new Workspace({
-		storage,
-		git: createGitClient(),
-		backends: [
-			new CodemodeBackend({
-				loader,
-				root,
-				access: "read-write",
-				maxResultBytes: 64 * 1024,
-				modules: {
-					"codemode:git": git,
-					"codemode:tools": createToolBindings(() => bindings),
-				},
-			}),
-		],
-	});
-
-	const tools = createPiTools({ workspace, root, exec: { backends: {} } });
-	bindings = forPiTools(tools)().map((binding) => ({
-		...binding,
-		call: (input, context) =>
-			Effect.runPromise(callTool(binding, input, context), { signal: context.signal }),
-	}));
-	const instructions = [
-		"Import workspace tools as named exports from codemode:tools. Each tool takes one object and returns { text, isError, details }. Check isError before using its result.",
-		"Prefer these tools for ordinary file operations so chat can show their progress.",
-		...tools.tools.map(
-			({ name, description, parameters }) =>
-				`${name}: ${description}\nArguments: ${JSON.stringify(parameters)}`,
-		),
-		`Import Git functions from codemode:git. ${git.description}`,
-	].join("\n");
 	return {
-		workspace,
-		instructions,
+		module: createToolBindings(() =>
+			bindings().map((binding) => ({
+				...binding,
+				call: (input, context) =>
+					Effect.runPromise(callTool(binding, input, context), { signal: context.signal }),
+			})),
+		),
 		observeExecution(this: void, id: string, observer: ToolObserver) {
 			observers.set(id, observer);
 			return () => {
@@ -94,4 +65,40 @@ export function createTrajanWorkspace(storage: DurableObjectStorage, loader: Env
 			};
 		},
 	};
+}
+
+export function createTrajanWorkspace(storage: DurableObjectStorage, loader: Env["LOADER"]) {
+	const git = createGitModule({ allowNetwork: true });
+	let bindings: ReadonlyArray<ToolBinding> = [];
+	const toolsModule = createObservedToolBindings(() => bindings);
+	const workspace = new Workspace({
+		storage,
+		git: createGitClient(),
+		backends: [
+			new CodemodeBackend({
+				loader,
+				root,
+				access: "read-write",
+				onInterrupt: "fail",
+				maxResultBytes: 64 * 1024,
+				modules: {
+					"codemode:git": git,
+					"codemode:tools": toolsModule.module,
+				},
+			}),
+		],
+	});
+
+	const tools = createPiTools({ workspace, root, exec: { backends: {} } });
+	bindings = forPiTools(tools)();
+	const instructions = [
+		"Import workspace tools as named exports from codemode:tools. Each tool takes one object and returns { text, isError, details }. Check isError before using its result.",
+		"Prefer these tools for ordinary file operations so chat can show their progress.",
+		...tools.tools.map(
+			({ name, description, parameters }) =>
+				`${name}: ${description}\nArguments: ${JSON.stringify(parameters)}`,
+		),
+		`Import Git functions from codemode:git. ${git.description}`,
+	].join("\n");
+	return { workspace, instructions, observeExecution: toolsModule.observeExecution };
 }

@@ -42,7 +42,6 @@ export function effectWorkspaceTools({
 							? runtime.getExec(attempt.idempotencyKey, { encoding: "utf8" })
 							: runtime.exec(code, {
 									id: attempt.idempotencyKey,
-									onInterrupt: "fail",
 									encoding: "utf8",
 									output: { maxBytes: 16 * 1024 },
 								}),
