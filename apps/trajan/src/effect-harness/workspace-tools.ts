@@ -3,6 +3,8 @@ import { TurnIoError } from "@trajan/harness";
 import type { ToolActivity, ToolResult, TurnTools } from "@trajan/harness";
 import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
+import { scheduleInstructions } from "../turn-schedules";
+import type { TurnSchedules } from "../turn-schedules";
 import { codeModeError } from "../workspace";
 import { RECENT_TOOL_CALLS, readToolActivity, writeToolActivity } from "./tool-activity";
 
@@ -33,12 +35,16 @@ function markInterrupted(activity: ReadonlyArray<typeof ToolActivity.Type>) {
 export function effectWorkspaceTools(
 	loader: WorkerLoader,
 	storage: DurableObjectStorage,
+	schedules: TurnSchedules,
 	{
 		catalog,
 		instructions,
 	}: { catalog: Parameters<typeof createCodeMode>[2]; instructions: string },
 ) {
-	const codeMode = createCodeMode(loader, storage, catalog);
+	const codeMode = createCodeMode(loader, storage, {
+		...catalog,
+		"codemode:tools": { ...catalog["codemode:tools"], ...schedules.tools },
+	});
 	const execute = Effect.fn("effect-harness.exec")(
 		function* (...[call, attempt, publishActivity]: Parameters<TurnTools["Service"]["execute"]>) {
 			if (call.name !== Exec.name) {
@@ -104,6 +110,7 @@ export function effectWorkspaceTools(
 				"Tools execute in call order. If a tool throws with code 'interrupted', inspect its effects before retrying. Base replay-sensitive branches and arguments on stable input and tool results.",
 				"Write large results to a workspace file and return the path.",
 				instructions,
+				scheduleInstructions,
 			].join("\n"),
 			parameters: { ...Tool.getJsonSchema(Exec), additionalProperties: false },
 		},

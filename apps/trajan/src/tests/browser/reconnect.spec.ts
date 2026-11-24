@@ -304,6 +304,33 @@ test("loads older messages without replacing the recent transcript", async ({ pa
 	await expect(transcript.getByText("Remembering page 25", { exact: true })).toHaveCount(1);
 });
 
+test("runs a scheduled turn once across a restart with the chat closed", async ({
+	page,
+	context,
+}) => {
+	const composer = await openChat(page);
+	await composer.fill("Schedule a workspace check.");
+	await composer.press("Enter");
+	await expect(page.getByRole("main").getByText(/^Scheduled \{/)).toBeVisible();
+	await page.close();
+	expect((await context.request.post(`${control}/crash`)).status()).toBe(500);
+	// Leave the Worker with no chat connection while the alarm and its retry run.
+	await setTimeout(4500);
+	const history = await context.request.get(`${ChatPath}/history`);
+	expect(history.ok()).toBe(true);
+	expect(await history.text()).toContain("The scheduled workspace check ran.");
+	const reopened = await context.newPage();
+	await openChat(reopened);
+	const transcript = reopened.getByRole("main");
+	await expect(
+		transcript.getByText("The scheduled workspace check ran.", { exact: true }),
+	).toHaveCount(1);
+	await reopened.reload();
+	await expect(
+		transcript.getByText("The scheduled workspace check ran.", { exact: true }),
+	).toHaveCount(1);
+});
+
 test("keeps separate outcomes for concurrent calls to the same tool", async ({ page }) => {
 	const composer = await openChat(page);
 	await composer.fill("Run a workspace module.");

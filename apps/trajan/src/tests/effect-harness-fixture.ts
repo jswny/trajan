@@ -1,9 +1,16 @@
 import { clearCodeModeRun } from "@trajan/code-mode";
 import type { CodeModeTool } from "@trajan/code-mode";
 import { createCodeModeFixture } from "./code-mode-fixture";
-import { TurnIoError, ToolResult, TurnModel, TurnModelError, TurnTools } from "@trajan/harness";
+import {
+	TurnIoError,
+	ToolResult,
+	TurnModel,
+	TurnModelError,
+	TurnSubmission,
+	TurnTools,
+} from "@trajan/harness";
 import type { TurnMessage, TurnModelEvent } from "@trajan/harness";
-import { Effect, Layer, Predicate, Schema, Stream } from "effect";
+import { Effect, Layer, Option, Predicate, Schema, Stream } from "effect";
 import { clearToolState } from "../effect-harness/tool-activity";
 import { TrajanChatObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
@@ -36,6 +43,8 @@ const editReplayPrompt = "Recover an interrupted edit.";
 const editReplayCall = "exec-replay-edit";
 const gitReplayPrompt = "Recover interrupted Git branch creation.";
 const gitReplayCall = "exec-replay-git";
+const scheduledPrompt = "Check the workspace on schedule.";
+const decodeSubmission = Schema.decodeUnknownOption(TurnSubmission);
 export function appendExecInput(text: string) {
 	return {
 		code: `
@@ -110,7 +119,7 @@ export class EffectHarnessTestObject extends TrajanChatObject {
 			}).bind(this),
 		});
 		const branch = pauseAfter(git.branch, "during-replay-git");
-		return effectWorkspaceTools(this.env.LOADER, storage, {
+		return effectWorkspaceTools(this.env.LOADER, storage, this.schedules, {
 			instructions,
 			catalog: {
 				"codemode:tools": {
@@ -154,6 +163,20 @@ export class EffectHarnessTestObject extends TrajanChatObject {
 				},
 			},
 		});
+	}
+
+	override async submit(input: unknown) {
+		const receipt = await super.submit(input);
+		const submission = decodeSubmission(input);
+		if (
+			receipt.accepted &&
+			Option.isSome(submission) &&
+			submission.value.id.startsWith("scheduled:") &&
+			submission.value.prompt.endsWith(scheduledPrompt)
+		) {
+			throw new Error("Fixture dropped the receipt after admitting a scheduled turn.");
+		}
+		return receipt;
 	}
 
 	readonly #execute = Effect.fn("effect-harness.fixture.executeTool")(function* (
@@ -298,6 +321,26 @@ export default async function () {
 				},
 			};
 		}
+		if (last?.role === "user" && last.text === "Schedule a workspace check.") {
+			return {
+				role: "tool-call",
+				id: "exec-schedule",
+				name: "exec",
+				input: {
+					code: `import { scheduleTurn } from "codemode:tools";
+import { now } from "codemode:runtime";
+export default async function () {
+  return scheduleTurn({
+    prompt: ${JSON.stringify(scheduledPrompt)},
+    when: { type: "once", at: new Date(await now() + 3000).toISOString() }
+  });
+}`,
+				},
+			};
+		}
+		if (last?.role === "user" && last.text.endsWith(scheduledPrompt)) {
+			return { role: "assistant", text: "The scheduled workspace check ran." };
+		}
 		if (last?.role === "user" && last.text === "Fail Code Mode after a write.") {
 			return {
 				role: "tool-call",
@@ -376,11 +419,13 @@ export default async function () {
 			}
 			const { result } = last;
 			const verb =
-				last.callId === editReplayCall || last.callId === gitReplayCall
-					? "Recovered"
-					: user?.text === replayPrompt
-						? "Read"
-						: "Wrote";
+				last.callId === "exec-schedule"
+					? "Scheduled"
+					: last.callId === editReplayCall || last.callId === gitReplayCall
+						? "Recovered"
+						: user?.text === replayPrompt
+							? "Read"
+							: "Wrote";
 			return {
 				role: "assistant",
 				text:
@@ -497,6 +542,7 @@ export default async function () {
 		const tools = effectWorkspaceTools(
 			this.env.LOADER,
 			this.ctx.storage,
+			this.schedules,
 			workspaceToolset(this.#workspace),
 		);
 		return Effect.runPromise(

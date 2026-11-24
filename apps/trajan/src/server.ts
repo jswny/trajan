@@ -12,6 +12,7 @@ export class Trajan extends TrajanChatObject {
 	readonly #tools = effectWorkspaceTools(
 		this.env.LOADER,
 		this.ctx.storage,
+		this.schedules,
 		workspaceToolset(createTrajanWorkspace(this.ctx)),
 	);
 

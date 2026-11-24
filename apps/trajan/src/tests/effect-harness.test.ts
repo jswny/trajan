@@ -5,6 +5,7 @@ import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../effect-harness/chat-protocol";
 import { readToolActivity } from "../effect-harness/tool-activity";
+import { nextWeeklyRun } from "../turn-schedules";
 import { appendExecInput } from "./effect-harness-fixture";
 import {
 	compactReference,
@@ -154,7 +155,18 @@ export default async function () {
 			{ name: "read", status: "completed" },
 		],
 		output: {
-			names: ["delete", "edit", "find", "grep", "ls", "read", "write"],
+			names: [
+				"cancelSchedule",
+				"delete",
+				"edit",
+				"find",
+				"grep",
+				"listSchedules",
+				"ls",
+				"read",
+				"scheduleTurn",
+				"write",
+			],
 			invalid: true,
 			outside: true,
 			absent: true,
@@ -167,8 +179,64 @@ export default async function () {
 			status: "failed",
 		},
 	);
+	expect(await stub.workspaceTool("scheduleTurn", null)).toContain("Unknown tool");
 	expect(decode(await stub.workspaceTool("exec", { code }, true))).toMatchObject({
 		status: "unknown",
+	});
+});
+
+test("keeps a weekly schedule on local time across daylight-saving changes", () => {
+	const schedule = {
+		type: "weekly",
+		days: ["mon", "tue", "wed", "thu", "fri"],
+		time: "08:00",
+		timeZone: "America/New_York",
+	} as const;
+	expect(new Date(nextWeeklyRun(schedule, Date.parse("2026-03-06T13:00:00Z"))).toISOString()).toBe(
+		"2026-03-09T12:00:00.000Z",
+	);
+	expect(new Date(nextWeeklyRun(schedule, Date.parse("2026-10-30T12:00:00Z"))).toISOString()).toBe(
+		"2026-11-02T13:00:00.000Z",
+	);
+});
+
+test("lists and cancels schedules through Code Mode after a Durable Object restart", async () => {
+	const stub = openFixture();
+	await stub.history({});
+	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));
+	const created = decode(
+		await stub.workspaceTool("exec", {
+			code: `import { scheduleTurn } from "codemode:tools";
+export default async function () {
+  return scheduleTurn({
+    prompt: "Review workspace changes.",
+    when: { type: "weekly", days: ["mon", "fri"], time: "08:00", timeZone: "America/New_York" }
+  });
+}`,
+		}),
+	);
+	expect(created).toMatchObject({ status: "completed", output: { id: expect.any(String) } });
+	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+	const restarted = env.EFFECT_HARNESS_TEST.get(stub.id);
+	const cancelled = decode(
+		await restarted.workspaceTool("exec", {
+			code: `import { listSchedules, cancelSchedule } from "codemode:tools";
+export default async function () {
+  const { schedules } = await listSchedules();
+  const receipt = await cancelSchedule({ id: schedules[0].id });
+  const repeated = await cancelSchedule({ id: schedules[0].id });
+  return { schedules, receipt, repeated, after: await listSchedules() };
+}`,
+		}),
+	);
+	expect(cancelled).toMatchObject({
+		status: "completed",
+		output: {
+			schedules: [expect.objectContaining({ prompt: "Review workspace changes." })],
+			receipt: { status: "inactive" },
+			repeated: { status: "inactive" },
+			after: { schedules: [], nextOffset: null },
+		},
 	});
 });
 

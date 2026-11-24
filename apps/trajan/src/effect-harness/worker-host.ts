@@ -3,6 +3,7 @@ import type { TurnProgress } from "@trajan/harness";
 import { CloudflareHarness } from "@trajan/harness-cloudflare";
 import { WebSockets } from "agents/websockets";
 import { Schema } from "effect";
+import { TurnSchedules } from "../turn-schedules";
 import { ChatEvent, ChatHistoryQuery, ChatPath, ChatStop } from "./chat-protocol";
 import type { ChatPreview, ChatSnapshot, ChatToolInfo } from "./chat-protocol";
 import { clearToolState } from "./tool-activity";
@@ -25,6 +26,7 @@ function sendChat(socket: WebSocket, data: string) {
 
 export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 	protected readonly toolCatalog: ReadonlyArray<typeof ChatToolInfo.Type> = [];
+	protected readonly schedules = new TurnSchedules((input) => this.submit(input));
 
 	#draft: typeof ChatPreview.Type | undefined;
 	readonly #sockets = new WebSockets({
@@ -37,7 +39,7 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
-		this.lifecycle.use(this.#sockets);
+		this.lifecycle.use(this.#sockets).use(this.schedules);
 	}
 
 	protected override clearRunState(runId: string): undefined {
