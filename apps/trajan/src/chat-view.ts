@@ -23,13 +23,21 @@ export type ChatPart =
 			readonly error: boolean;
 	  };
 
-export type ChatMessage = {
+export type ChatEntry = {
 	readonly id: string;
 	readonly role: "user" | "assistant" | "tool";
 	readonly parts: ReadonlyArray<ChatPart>;
 };
+export type ChatMessage =
+	| ChatEntry
+	| {
+			readonly id: string;
+			readonly role: "notice";
+			readonly status: "failed" | "cancelled";
+			readonly text: string;
+	  };
 
-export function chatText(id: string, role: "user" | "assistant", text: string): ChatMessage {
+export function chatText(id: string, role: "user" | "assistant", text: string): ChatEntry {
 	return { id, role, parts: [{ type: "text", text }] };
 }
 
@@ -41,6 +49,8 @@ export function chatMessages(entries: (typeof ChatPage.Type)["entries"]): Array<
 			case "user":
 			case "assistant":
 				return chatText(key, message.role, message.text);
+			case "notice":
+				return { id: key, ...message };
 			case "tool-call":
 				names.set(message.id, message.name);
 				return {

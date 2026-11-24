@@ -54,13 +54,19 @@ export class ConversationStore {
 	admit(submission: typeof TurnSubmission.Type) {
 		return this.storage.transactionSync(() => {
 			const existing = this.storage.sql
-				.exec<Pick<SubmissionRow, "run_id">>(
-					"SELECT run_id FROM effect_submissions WHERE submission_id = ?",
+				.exec<Pick<SubmissionRow, "run_id" | "prompt">>(
+					"SELECT run_id, prompt FROM effect_submissions WHERE submission_id = ?",
 					submission.id,
 				)
 				.toArray()[0];
 			if (existing) {
-				return { runId: existing.run_id, accepted: false };
+				return existing.prompt === submission.prompt
+					? { runId: existing.run_id, accepted: false }
+					: {
+							runId: null,
+							accepted: false as const,
+							error: "That submission ID already belongs to a different prompt.",
+						};
 			}
 
 			const runId = crypto.randomUUID();
@@ -116,8 +122,10 @@ export class ConversationStore {
 				`
 			WITH recent AS (
 				SELECT submission_seq, length(CAST(message AS BLOB)) AS bytes
-				FROM effect_entries WHERE seq <= ? AND role IN ('user', 'assistant')
-				ORDER BY seq DESC LIMIT ?
+				FROM effect_entries JOIN effect_submissions ON effect_submissions.seq = submission_seq
+				WHERE effect_entries.seq <= ? AND role IN ('user', 'assistant')
+					AND effect_submissions.state = 'completed'
+				ORDER BY effect_entries.seq DESC LIMIT ?
 			), budget AS (
 				SELECT submission_seq, SUM(SUM(bytes)) OVER (ORDER BY submission_seq DESC) AS bytes
 				FROM recent GROUP BY submission_seq
@@ -167,14 +175,7 @@ export class ConversationStore {
 	}
 
 	fail(runId: string, error: string) {
-		this.storage.sql.exec(
-			`
-			UPDATE effect_submissions SET state = 'failed', error = ?
-			WHERE run_id = ? AND state IN ('pending', 'running')
-		`,
-			error,
-			runId,
-		);
+		this.#end(runId, "failed", error || "The turn failed.");
 	}
 
 	requestStop(runId: string) {
@@ -192,10 +193,34 @@ export class ConversationStore {
 	}
 
 	cancel(runId: string) {
-		this.storage.sql.exec(
-			"UPDATE effect_submissions SET state = 'cancelled' WHERE run_id = ? AND state = 'stopping'",
-			runId,
-		);
+		this.#end(runId, "cancelled", "Stopped");
+	}
+
+	#end(runId: string, status: "failed" | "cancelled", text: string) {
+		this.storage.transactionSync(() => {
+			const row = this.#find(runId);
+			if (
+				!row ||
+				(status === "cancelled"
+					? row.state !== "stopping"
+					: row.state !== "pending" && row.state !== "running")
+			) {
+				return;
+			}
+			this.storage.sql.exec(
+				"UPDATE effect_submissions SET state = ?, error = ? WHERE seq = ?",
+				status,
+				status === "failed" ? text : null,
+				row.seq,
+			);
+			this.storage.sql.exec(
+				"INSERT INTO effect_entries (submission_seq, role, message) VALUES (?, 'user', ?), (?, 'notice', ?)",
+				row.seq,
+				Schema.encodeSync(messageJson)({ role: "user", text: row.prompt }),
+				row.seq,
+				Schema.encodeSync(messageJson)({ role: "notice", status, text }),
+			);
+		});
 	}
 
 	chatStatus() {
@@ -214,15 +239,9 @@ export class ConversationStore {
 				"SELECT COUNT(*) AS count FROM effect_submissions WHERE state = 'pending'",
 			)
 			.one().count;
-		const settled = this.storage.sql
-			.exec<Pick<SubmissionRow, "state" | "error">>(
-				"SELECT state, error FROM effect_submissions WHERE state IN ('completed', 'failed', 'cancelled') ORDER BY seq DESC LIMIT 1",
-			)
-			.toArray()[0];
 		return {
 			active,
 			queued: queued - Number(active?.state === "pending"),
-			error: settled?.state === "failed" ? settled.error : null,
 		};
 	}
 

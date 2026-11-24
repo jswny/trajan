@@ -72,6 +72,25 @@ test("validates a submission before it can start a task", async () => {
 	expect(await stub.state()).toMatchObject({ text: "" });
 });
 
+test("rejects reuse of a submission ID with a different prompt", async () => {
+	const stub = openFixture();
+	await submit(stub);
+	expect(await stub.submit({ ...submission, prompt: "a different prompt" })).toMatchObject({
+		runId: null,
+		accepted: false,
+		error: expect.stringContaining("different prompt"),
+	});
+});
+
+test("retries a model step after a successful tool without running the tool again", async () => {
+	const stub = openFixture();
+	const { runId } = await submit(stub, { id: "retry", prompt: "Retry after append." });
+	await expect
+		.poll(() => stub.turn(runId), { timeout: 5000 })
+		.toMatchObject({ state: "completed" });
+	expect(await stub.state()).toMatchObject({ text: "Retry after append." });
+});
+
 test("Effect workspace tools validate file calls and preserve unsafe recovery", async () => {
 	const stub = openFixture();
 	const path = "/workspace/notes.txt";
@@ -126,6 +145,8 @@ test("stops only the active run and drains a queued follow-up", async () => {
 	await stub.release();
 	await expect.poll(() => stub.turn(queued.runId)).toMatchObject({ state: "completed" });
 	expect((await stub.history({})).entries.map(({ submissionId }) => submissionId)).toEqual([
+		"stop-this",
+		"stop-this",
 		"next",
 		"next",
 	]);
@@ -386,7 +407,7 @@ test("keeps a large exchange in history when it falls outside the model's contex
 test("settles a failed model turn and proceeds to the next queued submission", async () => {
 	let stub = openFixture();
 	const first = await submit(stub, { id: "fail", prompt: "Fail this turn." });
-	const second = await submit(stub, remember("a later submission"));
+	const second = await submit(stub, { id: "next", prompt: "Which earlier prompts did you see?" });
 
 	await expect
 		.poll(() => stub.turn(first.runId), { timeout: 5000 })
@@ -397,15 +418,27 @@ test("settles a failed model turn and proceeds to the next queued submission", a
 			transcript: null,
 		});
 	await expect
-		.poll(() => stub.turn(second.runId), { timeout: 5000 })
-		.toMatchObject({ state: "completed" });
+		.poll(() => readTurn(stub, second.runId), { timeout: 5000 })
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: "Which earlier prompts did you see?" },
+					{ role: "assistant", text: "None." },
+				],
+			},
+		});
 	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
 	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
 	expect(await stub.turn(first.runId)).toMatchObject({
 		state: "failed",
 		failure: { code: "model", message: "The fixture model failed." },
 	});
-	expect(await stub.history({})).toMatchObject({
-		entries: [{ submissionId: "remember" }, { submissionId: "remember" }],
-	});
+	const { entries } = await stub.history({});
+	expect(entries.slice(0, 2).map((entry) => Schema.decodeSync(messageJson)(entry.message))).toEqual(
+		[
+			{ role: "user", text: "Fail this turn." },
+			{ role: "notice", status: "failed", text: "The fixture model failed." },
+		],
+	);
 });

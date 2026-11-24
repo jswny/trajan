@@ -29,7 +29,6 @@ export const INITIAL_CHAT: ChatState = {
 	active: null,
 	preview: null,
 	queued: 0,
-	error: null,
 	catalog: [],
 	submission: null,
 	loading: false,

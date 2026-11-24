@@ -15,7 +15,7 @@ import { Atom } from "effect/reactivity";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatMarkdown } from "./chat-markdown";
-import type { ChatMessage, ChatPart } from "./chat-view";
+import type { ChatEntry, ChatMessage, ChatPart } from "./chat-view";
 import type { ChatToolInfo } from "./effect-harness/chat-protocol";
 import { themePreference } from "./theme";
 import { useChatSession } from "./use-chat-session";
@@ -158,7 +158,7 @@ function AssistantPart({
 	}
 }
 
-function UserMessage({ message }: { message: ChatMessage }) {
+function UserMessage({ message }: { message: ChatEntry }) {
 	const text = message.parts.map((part) => (part.type === "text" ? part.text : "")).join("");
 	return (
 		<div className="flex justify-end">
@@ -174,7 +174,7 @@ function AssistantMessage({
 	streaming = false,
 	runningTools,
 }: {
-	message: ChatMessage;
+	message: ChatEntry;
 	streaming?: boolean;
 	runningTools: ReadonlyArray<string>;
 }) {
@@ -198,7 +198,7 @@ function AssistantMessage({
 	);
 }
 
-function ToolMessage({ message }: { message: ChatMessage }) {
+function ToolMessage({ message }: { message: ChatEntry }) {
 	return (
 		<div className="ml-11 space-y-2">
 			{message.parts.map((part, index) =>
@@ -218,6 +218,17 @@ function Message({ message, streaming = false }: { message: ChatMessage; streami
 			return <AssistantMessage message={message} streaming={streaming} runningTools={[]} />;
 		case "tool":
 			return <ToolMessage message={message} />;
+		case "notice":
+			return message.status === "failed" ? (
+				<div
+					role="alert"
+					className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
+				>
+					{message.text}
+				</div>
+			) : (
+				<p className="ml-11 text-sm text-kumo-subtle">{message.text}</p>
+			);
 	}
 }
 
@@ -288,7 +299,6 @@ function App() {
 		activePrompt,
 		catalog,
 		queued,
-		error,
 		requestError,
 		submission,
 		preview,
@@ -444,15 +454,6 @@ function App() {
 
 						{queued > 0 ? (
 							<p className="ml-11 text-xs text-kumo-subtle">{queued} queued behind this run</p>
-						) : null}
-
-						{error ? (
-							<div
-								role="alert"
-								className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
-							>
-								{error}
-							</div>
 						) : null}
 
 						<div ref={endRef} />

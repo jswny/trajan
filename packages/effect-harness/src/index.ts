@@ -34,7 +34,12 @@ const ToolMessage = Schema.Struct({
 	result: ToolResult,
 });
 
-export const TurnMessage = Schema.Union([UserMessage, Reply, ToolCall, ToolMessage]);
+const TurnNotice = Schema.Struct({
+	role: Schema.Literal("notice"),
+	status: Schema.Literals(["failed", "cancelled"]),
+	text: Schema.NonEmptyString,
+});
+export const TurnMessage = Schema.Union([UserMessage, Reply, ToolCall, ToolMessage, TurnNotice]);
 export const ConversationMessage = Schema.Union([UserMessage, Reply]);
 const ModelToolCall = Schema.Struct({
 	...ToolCall.fields,
@@ -146,7 +151,7 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 						});
 					}
 					return last.value.response;
-				}),
+				}).pipe(Effect.tapError(() => publish({ type: "reset" }))),
 		);
 
 		if (decision.role === "assistant") {

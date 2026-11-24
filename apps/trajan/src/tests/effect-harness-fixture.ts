@@ -155,6 +155,17 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 				},
 			};
 		}
+		if (last?.role === "user" && last.text === "Fail Code Mode after a write.") {
+			return {
+				role: "tool-call",
+				id: "codemode-1",
+				name: "codemode",
+				input: {
+					code: `await tools.write({ path: ${JSON.stringify(workspaceFile)}, content: "written" });
+throw new Error("Script failed after writing.");`,
+				},
+			};
+		}
 		if (last?.role === "user" && last.text === "Show wide code") {
 			return {
 				role: "assistant",
@@ -171,7 +182,20 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 					memory?.role === "assistant" ? memory.text.slice("Remembering ".length) : "I don't know.",
 			};
 		}
+		if (last?.role === "user" && last.text === "Which earlier prompts did you see?") {
+			const earlier = messages.slice(0, -1).filter((message) => message.role === "user");
+			return { role: "assistant", text: earlier.map(({ text }) => text).join(", ") || "None." };
+		}
 		if (last?.role === "tool") {
+			if (user?.text === "Retry after append.") {
+				const alreadyFailed = yield* Effect.promise(() =>
+					this.ctx.storage.get<boolean>("retry-once"),
+				);
+				if (!alreadyFailed) {
+					yield* Effect.promise(() => this.ctx.storage.put("retry-once", true));
+					return yield* new TurnModelError({ message: "Temporary fixture model failure." });
+				}
+			}
 			if (appendTwice && last.callId === "append-1") {
 				yield* Effect.tryPromise({
 					try: (signal) => this.#pauseAt("between-tools", signal),

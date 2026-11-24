@@ -68,6 +68,7 @@ it.effect("publishes draft text but fails when the stream has no terminal respon
 		expect(publish.mock.calls).toEqual([
 			[{ type: "reset" }],
 			[{ type: "text-delta", text: "Partial" }],
+			[{ type: "reset" }],
 		]);
 		expect(Result.isFailure(result) && result.failure).toBeInstanceOf(TurnModelError);
 	}),

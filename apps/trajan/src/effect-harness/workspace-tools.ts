@@ -18,6 +18,13 @@ function toolError(cause: unknown): Extract<typeof ToolResult.Type, { status: "f
 	};
 }
 
+function unknownOutcome(message: string): Extract<typeof ToolResult.Type, { status: "unknown" }> {
+	return {
+		status: "unknown",
+		message: `${message} The tool may have changed the workspace. Inspect it before repeating the action.`,
+	};
+}
+
 export function effectWorkspaceTools(workspace: Workspace, remote: () => CodemodeRemote) {
 	const computer = computerToolset(workspace);
 	const direct = computer.tools.filter((tool) => tool.name !== "exec");
@@ -63,7 +70,9 @@ export function effectWorkspaceTools(workspace: Workspace, remote: () => Codemod
 				(sandbox) => Effect.promise(() => sandbox.close()),
 			);
 			if (!result.ok) {
-				return toolError(result.error.message);
+				return result.error.kind === "script" && result.calls.length === 0
+					? toolError(result.error.message)
+					: unknownOutcome(result.error.message);
 			}
 			const output = yield* Schema.decodeUnknownEffect(Schema.Json)({
 				value: result.value ?? null,
@@ -71,7 +80,11 @@ export function effectWorkspaceTools(workspace: Workspace, remote: () => Codemod
 			});
 			return { status: "completed", output } as const;
 		},
-		Effect.catch((error) => Effect.succeed(toolError(error))),
+		Effect.catch((error) =>
+			Effect.succeed(
+				error instanceof TurnIoError ? unknownOutcome(error.message) : toolError(error),
+			),
+		),
 	);
 
 	const execute = Effect.fn("effect-harness.workspaceTool")(function* (
@@ -79,11 +92,7 @@ export function effectWorkspaceTools(workspace: Workspace, remote: () => Codemod
 		attempt: Parameters<TurnTools["Service"]["execute"]>[1],
 	): Effect.fn.Return<typeof ToolResult.Type> {
 		if (attempt.recovering && !REPLAY_SAFE.has(call.name)) {
-			return {
-				status: "unknown",
-				message:
-					"The tool was interrupted and may have changed the workspace. Inspect it before repeating the action.",
-			};
+			return unknownOutcome("The tool was interrupted.");
 		}
 		if (call.name === Codemode.name) {
 			return yield* runCode(call.input);

@@ -54,8 +54,8 @@ async function send(prompt, tools) {
 			.filter((entry) => entry.submissionId === id)
 			.map((entry) => entry.message);
 		const reply = messages.at(-1);
-		if (!reply && event.active === null && event.error) {
-			throw new Error(event.error);
+		if (reply?.role === "notice") {
+			throw new Error(reply.text);
 		}
 		if (reply?.role !== "assistant") {
 			return;

@@ -118,6 +118,9 @@ test("stops the active reply and continues a follow-up submitted from another ta
 	await expect(page.getByRole("main").getByText("Remembering first", { exact: true })).toHaveCount(
 		0,
 	);
+	await page.reload();
+	await expect(page.getByRole("main").getByText("Remember first", { exact: true })).toBeVisible();
+	await expect(page.getByRole("main").getByText("Stopped", { exact: true })).toBeVisible();
 });
 
 test("loads older messages without replacing the recent transcript", async ({ page }) => {
@@ -143,6 +146,21 @@ test("shows a Code Mode result from a real sandbox and workspace module", async 
 	const transcript = page.getByRole("main");
 	await expect(transcript.getByText("Done", { exact: true })).toBeVisible();
 	await expect(transcript.getByText(/Wrote .*42/)).toBeVisible();
+});
+
+test("warns about a partial Code Mode outcome when a script fails after writing", async ({
+	page,
+}) => {
+	const composer = await openChat(page);
+	await composer.fill("Fail Code Mode after a write.");
+	await composer.press("Enter");
+	const transcript = page.getByRole("main");
+	await expect(
+		transcript.getByText(/Inspect it before repeating the action/).first(),
+	).toBeVisible();
+	await composer.fill("hello");
+	await composer.press("Enter");
+	await expect(transcript.getByText('Wrote "writtenhello"', { exact: true })).toBeVisible();
 });
 
 test("keeps the transcript height and restores focus on a short iPhone viewport", async ({

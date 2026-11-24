@@ -58,7 +58,6 @@ export const ChatSnapshot = Schema.Struct({
 	),
 	preview: Schema.NullOr(Preview),
 	queued: Schema.Natural,
-	error: Schema.NullOr(Schema.String),
 	catalog: Schema.Array(ChatToolInfo),
 });
 export const ChatEvent = Schema.Union([

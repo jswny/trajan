@@ -63,20 +63,25 @@ function taskJournal(runId: string, step: TaskStep): TurnJournal {
 			return Effect.gen(function* () {
 				const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
 				return yield* Effect.promise(() =>
-					step.do(name, { retries: { limit: 1 } }, ({ attempt, idempotencyKey, signal }) =>
-						runPromise(
-							run({
-								idempotencyKey,
-								recovering: step.interrupted?.name === name || attempt > 1,
-							}).pipe(
-								Effect.flatMap(Schema.decodeUnknownEffect(result)),
-								Effect.flatMap(Schema.encodeEffect(checkpointJson)),
-								Effect.withSpan("effect-harness.step.attempt", {
-									attributes: { runId, name, attempt },
-								}),
+					step.do(
+						name,
+						{
+							retries: name.startsWith("model:") ? { limit: 2, delay: "1 second" } : { limit: 1 },
+						},
+						({ attempt, idempotencyKey, signal }) =>
+							runPromise(
+								run({
+									idempotencyKey,
+									recovering: step.interrupted?.name === name || attempt > 1,
+								}).pipe(
+									Effect.flatMap(Schema.decodeUnknownEffect(result)),
+									Effect.flatMap(Schema.encodeEffect(checkpointJson)),
+									Effect.withSpan("effect-harness.step.attempt", {
+										attributes: { runId, name, attempt },
+									}),
+								),
+								{ signal },
 							),
-							{ signal },
-						),
 					),
 				).pipe(
 					Effect.catchDefect((error) => {
@@ -251,14 +256,13 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 	}
 
 	#snapshot(): typeof ChatSnapshot.Type {
-		const { active, queued, error } = this.#conversation.chatStatus();
+		const { active, queued } = this.#conversation.chatStatus();
 		const draft = this.#draft?.runId === active?.runId ? this.#draft : undefined;
 		return {
 			type: "snapshot",
 			page: this.#conversation.chatPage({}),
 			active,
 			queued,
-			error,
 			preview: draft ? { runId: draft.runId, text: draft.text, tool: draft.tool } : null,
 			catalog: this.toolCatalog,
 		};
