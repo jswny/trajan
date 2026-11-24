@@ -3,7 +3,7 @@ import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
 import { createToolBindings } from "@cloudflare/computer/modules/tools";
-import type { ToolBinding } from "@cloudflare/computer/modules/tools";
+import type { ToolBinding, ToolBindingResult } from "@cloudflare/computer/modules/tools";
 import { createPiTools, forPiTools } from "@cloudflare/computer/tools/pi-ai";
 import { TurnIoError } from "@trajan/effect-harness";
 import type { ToolActivity } from "@trajan/effect-harness";
@@ -13,26 +13,49 @@ export const WORKSPACE_PROMPT =
 	"You are Trajan, a concise and capable assistant. You have a durable workspace at /workspace. Use exec to compose tools when they can answer the request, and explain their results plainly.";
 
 const root = "/workspace";
+const replaySafeTools = new Set(["read", "ls", "find", "grep"]);
 type ToolCall = typeof ToolActivity.Type;
-type ToolObserver = (call: ToolCall) => Effect.Effect<void, TurnIoError>;
+type ToolObserver = {
+	readonly publish: (call: ToolCall) => Effect.Effect<void, TurnIoError>;
+	readonly claimUnsafeCall: (callId: string) => Effect.Effect<boolean, TurnIoError>;
+};
+export type WorkspaceToolBinding = ToolBinding & { readonly replay: "safe" | "unsafe" };
+const interruptedTool = {
+	text: "This call was interrupted and may already have applied changes. Inspect its effects before retrying.",
+	isError: true,
+	details: { code: "interrupted" },
+} satisfies ToolBindingResult;
 
-export function createObservedToolBindings(bindings: () => ReadonlyArray<ToolBinding>) {
+export function createObservedToolBindings(bindings: () => ReadonlyArray<WorkspaceToolBinding>) {
 	const observers = new Map<string, ToolObserver>();
 	const callTool = Effect.fn("workspace.toolCall")(function* (
-		binding: ToolBinding,
+		binding: WorkspaceToolBinding,
 		...[input, context]: Parameters<ToolBinding["call"]>
 	) {
 		const { id } = context.execution;
 		const observer = observers.get(id);
+		if (!observer) {
+			return { text: "The tool execution has ended.", isError: true };
+		}
 		const publish = (status: ToolCall["status"]) =>
 			Effect.suspend(() =>
-				observer && observers.get(id) === observer
-					? observer({ id: context.callId, name: binding.name, status })
+				observers.get(id) === observer
+					? observer.publish({ id: context.callId, name: binding.name, status })
 					: Effect.void,
 			);
+		if (binding.replay === "unsafe" && !(yield* observer.claimUnsafeCall(context.callId))) {
+			yield* publish("interrupted");
+			return interruptedTool;
+		}
 		yield* publish("running");
 		return yield* Effect.tryPromise({
-			try: async () => binding.call(input, context),
+			try: async () => {
+				context.signal.throwIfAborted();
+				if (observers.get(id) !== observer) {
+					throw new Error("The tool execution has ended.");
+				}
+				return binding.call(input, context);
+			},
 			catch: (cause) =>
 				new TurnIoError({
 					operation: binding.name,
@@ -69,7 +92,7 @@ export function createObservedToolBindings(bindings: () => ReadonlyArray<ToolBin
 
 export function createTrajanWorkspace(storage: DurableObjectStorage, loader: Env["LOADER"]) {
 	const git = createGitModule({ allowNetwork: true });
-	let bindings: ReadonlyArray<ToolBinding> = [];
+	let bindings: ReadonlyArray<WorkspaceToolBinding> = [];
 	const toolsModule = createObservedToolBindings(() => bindings);
 	const workspace = new Workspace({
 		storage,
@@ -90,7 +113,10 @@ export function createTrajanWorkspace(storage: DurableObjectStorage, loader: Env
 	});
 
 	const tools = createPiTools({ workspace, root, exec: { backends: {} } });
-	bindings = forPiTools(tools)();
+	bindings = forPiTools(tools)().map((binding) => ({
+		...binding,
+		replay: replaySafeTools.has(binding.name) ? "safe" : "unsafe",
+	}));
 	const instructions = [
 		"Import workspace tools as named exports from codemode:tools. Each tool takes one object and returns { text, isError, details }. Check isError before using its result.",
 		"Prefer these tools for ordinary file operations so chat can show their progress.",

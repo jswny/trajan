@@ -4,7 +4,11 @@ import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/effect-harness"
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../effect-harness/chat-protocol";
-import { readToolActivity } from "../effect-harness/tool-activity";
+import {
+	RECENT_TOOL_CALLS,
+	readToolActivity,
+	toolIntentPrefix,
+} from "../effect-harness/tool-activity";
 import { appendExecInput } from "./effect-harness-fixture";
 
 const submission = { id: "submission-1", prompt: "hello" };
@@ -365,6 +369,69 @@ test("stopping a turn cancels its active Computer execution", async () => {
 	expect(
 		await runInDurableObject(stub, (_, { storage }) => readToolActivity(storage, runId)),
 	).toBeUndefined();
+	expect(
+		await runInDurableObject(stub, (_, { storage }) =>
+			Array.from(storage.kv.list({ prefix: toolIntentPrefix(runId) })),
+		),
+	).toEqual([]);
+});
+
+test("replay reports an unsafe append as interrupted and continues after its activity row is evicted", async () => {
+	let stub = openFixture();
+	await stub.pause("during-replay-append");
+	const { runId } = await submit(stub, {
+		id: "append-replay",
+		prompt: "Recover an interrupted append.",
+	});
+	await expect
+		.poll(() => stub.state())
+		.toMatchObject({ pausedAt: "during-replay-append", text: "once" });
+	const { instance } = await stub.state();
+	await expect
+		.poll(() =>
+			runInDurableObject(stub, (_, { storage }) => readToolActivity(storage, runId)?.activity),
+		)
+		.toMatchObject(
+			Array.from({ length: RECENT_TOOL_CALLS }, () => ({
+				name: "read_after_append",
+				status: "completed",
+			})),
+		);
+	const readIntents = () =>
+		runInDurableObject(stub, (_, { storage }) =>
+			Array.from(storage.kv.list({ prefix: toolIntentPrefix(runId) })),
+		);
+	expect(await readIntents()).toHaveLength(1);
+
+	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
+	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await runDurableObjectAlarm(stub);
+	expect((await stub.state()).instance).not.toBe(instance);
+	await expect
+		.poll(() => readTurn(stub, runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user" },
+					{ role: "tool-call", name: "exec" },
+					{
+						role: "tool",
+						result: {
+							status: "completed",
+							output: { append: "interrupted", text: "once" },
+							activity: expect.arrayContaining([
+								expect.objectContaining({ name: "append_once", status: "interrupted" }),
+								expect.objectContaining({ name: "read_after_append", status: "completed" }),
+							]),
+						},
+					},
+					{ role: "assistant", text: expect.stringMatching(/^Recovered /) },
+				],
+			},
+		});
+	expect((await stub.state()).text).toBe("once");
+	expect(await readIntents()).toEqual([]);
 });
 
 test("a restart between tool calls reuses the first result and still executes the second call", async () => {

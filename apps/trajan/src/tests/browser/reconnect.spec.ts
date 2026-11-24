@@ -3,6 +3,7 @@ import { devices, expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { Schema } from "effect";
 import { ChatEvent, ChatPath, ChatReceipt } from "../../effect-harness/chat-protocol";
+import { RECENT_TOOL_CALLS } from "../../effect-harness/tool-activity";
 
 const decodeFrame = Schema.decodeUnknownOption(Schema.fromJsonString(ChatEvent));
 const decodeSubmission = Schema.decodeUnknownSync(Schema.fromJsonString(TurnSubmission));
@@ -146,6 +147,29 @@ test("shows live tool progress and the final answer after replaying a read-only 
 	await expect(transcript.getByText('Read ["first","second"]', { exact: true })).toHaveCount(1);
 	await transcript.getByText("Done", { exact: true }).click();
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Succeeded/]);
+});
+
+test("replay shows the interrupted append and finishes without repeating the write", async ({
+	page,
+}) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/pause-replay-append`)).status()).toBe(204);
+	await composer.fill("Recover an interrupted append.");
+	await composer.press("Enter");
+	const calls = page.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
+	await expect(calls).toHaveText(
+		Array.from({ length: RECENT_TOOL_CALLS }, () => /read_after_append.*Succeeded/),
+	);
+
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await page.reload();
+	const transcript = page.getByRole("main");
+	await expect(
+		transcript.getByText(/Recovered .*"append":"interrupted".*"text":"once"/),
+	).toHaveCount(1);
+	await transcript.getByText("Done", { exact: true }).click();
+	await expect(calls.filter({ hasText: /append_once.*Interrupted/ })).toBeVisible();
+	await expect(calls.last()).toHaveText(/read_after_append.*Succeeded/);
 });
 
 test("stops the active reply and continues a follow-up submitted from another tab", async ({

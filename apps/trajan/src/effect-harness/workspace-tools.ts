@@ -3,7 +3,12 @@ import type { StepAttempt, ToolActivity, ToolResult, TurnTools } from "@trajan/e
 import { Effect, Exit, Schema } from "effect";
 import { Tool } from "effect/ai";
 import type { createTrajanWorkspace } from "../workspace";
-import { RECENT_TOOL_CALLS, readToolActivity, writeToolActivity } from "./tool-activity";
+import {
+	RECENT_TOOL_CALLS,
+	claimToolIntent,
+	readToolActivity,
+	writeToolActivity,
+} from "./tool-activity";
 
 const Code = Schema.Struct({ code: Schema.NonEmptyString });
 const Exec = Tool.make("exec", { parameters: Code, success: Schema.Json });
@@ -93,19 +98,32 @@ export function effectWorkspaceTools(
 			}
 			const result = yield* Effect.acquireUseRelease(
 				Effect.sync(() =>
-					observeExecution(executionId, (entry) =>
-						Effect.tryPromise({
-							try: () => {
-								const activity = [...recent.filter(({ id }) => id !== entry.id), entry].slice(
-									-RECENT_TOOL_CALLS,
-								);
-								writeToolActivity(storage, runId, { executionId, activity });
-								recent = activity;
-								return storage.sync();
-							},
-							catch: executionError,
-						}).pipe(Effect.flatMap(() => publishActivity(recent))),
-					),
+					observeExecution(executionId, {
+						claimUnsafeCall: (callId) =>
+							Effect.tryPromise({
+								try: async () => {
+									const claimed = claimToolIntent(storage, runId, executionId, callId);
+									if (claimed) {
+										// Commit intent before a call can mutate anything outside this journal.
+										await storage.sync();
+									}
+									return claimed;
+								},
+								catch: executionError,
+							}),
+						publish: (entry) =>
+							Effect.tryPromise({
+								try: () => {
+									const activity = [...recent.filter(({ id }) => id !== entry.id), entry].slice(
+										-RECENT_TOOL_CALLS,
+									);
+									writeToolActivity(storage, runId, { executionId, activity });
+									recent = activity;
+									return storage.sync();
+								},
+								catch: executionError,
+							}).pipe(Effect.flatMap(() => publishActivity(recent))),
+					}),
 				),
 				() => runScript(code, attempt),
 				(unsubscribe) => Effect.sync(unsubscribe),

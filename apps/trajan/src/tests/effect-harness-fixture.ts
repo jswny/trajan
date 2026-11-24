@@ -9,10 +9,11 @@ import {
 } from "@trajan/effect-harness";
 import type { TurnMessage, TurnModelEvent } from "@trajan/effect-harness";
 import { Effect, Layer, Predicate, Schema, Stream } from "effect";
-import { toolActivityKey } from "../effect-harness/tool-activity";
+import { RECENT_TOOL_CALLS, clearToolState } from "../effect-harness/tool-activity";
 import { EffectHarnessObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
 import { createObservedToolBindings, createTrajanWorkspace } from "../workspace";
+import type { WorkspaceToolBinding } from "../workspace";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
 type PausePoint =
@@ -21,10 +22,13 @@ type PausePoint =
 	| "between-tools"
 	| "during-reply"
 	| "after-commit"
-	| "during-replay-read";
+	| "during-replay-read"
+	| "during-replay-append";
 const workspaceFile = "/workspace/turn.txt";
 const replayPrompt = "Replay two reads.";
 const replayCall = "exec-replay";
+const appendReplayPrompt = "Recover an interrupted append.";
+const appendReplayCall = "exec-replay-append";
 export function appendExecInput(text: string) {
 	return {
 		code: `
@@ -53,14 +57,43 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 	readonly #computer = createTrajanWorkspace(this.ctx.storage, this.env.LOADER);
 	readonly #effectTools = effectWorkspaceTools(this.#computer, this.ctx.storage);
 	#replayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
+	#appendReplayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
 	protected override readonly toolCatalog = [this.#effectTools.declaration];
 
-	#createReplayTools() {
+	#createReplayTools(access: "read" | "read-write", bindings: ReadonlyArray<WorkspaceToolBinding>) {
 		const storage = this.ctx.storage;
-		const tools = createObservedToolBindings(() =>
+		const tools = createObservedToolBindings(() => bindings);
+		const workspace = new Workspace({
+			storage,
+			backends: [
+				new CodemodeBackend({
+					id: `fixture-replay-${access}`,
+					loader: this.env.LOADER,
+					root: "/workspace",
+					access,
+					onInterrupt: "replay",
+					modules: { "codemode:tools": tools.module },
+				}),
+			],
+		});
+		return effectWorkspaceTools(
+			{
+				workspace,
+				instructions: "Local replay fixture.",
+				observeExecution: tools.observeExecution,
+			},
+			storage,
+		);
+	}
+
+	#createReadReplayTools() {
+		const storage = this.ctx.storage;
+		return this.#createReplayTools(
+			"read",
 			(["first", "second"] as const).map((name) => ({
 				name: `read_${name}`,
 				readOnly: true,
+				replay: "safe",
 				call: async (_input, { callId, signal }) => {
 					const key = `replay-${name}`;
 					const calls = (await storage.get<Array<string>>(key)) ?? [];
@@ -73,27 +106,49 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 				},
 			})),
 		);
-		const workspace = new Workspace({
-			storage,
-			backends: [
-				new CodemodeBackend({
-					id: "fixture-replay",
-					loader: this.env.LOADER,
-					root: "/workspace",
-					access: "read",
-					onInterrupt: "replay",
-					modules: { "codemode:tools": tools.module },
-				}),
-			],
-		});
-		return effectWorkspaceTools(
+	}
+
+	#createAppendReplayTools() {
+		return this.#createReplayTools("read-write", [
 			{
-				workspace,
-				instructions: "Read-only replay fixture.",
-				observeExecution: tools.observeExecution,
+				name: "append_once",
+				replay: "unsafe",
+				call: async (_input, { signal }) => {
+					const previous = await this.#readWorkspaceText();
+					await this.#computer.workspace.fs.mkdir("/workspace", { recursive: true });
+					await this.#computer.workspace.fs.writeFile(workspaceFile, `${previous}once`);
+					await this.#pauseAt("during-replay-append", signal);
+					return { text: "Appended", isError: false };
+				},
 			},
-			storage,
-		);
+			{
+				name: "read_after_append",
+				readOnly: true,
+				replay: "safe",
+				call: async (_input, { signal }) => {
+					let text = await this.#readWorkspaceText();
+					while (text === "") {
+						signal.throwIfAborted();
+						await new Promise((resolve) => {
+							setTimeout(resolve, 10);
+						});
+						text = await this.#readWorkspaceText();
+					}
+					return { text, isError: false };
+				},
+			},
+		]);
+	}
+
+	#toolsFor(callId: string) {
+		switch (callId) {
+			case replayCall:
+				return (this.#replayTools ??= this.#createReadReplayTools());
+			case appendReplayCall:
+				return (this.#appendReplayTools ??= this.#createAppendReplayTools());
+			default:
+				return this.#effectTools;
+		}
 	}
 
 	readonly #execute = Effect.fn("effect-harness.fixture.executeTool")(function* (
@@ -104,11 +159,7 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		if (call.id === "exec-interrupt") {
 			yield* Effect.promise(() => this.ctx.storage.put("executionId", attempt.idempotencyKey));
 		}
-		const tools =
-			call.id === replayCall
-				? (this.#replayTools ??= this.#createReplayTools())
-				: this.#effectTools;
-		const result = yield* tools.service.execute(...args);
+		const result = yield* this.#toolsFor(call.id).service.execute(...args);
 		if (result.status === "completed") {
 			// Pause after Computer settles while the turn's checkpoint is still open.
 			yield* Effect.tryPromise({
@@ -151,6 +202,24 @@ export default async function () {
   );
   if (first.isError || second.isError || !writeBlocked) throw new Error("Unexpected replay result");
   return [first.text, second.text];
+}`,
+				},
+			};
+		}
+		if (last?.role === "user" && last.text === appendReplayPrompt) {
+			return {
+				role: "tool-call",
+				id: appendReplayCall,
+				name: "exec",
+				input: {
+					code: `import { append_once, read_after_append } from "codemode:tools";
+export default async function () {
+  const pending = append_once({});
+  // Move the still-running append out of the recent activity list.
+  for (let i = 0; i < ${RECENT_TOOL_CALLS}; i++) await read_after_append({});
+  const append = await pending;
+  const read = await read_after_append({});
+  return { append: append.isError ? append.details?.code : "completed", text: read.text };
 }`,
 				},
 			};
@@ -251,7 +320,12 @@ export default async function () {
 				};
 			}
 			const { result } = last;
-			const verb = user?.text === replayPrompt ? "Read" : "Wrote";
+			const verb =
+				last.callId === appendReplayCall
+					? "Recovered"
+					: user?.text === replayPrompt
+						? "Read"
+						: "Wrote";
 			return {
 				role: "assistant",
 				text:
@@ -315,17 +389,19 @@ export default async function () {
 		return this.chatRequest(request);
 	}
 
+	#readWorkspaceText() {
+		return this.#computer.workspace.fs.readFile(workspaceFile, "utf8").catch((error: unknown) => {
+			if (isMissing(error)) {
+				return "";
+			}
+			throw error;
+		});
+	}
+
 	async state() {
 		const executionId = await this.ctx.storage.get<string>("executionId");
 		const pausedAt = await this.ctx.storage.get<PausePoint>("pausedAt");
-		const text = await this.#computer.workspace.fs
-			.readFile(workspaceFile, "utf8")
-			.catch((error: unknown) => {
-				if (isMissing(error)) {
-					return "";
-				}
-				throw error;
-			});
+		const text = await this.#readWorkspaceText();
 		return { instance: this.#instance, executionId, pausedAt, text };
 	}
 
@@ -348,7 +424,7 @@ export default async function () {
 				)
 				.pipe(
 					Effect.flatMap(Schema.encodeEffect(Schema.fromJsonString(ToolResult))),
-					Effect.ensuring(Effect.sync(() => this.ctx.storage.kv.delete(toolActivityKey(runId)))),
+					Effect.ensuring(Effect.sync(() => clearToolState(this.ctx.storage, runId))),
 				),
 		);
 	}
