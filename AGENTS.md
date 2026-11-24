@@ -2,6 +2,8 @@
 
 Keep this file focused on durable decisions that contributors cannot infer from the code or existing documentation. Keep the README focused on what Trajan does and put implementation notes next to the code they explain.
 
+- Name packages for the capabilities they provide. Use platform or provider qualifiers when the platform or provider is part of the package's contract.
+- Extract reusable capabilities with interfaces that can be tested independently. Have platform adapters depend on the platform-neutral core. Keep product policy and composition in the deployable app.
 - Use Effect for app-owned asynchronous workflows and Effect atoms for shared UI state. Compose workflows before running them at integration boundaries. Use plain functions for pure transformations and let the renderer schedule DOM work.
 - Give the model one tool surface through Code Mode. Expose only `exec` to the model. Route script effects through registered tools with an explicit replay policy.
 - Use Pi Durable as a design reference for turn execution and recovery. Keep the chat rebuildable from durable state after a reconnect.
