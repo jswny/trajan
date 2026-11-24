@@ -1,4 +1,4 @@
-import { ToolActivity, TurnMessage } from "@trajan/effect-harness";
+import { ToolActivity, TurnMessage } from "@trajan/harness";
 import { Schema } from "effect";
 
 export const ChatPath = "/api/chat";

@@ -1,4 +1,4 @@
-import { TurnModel, TurnTools } from "@trajan/effect-harness";
+import { TurnModel, TurnTools } from "@trajan/harness";
 import { Data, Effect, Layer } from "effect";
 import { ChatPath, isEffectChatPath } from "./effect-harness/chat-protocol";
 import { EffectHarnessObject } from "./effect-harness/worker-host";

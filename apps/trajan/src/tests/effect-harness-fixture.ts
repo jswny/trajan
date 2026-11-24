@@ -1,14 +1,8 @@
 import { clearCodeModeRun } from "@trajan/code-mode";
 import type { CodeModeTool } from "@trajan/code-mode";
 import { createCodeModeFixture } from "./code-mode-fixture";
-import {
-	TurnIoError,
-	ToolResult,
-	TurnModel,
-	TurnModelError,
-	TurnTools,
-} from "@trajan/effect-harness";
-import type { TurnMessage, TurnModelEvent } from "@trajan/effect-harness";
+import { TurnIoError, ToolResult, TurnModel, TurnModelError, TurnTools } from "@trajan/harness";
+import type { TurnMessage, TurnModelEvent } from "@trajan/harness";
 import { Effect, Layer, Predicate, Schema, Stream } from "effect";
 import { clearToolState } from "../effect-harness/tool-activity";
 import { EffectHarnessObject } from "../effect-harness/worker-host";

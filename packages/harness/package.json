@@ -1,5 +1,5 @@
 {
-	"name": "@trajan/effect-harness",
+	"name": "@trajan/harness",
 	"version": "0.1.0",
 	"private": true,
 	"type": "module",

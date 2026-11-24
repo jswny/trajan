@@ -1,5 +1,5 @@
 import { setTimeout } from "node:timers/promises";
-import { TurnSubmission } from "@trajan/effect-harness";
+import { TurnSubmission } from "@trajan/harness";
 import { devices, expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { Schema } from "effect";

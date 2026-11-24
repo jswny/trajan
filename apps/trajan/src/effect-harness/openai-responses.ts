@@ -1,5 +1,5 @@
-import { TurnModel, TurnModelError } from "@trajan/effect-harness";
-import type { TurnModelEvent } from "@trajan/effect-harness";
+import { TurnModel, TurnModelError } from "@trajan/harness";
+import type { TurnModelEvent } from "@trajan/harness";
 import { Effect, Schema, Stream } from "effect";
 import { decode as decodeSse } from "effect/encoding/Sse";
 import { modelConfig } from "../model-config";

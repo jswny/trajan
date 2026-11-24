@@ -1,4 +1,4 @@
-import type { ToolActivity } from "@trajan/effect-harness";
+import type { ToolActivity } from "@trajan/harness";
 import { Schema } from "effect";
 import type { ChatPage } from "./effect-harness/chat-protocol";
 

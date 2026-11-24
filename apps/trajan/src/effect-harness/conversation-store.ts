@@ -1,5 +1,5 @@
-import { ConversationMessage, TurnMessage, TurnTranscript } from "@trajan/effect-harness";
-import type { TurnCompletion, TurnSubmission } from "@trajan/effect-harness";
+import { ConversationMessage, TurnMessage, TurnTranscript } from "@trajan/harness";
+import type { TurnCompletion, TurnSubmission } from "@trajan/harness";
 import { Schema } from "effect";
 import { ChatHistoryQuery } from "./chat-protocol";
 import { clearToolState } from "./tool-activity";

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import { runTurn, TurnIoError, TurnModelError, TurnSubmission } from "@trajan/effect-harness";
-import type { TurnJournal, TurnModel, TurnProgress, TurnTools } from "@trajan/effect-harness";
+import { runTurn, TurnIoError, TurnModelError, TurnSubmission } from "@trajan/harness";
+import type { TurnJournal, TurnModel, TurnProgress, TurnTools } from "@trajan/harness";
 import { Lifecycle } from "agents/lifecycle";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
 import { Tasks } from "agents/tasks";

@@ -11,7 +11,7 @@ import {
 	IconSquircleFill,
 	IconX,
 } from "@pierre/icons/beta";
-import type { ToolActivity } from "@trajan/effect-harness";
+import type { ToolActivity } from "@trajan/harness";
 import { Atom } from "effect/reactivity";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";

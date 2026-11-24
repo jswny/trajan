@@ -1,5 +1,5 @@
 import { clearCodeModeRun } from "@trajan/code-mode";
-import { ToolActivity } from "@trajan/effect-harness";
+import { ToolActivity } from "@trajan/harness";
 import { Schema } from "effect";
 
 export const RECENT_TOOL_CALLS = 8;

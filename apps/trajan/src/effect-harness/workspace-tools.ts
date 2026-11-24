@@ -1,6 +1,6 @@
 import { createCodeMode } from "@trajan/code-mode";
-import { TurnIoError } from "@trajan/effect-harness";
-import type { ToolActivity, ToolResult, TurnTools } from "@trajan/effect-harness";
+import { TurnIoError } from "@trajan/harness";
+import type { ToolActivity, ToolResult, TurnTools } from "@trajan/harness";
 import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
 import { codeModeError } from "../workspace";

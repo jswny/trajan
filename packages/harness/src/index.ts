@@ -126,7 +126,7 @@ export class TurnModel extends Context.Service<
 			options: { readonly allowTools: boolean; readonly modelContext?: Schema.Json },
 		) => Stream.Stream<TurnModelEvent, TurnModelError>;
 	}
->()("@trajan/effect-harness/TurnModel") {}
+>()("@trajan/harness/TurnModel") {}
 
 export type TurnModelEvent =
 	| { readonly type: "text-delta"; readonly text: string }
@@ -147,7 +147,7 @@ export class TurnTools extends Context.Service<
 			publishActivity: (activity: ReadonlyArray<typeof ToolActivity.Type>) => Effect.Effect<void>,
 		) => Effect.Effect<unknown, TurnError>;
 	}
->()("@trajan/effect-harness/TurnTools") {}
+>()("@trajan/harness/TurnTools") {}
 
 /** Run a turn until the model replies, with a checkpoint for each decision and tool result. */
 export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
