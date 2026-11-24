@@ -4,13 +4,16 @@ import { ChatPath, isEffectChatPath } from "./effect-harness/chat-protocol";
 import { EffectHarnessObject } from "./effect-harness/worker-host";
 import { workersAiTurnModel } from "./effect-harness/workers-ai";
 import { effectWorkspaceTools } from "./effect-harness/workspace-tools";
-import { createTrajanWorkspace, WORKSPACE_PROMPT } from "./workspace";
+import { createTrajanWorkspace, WORKSPACE_PROMPT, workspaceToolset } from "./workspace";
 
 class ChatRouteError extends Data.TaggedError("ChatRouteError")<{ readonly cause: unknown }> {}
 
 export class Trajan extends EffectHarnessObject {
-	readonly #computer = createTrajanWorkspace(this.ctx.storage, this.env.LOADER);
-	readonly #tools = effectWorkspaceTools(this.#computer, this.ctx.storage);
+	readonly #tools = effectWorkspaceTools(
+		this.env.LOADER,
+		this.ctx.storage,
+		workspaceToolset(createTrajanWorkspace(this.ctx.storage)),
+	);
 
 	protected override readonly toolCatalog = [
 		{

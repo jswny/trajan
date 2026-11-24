@@ -4,11 +4,7 @@ import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/effect-harness"
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../effect-harness/chat-protocol";
-import {
-	RECENT_TOOL_CALLS,
-	readToolActivity,
-	toolIntentPrefix,
-} from "../effect-harness/tool-activity";
+import { readToolActivity } from "../effect-harness/tool-activity";
 import { appendExecInput } from "./effect-harness-fixture";
 
 const submission = { id: "submission-1", prompt: "hello" };
@@ -141,6 +137,32 @@ export default async function () {
 	});
 });
 
+test("captures script output and confines named Git tools to the workspace", async () => {
+	const stub = openFixture();
+	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));
+	const code = `
+import * as git from "codemode:git";
+export default async function () {
+  console.log("starting");
+  try {
+    await git.status({ dir: "/outside" });
+  } catch (error) {
+    if (error.code !== "failed") throw error;
+    console.error(error.message);
+  }
+  return { genericGitCommand: "cli" in git };
+}`;
+	expect(decode(await stub.workspaceTool("exec", { code }))).toMatchObject({
+		status: "completed",
+		output: {
+			value: { genericGitCommand: false },
+			stdout: "starting\n",
+			stderr: "Git directory must be inside /workspace.\n",
+		},
+		activity: [{ name: "git.status", status: "failed" }],
+	});
+});
+
 test("returns invalid tool arguments to the model without writing to the workspace", async () => {
 	const stub = openFixture();
 	const { runId } = await submit(stub, { id: "bad-append", prompt: "Call append without text." });
@@ -245,7 +267,7 @@ test.each([
 		if (executionId === undefined) {
 			throw new Error("Expected the tool execution ID");
 		}
-		await stub.discardExecution(executionId);
+		await stub.discardExecution(runId);
 	}
 
 	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
@@ -272,13 +294,15 @@ test.each([
 	expect(await stub.state()).toMatchObject({ text: "hello" });
 });
 
-test("does not restart a script interrupted while it is still running", async () => {
+test("resumes an in-flight script without repeating its completed write", async () => {
 	let stub = openFixture();
 	const { runId } = await submit(stub, {
 		id: "interrupted-exec",
 		prompt: "Interrupt after writing.",
 	});
-	await expect.poll(() => stub.state()).toMatchObject({ text: "once" });
+	await expect
+		.poll(() => stub.state())
+		.toMatchObject({ text: "once", pausedAt: "waiting-for-restart" });
 	expect(await stub.turn(runId)).toMatchObject({ state: "running" });
 
 	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
@@ -295,9 +319,15 @@ test("does not restart a script interrupted while it is still running", async ()
 					{ role: "tool-call", name: "exec" },
 					{
 						role: "tool",
-						result: { ...unknownTool, activity: [{ name: "write", status: "completed" }] },
+						result: {
+							status: "completed",
+							output: "once",
+							activity: expect.arrayContaining([
+								{ id: expect.any(String), name: "write", status: "completed" },
+							]),
+						},
 					},
-					{ role: "assistant", text: unknownMessage },
+					{ role: "assistant", text: 'Wrote "once"' },
 				],
 			},
 		});
@@ -355,7 +385,7 @@ test("a read-only exec replays a completed call and retries an interrupted call 
 	).toBeUndefined();
 });
 
-test("stopping a turn cancels its active Computer execution", async () => {
+test("stopping a turn clears the active Code Mode journal", async () => {
 	const stub = openFixture();
 	const { runId } = await submit(stub, { id: "stop-exec", prompt: "Interrupt after writing." });
 	await expect.poll(() => stub.state()).toMatchObject({ text: "once" });
@@ -365,18 +395,18 @@ test("stopping a turn cancels its active Computer execution", async () => {
 	}
 	expect(await stub.stop(runId)).toEqual({ runId, stopped: true });
 	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "cancelled" });
-	expect(await stub.executionStatus(executionId)).toBe("cancelled");
+	expect((await stub.state()).text).toBe("once");
 	expect(
 		await runInDurableObject(stub, (_, { storage }) => readToolActivity(storage, runId)),
 	).toBeUndefined();
 	expect(
 		await runInDurableObject(stub, (_, { storage }) =>
-			Array.from(storage.kv.list({ prefix: toolIntentPrefix(runId) })),
+			Array.from(storage.kv.list({ prefix: `code-mode:${encodeURIComponent(runId)}:` })),
 		),
 	).toEqual([]);
 });
 
-test("replay reports a stock edit as interrupted and continues after its activity row is evicted", async () => {
+test("replay reports an interrupted file edit and continues with a check of the file", async () => {
 	let stub = openFixture();
 	await stub.pause("during-replay-edit");
 	const { runId } = await submit(stub, {
@@ -387,21 +417,11 @@ test("replay reports a stock edit as interrupted and continues after its activit
 		.poll(() => stub.state())
 		.toMatchObject({ pausedAt: "during-replay-edit", text: "seed!" });
 	const { instance } = await stub.state();
-	await expect
-		.poll(() =>
-			runInDurableObject(stub, (_, { storage }) => readToolActivity(storage, runId)?.activity),
-		)
-		.toMatchObject(
-			Array.from({ length: RECENT_TOOL_CALLS }, () => ({
-				name: "read",
-				status: "completed",
-			})),
-		);
-	const readIntents = () =>
+	const readJournal = () =>
 		runInDurableObject(stub, (_, { storage }) =>
-			Array.from(storage.kv.list({ prefix: toolIntentPrefix(runId) })),
+			Array.from(storage.kv.list({ prefix: `code-mode:${encodeURIComponent(runId)}:` })),
 		);
-	expect(await readIntents()).toHaveLength(2);
+	expect(await readJournal()).toHaveLength(4);
 
 	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
 	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
@@ -431,7 +451,7 @@ test("replay reports a stock edit as interrupted and continues after its activit
 			},
 		});
 	expect((await stub.state()).text).toBe("seed!");
-	expect(await readIntents()).toEqual([]);
+	expect(await readJournal()).toEqual([]);
 });
 
 test("Git replay reports interrupted branch creation and continues with a status check", async () => {
@@ -465,7 +485,7 @@ test("Git replay reports interrupted branch creation and continues with a status
 							status: "completed",
 							output: { interrupted: true, checkedStatus: true, branchExists: true },
 							activity: expect.arrayContaining([
-								expect.objectContaining({ name: "git.cli", status: "interrupted" }),
+								expect.objectContaining({ name: "git.branch", status: "interrupted" }),
 								expect.objectContaining({ name: "git.status", status: "completed" }),
 							]),
 						},

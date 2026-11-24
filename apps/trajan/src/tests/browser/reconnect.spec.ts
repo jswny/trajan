@@ -3,7 +3,6 @@ import { devices, expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { Schema } from "effect";
 import { ChatEvent, ChatPath, ChatReceipt } from "../../effect-harness/chat-protocol";
-import { RECENT_TOOL_CALLS } from "../../effect-harness/tool-activity";
 
 const decodeFrame = Schema.decodeUnknownOption(Schema.fromJsonString(ChatEvent));
 const decodeSubmission = Schema.decodeUnknownSync(Schema.fromJsonString(TurnSubmission));
@@ -103,9 +102,13 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	await composer.press("Enter");
 	await expect(page.getByText("Running exec", { exact: true })).toBeVisible();
 	const activity = page.getByRole("list", { name: "Recent tool calls" });
-	await expect(activity.getByRole("listitem")).toHaveText(/write.*Succeeded/);
+	await expect(activity.getByRole("listitem").filter({ hasText: /write.*Succeeded/ })).toHaveCount(
+		1,
+	);
 	await page.reload();
-	await expect(activity.getByRole("listitem")).toHaveText(/write.*Succeeded/);
+	await expect(activity.getByRole("listitem").filter({ hasText: /write.*Succeeded/ })).toHaveCount(
+		1,
+	);
 	await expect
 		.poll(async () => {
 			const response = await page.request.post(`${control}/state`);
@@ -116,12 +119,12 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	const transcript = page.getByRole("main");
-	await expect(
-		transcript.getByText(/Inspect it before repeating the action/).first(),
-	).toBeVisible();
+	await expect(transcript.getByText('Wrote "once"', { exact: true })).toHaveCount(1);
 	await expect(activity).toBeHidden();
-	await transcript.getByText("Failed", { exact: true }).click();
-	await expect(activity.getByRole("listitem")).toHaveText(/write.*Succeeded/);
+	await transcript.getByText("Done", { exact: true }).click();
+	await expect(activity.getByRole("listitem").filter({ hasText: /write.*Succeeded/ })).toHaveCount(
+		1,
+	);
 	await composer.fill("hello");
 	await composer.press("Enter");
 	await expect(transcript.getByText('Wrote "oncehello"', { exact: true })).toBeVisible();
@@ -157,9 +160,7 @@ test("replay shows the interrupted stock edit and finishes without editing the f
 	await composer.fill("Recover an interrupted edit.");
 	await composer.press("Enter");
 	const calls = page.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
-	await expect(calls).toHaveText(
-		Array.from({ length: RECENT_TOOL_CALLS }, () => /read.*Succeeded/),
-	);
+	await expect(calls.last()).toHaveText(/edit.*Running/);
 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
@@ -193,7 +194,7 @@ test("replay shows the interrupted Git call and a successful status check", asyn
 	await expect(transcript.getByText(/^Recovered .*"branchExists":true/)).toHaveCount(1);
 	await transcript.getByText("Done", { exact: true }).click();
 	const calls = transcript.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
-	await expect(calls.filter({ hasText: /git\.cli.*Interrupted/ })).toHaveCount(1);
+	await expect(calls.filter({ hasText: /git\.branch.*Interrupted/ })).toHaveCount(1);
 	await expect(calls.filter({ hasText: /git\.status.*Succeeded/ })).toBeVisible();
 });
 

@@ -1,14 +1,10 @@
+import { createCodeMode } from "@trajan/code-mode";
 import { TurnIoError } from "@trajan/effect-harness";
-import type { StepAttempt, ToolActivity, ToolResult, TurnTools } from "@trajan/effect-harness";
-import { Effect, Exit, Schema } from "effect";
+import type { ToolActivity, ToolResult, TurnTools } from "@trajan/effect-harness";
+import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
-import type { createTrajanWorkspace } from "../workspace";
-import {
-	RECENT_TOOL_CALLS,
-	claimToolIntent,
-	readToolActivity,
-	writeToolActivity,
-} from "./tool-activity";
+import { codeModeError } from "../workspace";
+import { RECENT_TOOL_CALLS, readToolActivity, writeToolActivity } from "./tool-activity";
 
 const Code = Schema.Struct({ code: Schema.NonEmptyString });
 const Exec = Tool.make("exec", { parameters: Code, success: Schema.Json });
@@ -35,52 +31,14 @@ function markInterrupted(activity: ReadonlyArray<typeof ToolActivity.Type>) {
 }
 
 export function effectWorkspaceTools(
-	{ workspace, instructions, observeExecution }: ReturnType<typeof createTrajanWorkspace>,
+	loader: WorkerLoader,
 	storage: DurableObjectStorage,
+	{
+		catalog,
+		instructions,
+	}: { catalog: Parameters<typeof createCodeMode>[2]; instructions: string },
 ) {
-	const runScript = Effect.fnUntraced(
-		function* (
-			code: string,
-			attempt: StepAttempt,
-		): Effect.fn.Return<typeof ToolResult.Type, TurnIoError> {
-			const runtime = workspace.runtime;
-			const result = yield* Effect.acquireUseRelease(
-				Effect.tryPromise({
-					// A missing execution can no longer prove that a mutation didn't happen.
-					try: () =>
-						attempt.recovering
-							? runtime.getExec(attempt.idempotencyKey, { encoding: "utf8" })
-							: runtime.exec(code, {
-									id: attempt.idempotencyKey,
-									encoding: "utf8",
-									output: { maxBytes: 16 * 1024 },
-								}),
-					catch: executionError,
-				}),
-				(handle) => Effect.tryPromise({ try: () => handle.result(), catch: executionError }),
-				(handle, exit) =>
-					Effect.gen(function* () {
-						if (Exit.hasInterrupts(exit)) {
-							yield* Effect.tryPromise({ try: () => handle.kill(), catch: executionError }).pipe(
-								Effect.ignore,
-							);
-						}
-						yield* Effect.sync(() => handle[Symbol.dispose]());
-					}),
-			);
-			const { value, stdout, stderr, truncated } = result;
-			if (result.status !== "completed") {
-				return unknownOutcome(stderr.trim() || `Execution ended with status ${result.status}.`);
-			}
-			const output = yield* Schema.decodeUnknownEffect(Schema.Json)(
-				stdout || stderr || truncated
-					? { value: value ?? null, stdout, stderr, ...(truncated && { truncated }) }
-					: (value ?? null),
-			).pipe(Effect.mapError(executionError));
-			return { status: "completed", output };
-		},
-		Effect.catch((error) => Effect.succeed(unknownOutcome(error.message))),
-	);
+	const codeMode = createCodeMode(loader, storage, catalog);
 	const execute = Effect.fn("effect-harness.exec")(
 		function* (...[call, attempt, publishActivity]: Parameters<TurnTools["Service"]["execute"]>) {
 			if (call.name !== Exec.name) {
@@ -96,42 +54,32 @@ export function effectWorkspaceTools(
 			if (recent.length > 0) {
 				yield* publishActivity(recent);
 			}
-			const result = yield* Effect.acquireUseRelease(
-				Effect.sync(() =>
-					observeExecution(executionId, {
-						claimUnsafeCall: (callId) =>
-							Effect.tryPromise({
-								try: async () => {
-									const claimed = claimToolIntent(storage, runId, executionId, callId);
-									if (claimed) {
-										// Commit intent before a call can mutate anything outside this journal.
-										await storage.sync();
-									}
-									return claimed;
-								},
-								catch: executionError,
-							}),
-						publish: (entry) =>
-							Effect.tryPromise({
-								try: () => {
-									const activity = [...recent.filter(({ id }) => id !== entry.id), entry].slice(
-										-RECENT_TOOL_CALLS,
-									);
-									writeToolActivity(storage, runId, { executionId, activity });
-									recent = activity;
-									return storage.sync();
-								},
-								catch: executionError,
-							}).pipe(Effect.flatMap(() => publishActivity(recent))),
+			const result = yield* codeMode
+				.run(executionId, code, {
+					scope: runId,
+					recovering: attempt.recovering,
+					onActivity: (entry) =>
+						Effect.tryPromise({
+							try: () => {
+								recent = [...recent.filter(({ id }) => id !== entry.id), entry].slice(
+									-RECENT_TOOL_CALLS,
+								);
+								writeToolActivity(storage, runId, { executionId, activity: recent });
+								return storage.sync();
+							},
+							catch: codeModeError,
+						}).pipe(
+							Effect.flatMap(() => publishActivity(recent)),
+							Effect.mapError(codeModeError),
+						),
+				})
+				.pipe(
+					Effect.match({
+						onSuccess: (output): typeof ToolResult.Type => ({ status: "completed", output }),
+						onFailure: ({ message }) => unknownOutcome(message),
 					}),
-				),
-				() => runScript(code, attempt),
-				(unsubscribe) => Effect.sync(unsubscribe),
-			);
-			if (recent.length === 0) {
-				return result;
-			}
-			return { ...result, activity: markInterrupted(recent) };
+				);
+			return recent.length > 0 ? { ...result, activity: markInterrupted(recent) } : result;
 		},
 		Effect.catch((error) =>
 			Effect.succeed(
@@ -149,9 +97,11 @@ export function effectWorkspaceTools(
 		declaration: {
 			name: Exec.name,
 			description: [
-				"Run JavaScript ES module source in the /workspace sandbox. Use export default async function () { ... } and return the result. console.log and console.error are also captured.",
+				"Run a JavaScript module. Use export default async function () { ... } and return a JSON result.",
+				"console.log and console.error are captured.",
+				"Use registered tools for all workspace and external operations. Capabilities cannot be accessed directly by the script.",
+				"Tools execute in call order. If a tool throws with code 'interrupted', inspect its effects before retrying. Base replay-sensitive branches and arguments on stable input and tool results.",
 				"Write large results to a workspace file and return the path.",
-				"Use this for every tool call. The sandbox also supports node:fs/promises and relative imports of workspace .js files. It has no shell, package installation, or direct network access.",
 				instructions,
 			].join("\n"),
 			parameters: Tool.getJsonSchema(Exec),

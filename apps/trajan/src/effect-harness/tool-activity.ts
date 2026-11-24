@@ -1,3 +1,4 @@
+import { clearCodeModeRun } from "@trajan/code-mode";
 import { ToolActivity } from "@trajan/effect-harness";
 import { Schema } from "effect";
 
@@ -13,29 +14,9 @@ export function toolActivityKey(runId: string) {
 	return `effect-tool-activity:${runId}`;
 }
 
-export function toolIntentPrefix(runId: string) {
-	return `effect-tool-intent:${runId}:`;
-}
-
-export function claimToolIntent(
-	storage: DurableObjectStorage,
-	runId: string,
-	executionId: string,
-	callId: string,
-) {
-	const key = `${toolIntentPrefix(runId)}${JSON.stringify([executionId, callId])}`;
-	if (storage.kv.get(key) !== undefined) {
-		return false;
-	}
-	storage.kv.put(key, true);
-	return true;
-}
-
 export function clearToolState(storage: DurableObjectStorage, runId: string) {
 	storage.kv.delete(toolActivityKey(runId));
-	for (const [key] of Array.from(storage.kv.list({ prefix: toolIntentPrefix(runId) }))) {
-		storage.kv.delete(key);
-	}
+	clearCodeModeRun(storage, runId);
 }
 
 export function readToolActivity(storage: DurableObjectStorage, runId: string) {

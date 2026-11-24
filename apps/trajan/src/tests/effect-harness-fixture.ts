@@ -1,8 +1,6 @@
-import { Workspace } from "@cloudflare/computer";
-import type { WorkspaceModuleFactory } from "@cloudflare/computer";
-import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
-import { createGitClient } from "@cloudflare/computer/git";
-import { createGitModule } from "@cloudflare/computer/modules/git";
+import { clearCodeModeRun } from "@trajan/code-mode";
+import type { CodeModeTool } from "@trajan/code-mode";
+import { createCodeModeFixture } from "./code-mode-fixture";
 import {
 	TurnIoError,
 	ToolResult,
@@ -12,15 +10,10 @@ import {
 } from "@trajan/effect-harness";
 import type { TurnMessage, TurnModelEvent } from "@trajan/effect-harness";
 import { Effect, Layer, Predicate, Schema, Stream } from "effect";
-import { RECENT_TOOL_CALLS, clearToolState } from "../effect-harness/tool-activity";
+import { clearToolState } from "../effect-harness/tool-activity";
 import { EffectHarnessObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
-import {
-	createObservedWorkspaceTools,
-	createTrajanWorkspace,
-	workspaceToolset,
-} from "../workspace";
-import type { WorkspaceToolBinding } from "../workspace";
+import { codeModeError, createTrajanWorkspace, workspaceToolset } from "../workspace";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
 type PausePoint =
@@ -28,10 +21,14 @@ type PausePoint =
 	| "after-write"
 	| "between-tools"
 	| "during-reply"
+	| "waiting-for-restart"
 	| "after-commit"
 	| "during-replay-read"
 	| "during-replay-edit"
-	| "during-replay-git";
+	| "during-replay-git"
+	| "code-mode-read"
+	| "code-mode-edit"
+	| "code-mode-branch";
 const workspaceFile = "/workspace/turn.txt";
 const replayPrompt = "Replay two reads.";
 const replayCall = "exec-replay";
@@ -39,27 +36,18 @@ const editReplayPrompt = "Recover an interrupted edit.";
 const editReplayCall = "exec-replay-edit";
 const gitReplayPrompt = "Recover interrupted Git branch creation.";
 const gitReplayCall = "exec-replay-git";
-const branchArgs = Schema.Struct({
-	argv: Schema.Tuple([Schema.Literal("branch"), Schema.Literal("replay-proof")]),
-});
-const isBranchCreation = Schema.is(branchArgs);
-const succeeded = Schema.is(Schema.Struct({ exitCode: Schema.Literal(0) }));
 export function appendExecInput(text: string) {
 	return {
 		code: `
-import fs from "node:fs/promises";
+import { read, write } from "codemode:tools";
 export default async function () {
-  await fs.mkdir("/workspace", { recursive: true });
   const path = ${JSON.stringify(workspaceFile)};
-  const previous = await fs.readFile(path, "utf8").catch((error) => {
-    if (error.code === "ENOENT") return "";
-    throw error;
-  });
-  const content = previous + ${JSON.stringify(text)};
-  await fs.writeFile(path, content);
+  const previous = await read({ path });
+  const content = (previous.isError ? "" : previous.text) + ${JSON.stringify(text)};
+  const result = await write({ path, content });
+  if (result.isError) throw new Error(result.text);
   return content;
-}
-`,
+}`,
 	};
 }
 
@@ -69,135 +57,99 @@ function isMissing(error: unknown): boolean {
 
 export class EffectHarnessTestObject extends EffectHarnessObject {
 	readonly #instance = crypto.randomUUID();
-	readonly #computer = createTrajanWorkspace(this.ctx.storage, this.env.LOADER);
-	readonly #effectTools = effectWorkspaceTools(this.#computer, this.ctx.storage);
-	#replayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
-	#editReplayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
-	#gitReplayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
+	readonly #workspace = createTrajanWorkspace(this.ctx.storage);
+	readonly #effectTools = this.#createTools();
+	readonly #codeMode = createCodeModeFixture(
+		this.#workspace,
+		this.ctx.storage,
+		this.env.LOADER,
+		(point, signal) => this.#pauseAt(point, signal),
+	);
 	protected override readonly toolCatalog = [this.#effectTools.declaration];
 
-	#createReplayTools(
-		access: "read" | "read-write",
-		bindings: ReadonlyArray<WorkspaceToolBinding>,
-		git?: WorkspaceModuleFactory,
-	) {
+	#createTools() {
+		const { catalog, instructions } = workspaceToolset(this.#workspace);
+		const files = catalog["codemode:tools"];
+		const git = catalog["codemode:git"];
 		const storage = this.ctx.storage;
-		const tools = createObservedWorkspaceTools(() => bindings);
-		const modules = { "codemode:tools": tools.tools };
-		const workspace = new Workspace({
-			storage,
-			git: git ? createGitClient() : undefined,
-			backends: [
-				new CodemodeBackend({
-					id: git ? "fixture-replay-git" : `fixture-replay-${access}`,
-					loader: this.env.LOADER,
-					root: "/workspace",
-					access,
-					onInterrupt: "replay",
-					modules: git ? { ...modules, "codemode:git": tools.git(git) } : modules,
-				}),
-			],
+		const pauseAfter = (tool: CodeModeTool, point: PausePoint): CodeModeTool => ({
+			...tool,
+			run: (input, context) =>
+				tool.run(input, context).pipe(
+					Effect.tap((value) =>
+						tool.isError?.(value)
+							? Effect.void
+							: Effect.tryPromise({
+									try: () => this.#pauseAt(point, context.signal),
+									catch: codeModeError,
+								}),
+					),
+				),
 		});
-		return effectWorkspaceTools(
-			{
-				workspace,
-				instructions: "Local replay fixture.",
-				observeExecution: tools.observeExecution,
-			},
-			storage,
-		);
-	}
-
-	#createReadReplayTools() {
-		const storage = this.ctx.storage;
-		return this.#createReplayTools(
-			"read",
-			(["first", "second"] as const).map((name) => ({
-				name: `read_${name}`,
-				readOnly: true,
-				replay: "safe",
-				call: async (_input, { callId, signal }) => {
-					const key = `replay-${name}`;
-					const calls = (await storage.get<Array<string>>(key)) ?? [];
-					// Store probe receipts in the host so the test can compare both attempts.
-					await storage.put(key, [...calls, callId]);
-					if (name === "second") {
-						await this.#pauseAt("during-replay-read", signal);
-					}
-					return { text: name, isError: false };
-				},
-			})),
-		);
-	}
-
-	#createEditReplayTools() {
-		const { bindings } = workspaceToolset(this.#computer.workspace);
-		return this.#createReplayTools(
-			"read-write",
-			bindings
-				.filter(({ name }) => name === "edit" || name === "read" || name === "write")
-				.map((binding) => ({
-					...binding,
-					call: async (input, context) => {
-						if (binding.name === "read") {
-							// Let the edit land before the reads fill the recent activity list.
-							while ((await this.#readWorkspaceText()) === "seed") {
-								context.signal.throwIfAborted();
-								await new Promise((resolve) => {
-									setTimeout(resolve, 10);
-								});
-							}
-						}
-						const result = await binding.call(input, context);
-						if (binding.name === "edit" && !result.isError) {
-							await this.#pauseAt("during-replay-edit", context.signal);
-						}
-						return result;
+		const read = (name: "first" | "second"): CodeModeTool => ({
+			replay: "safe",
+			run: Effect.fnUntraced(function* (
+				this: EffectHarnessTestObject,
+				_input: Schema.Json,
+				{ callId, signal }: Parameters<CodeModeTool["run"]>[1],
+			) {
+				const key = `replay-${name}`;
+				const calls = storage.kv.get<Array<string>>(key) ?? [];
+				storage.kv.put(key, [...calls, callId]);
+				if (name === "second") {
+					yield* Effect.tryPromise({
+						try: () => this.#pauseAt("during-replay-read", signal),
+						catch: codeModeError,
+					});
+				}
+				return name;
+			}).bind(this),
+		});
+		const branch = pauseAfter(git.branch, "during-replay-git");
+		return effectWorkspaceTools(this.env.LOADER, storage, {
+			instructions,
+			catalog: {
+				"codemode:tools": {
+					...files,
+					edit: pauseAfter(files.edit, "during-replay-edit"),
+					read_first: read("first"),
+					read_second: read("second"),
+					wait_for_restart: {
+						replay: "safe",
+						run: (_input, { callId, signal }) =>
+							Effect.tryPromise({
+								try: async () => {
+									const key = `fixture-wait:${callId}`;
+									if (!storage.kv.get(key)) {
+										storage.kv.put(key, true);
+										await storage.put("pausedAt", "waiting-for-restart");
+										signal.throwIfAborted();
+										await new Promise<void>((resolve) => {
+											signal.addEventListener("abort", () => resolve(), { once: true });
+										});
+										signal.throwIfAborted();
+									}
+									return null;
+								},
+								catch: codeModeError,
+							}),
 					},
-				})),
-		);
-	}
-
-	#createGitReplayTools() {
-		const git = createGitModule({ allowNetwork: false });
-		return this.#createReplayTools("read-write", [], (host) => {
-			const functions = git(host);
-			const cli = functions.cli;
-			if (!cli) {
-				throw new Error("The Computer Git module did not export cli.");
-			}
-			return {
-				...functions,
-				cli: async (args, context) => {
-					const isBranch = isBranchCreation(args[0]);
-					if (isBranch) {
-						const storage = this.ctx.storage.kv;
-						storage.put(
-							"git-branch-attempts",
-							(storage.get<number>("git-branch-attempts") ?? 0) + 1,
-						);
-					}
-					const result = await cli(args, context);
-					if (isBranch && succeeded(result)) {
-						await this.#pauseAt("during-replay-git", context.signal);
-					}
-					return result;
 				},
-			};
+				"codemode:git": {
+					...git,
+					branch: {
+						...branch,
+						run: (input, context) =>
+							Effect.sync(() => {
+								storage.kv.put(
+									"git-branch-attempts",
+									(storage.kv.get<number>("git-branch-attempts") ?? 0) + 1,
+								);
+							}).pipe(Effect.andThen(branch.run(input, context))),
+					},
+				},
+			},
 		});
-	}
-
-	#toolsFor(callId: string) {
-		switch (callId) {
-			case replayCall:
-				return (this.#replayTools ??= this.#createReadReplayTools());
-			case editReplayCall:
-				return (this.#editReplayTools ??= this.#createEditReplayTools());
-			case gitReplayCall:
-				return (this.#gitReplayTools ??= this.#createGitReplayTools());
-			default:
-				return this.#effectTools;
-		}
 	}
 
 	readonly #execute = Effect.fn("effect-harness.fixture.executeTool")(function* (
@@ -208,9 +160,9 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		if (call.id === "exec-interrupt") {
 			yield* Effect.promise(() => this.ctx.storage.put("executionId", attempt.idempotencyKey));
 		}
-		const result = yield* this.#toolsFor(call.id).service.execute(...args);
+		const result = yield* this.#effectTools.service.execute(...args);
 		if (result.status === "completed") {
-			// Pause after Computer settles while the turn's checkpoint is still open.
+			// Pause after Code Mode settles while the turn's checkpoint is still open.
 			yield* Effect.tryPromise({
 				try: (signal) => this.#pauseAt("after-write", signal, attempt.idempotencyKey),
 				catch: (cause) => new TurnIoError({ operation: call.name, cause }),
@@ -241,16 +193,8 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 				name: "exec",
 				input: {
 					code: `import { read_first, read_second } from "codemode:tools";
-import { writeFile } from "node:fs/promises";
 export default async function () {
-  const first = await read_first({});
-  const second = await read_second({});
-  const writeBlocked = await writeFile("/workspace/turn.txt", "blocked").then(
-    () => false,
-    (error) => String(error).includes("Workspace code write access is not available"),
-  );
-  if (first.isError || second.isError || !writeBlocked) throw new Error("Unexpected replay result");
-  return [first.text, second.text];
+  return [await read_first(), await read_second()];
 }`,
 				},
 			};
@@ -266,13 +210,19 @@ export default async function () {
   const path = ${JSON.stringify(workspaceFile)};
   const seed = await write({ path, content: "seed" });
   if (seed.isError) throw new Error(seed.text);
-  const pending = edit({ path, edits: [{ oldText: "seed", newText: "seed!" }] });
-  // Move the still-running edit out of the recent activity list.
-  for (let i = 0; i < ${RECENT_TOOL_CALLS}; i++) await read({ path });
-  const changed = await pending;
+  const before = await read({ path });
+  if (before.isError || before.text !== "seed") throw new Error("First read was not replayed");
+  let outcome = "completed";
+  try {
+    const changed = await edit({ path, edits: [{ oldText: "seed", newText: "seed!" }] });
+    if (changed.isError) throw new Error(changed.text);
+  } catch (error) {
+    if (error.code !== "interrupted") throw error;
+    outcome = error.code;
+  }
   const result = await read({ path });
   if (result.isError) throw new Error(result.text);
-  return { edit: changed.isError ? changed.details?.code : "completed", text: result.text };
+  return { edit: outcome, text: result.text };
 }`,
 				},
 			};
@@ -283,31 +233,22 @@ export default async function () {
 				id: gitReplayCall,
 				name: "exec",
 				input: {
-					code: `import { cli, status } from "codemode:git";
-import { mkdir, writeFile } from "node:fs/promises";
-const cwd = "/workspace";
-async function git(...argv) {
-  const result = await cli({ argv, cwd, env: {
-    GIT_AUTHOR_NAME: "Trajan fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid"
-  } });
-  if (result.exitCode !== 0) throw new Error(result.stderr);
-  return result.stdout;
-}
+					code: `import { init, add, commit, branch, branches, status } from "codemode:git";
+import { write } from "codemode:tools";
 export default async function () {
-  await mkdir(cwd, { recursive: true });
-  await writeFile(cwd + "/seed.txt", "seed");
-  await git("init");
-  await git("add", "seed.txt");
-  await git("commit", "-m", "Seed replay fixture");
+  await write({ path: "/workspace/seed.txt", content: "seed" });
+  await init();
+  await add({ paths: ["seed.txt"] });
+  await commit({ message: "Seed replay fixture", author: { name: "Trajan fixture", email: "fixture@example.invalid" } });
   let interrupted = false;
   try {
-    await git("branch", "replay-proof");
+    await branch({ name: "replay-proof" });
   } catch (error) {
-    if (!String(error).includes("This call was interrupted")) throw error;
+    if (error.code !== "interrupted") throw error;
     interrupted = true;
   }
-  const checkedStatus = Array.isArray(await status({ dir: cwd }));
-  const branchExists = (await git("branch")).includes("replay-proof");
+  const checkedStatus = Array.isArray(await status());
+  const branchExists = (await branches()).includes("replay-proof");
   return { interrupted, checkedStatus, branchExists };
 }`,
 				},
@@ -351,17 +292,15 @@ export default async function () {
 				id: "exec-interrupt",
 				name: "exec",
 				input: {
-					code: `import { readFile } from "node:fs/promises";
-import { write } from "codemode:tools";
+					code: `import { read, write, wait_for_restart } from "codemode:tools";
 export default async function () {
   const path = ${JSON.stringify(workspaceFile)};
-  const previous = await readFile(path, "utf8").catch((error) => {
-    if (error.code === "ENOENT") return "";
-    throw error;
-  });
-  const result = await write({ path, content: previous + "once" });
+  const previous = await read({ path });
+  const content = (previous.isError ? "" : previous.text) + "once";
+  const result = await write({ path, content });
   if (result.isError) throw new Error(result.text);
-  await new Promise((resolve) => setTimeout(resolve, 45_000));
+  await wait_for_restart();
+  return content;
 }`,
 				},
 			};
@@ -479,7 +418,7 @@ export default async function () {
 	}
 
 	#readWorkspaceText() {
-		return this.#computer.workspace.fs.readFile(workspaceFile, "utf8").catch((error: unknown) => {
+		return this.#workspace.fs.readFile(workspaceFile, "utf8").catch((error: unknown) => {
 			if (isMissing(error)) {
 				return "";
 			}
@@ -502,10 +441,34 @@ export default async function () {
 		return { first: first ?? [], second: second ?? [] };
 	}
 
+	seedCodeMode() {
+		return this.#codeMode.seed();
+	}
+
+	runCodeMode(id: string, source: string) {
+		return Effect.runPromise(
+			this.#codeMode.run(id, source).pipe(
+				Effect.match({
+					onFailure: ({ message }) => ({ error: message }),
+					onSuccess: (value) => ({ value }),
+				}),
+			),
+		);
+	}
+
+	codeModeState() {
+		return { instance: this.#instance, ...this.#codeMode.state() };
+	}
+
 	workspaceTool(name: string, input: Schema.Json, recovering = false): Promise<string> {
 		const runId = crypto.randomUUID();
+		const tools = effectWorkspaceTools(
+			this.env.LOADER,
+			this.ctx.storage,
+			workspaceToolset(this.#workspace),
+		);
 		return Effect.runPromise(
-			this.#effectTools.service
+			tools.service
 				.execute(
 					{ role: "tool-call", id: "test-call", name, input },
 					{ runId, idempotencyKey: runId, recovering },
@@ -542,13 +505,8 @@ export default async function () {
 		return this.ctx.storage.delete("pause");
 	}
 
-	discardExecution(id: string) {
-		return this.#computer.workspace.runtime.disposeExec(id);
-	}
-
-	async executionStatus(id: string) {
-		using handle = await this.#computer.workspace.runtime.getExec(id);
-		return (await handle.result()).status;
+	discardExecution(runId: string) {
+		clearCodeModeRun(this.ctx.storage, runId);
 	}
 
 	crash() {
