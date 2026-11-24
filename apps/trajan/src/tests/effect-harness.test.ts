@@ -19,8 +19,8 @@ function openFixture() {
 	return env.EFFECT_HARNESS_TEST.getByName(crypto.randomUUID());
 }
 
-async function submit(stub: ReturnType<typeof openFixture>) {
-	const receipt = await stub.submit(submission);
+async function submit(stub: ReturnType<typeof openFixture>, input = submission) {
+	const receipt = await stub.submit(input);
 	if (receipt.runId === null) throw new Error(receipt.error);
 	return receipt;
 }
@@ -84,7 +84,7 @@ test.each([
 	},
 ])("$name", async ({ discardExecution, toolResult, reply }) => {
 	let stub = openFixture();
-	await stub.pause();
+	await stub.pause("after-write");
 	const { runId } = await submit(stub);
 	await expect
 		.poll(() => stub.state(), { timeout: 5000 })
@@ -121,4 +121,48 @@ test.each([
 		});
 	expect(await stub.submit(submission)).toMatchObject({ runId, accepted: false });
 	expect(await stub.state()).toMatchObject({ text: "hello" });
+});
+
+test("a restart between tool calls reuses the first result and still executes the second call", async () => {
+	const input = { id: "multi-tool", prompt: "Append hello, then world." };
+	let stub = openFixture();
+	await stub.pause("between-tools");
+	const { runId } = await submit(stub, input);
+	await expect
+		.poll(() => stub.state(), { timeout: 5000 })
+		.toMatchObject({
+			pausedAt: "between-tools",
+			text: "hello",
+		});
+	const { instance } = await stub.state();
+	expect(await stub.turn(runId)).toMatchObject({ state: "running" });
+
+	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
+	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	expect((await stub.state()).instance).not.toBe(instance);
+	await stub.release();
+	await runDurableObjectAlarm(stub);
+
+	await expect
+		.poll(() => readTurn(stub, runId), { timeout: 5000 })
+		.toMatchObject({
+			state: "completed",
+			result: {
+				submissionId: input.id,
+				messages: [
+					{ role: "user", text: input.prompt },
+					toolCall,
+					{ role: "tool", callId: toolCall.id, result: completedTool },
+					{ role: "tool-call", id: "append-2", name: "append", input: { text: " world" } },
+					{
+						role: "tool",
+						callId: "append-2",
+						result: { status: "completed", output: "hello world" },
+					},
+					{ role: "assistant", text: 'Wrote "hello world"' },
+				],
+			},
+		});
+	expect(await stub.submit(input)).toMatchObject({ runId, accepted: false });
+	expect(await stub.state()).toMatchObject({ text: "hello world" });
 });

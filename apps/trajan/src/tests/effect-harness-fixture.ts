@@ -16,6 +16,8 @@ import { Effect, Schema } from "effect";
 import { workersAiTurnModel } from "../effect-harness/workers-ai";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
+const turnDefinition = "turn@v2";
+type PausePoint = "after-write" | "between-tools";
 const workspaceFile = "/workspace/turn.txt";
 const appendInput = Schema.Struct({ text: Schema.NonEmptyString });
 const appendTool = {
@@ -70,29 +72,6 @@ function isMissing(error: unknown): boolean {
 	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
-const fakeModel = TurnModel.of({
-	complete: (messages) =>
-		Effect.sync(() => {
-			const last = messages.at(-1);
-			if (last?.role === "tool") {
-				const { result } = last;
-				return {
-					role: "assistant",
-					text:
-						result.status === "completed"
-							? `Wrote ${JSON.stringify(result.output)}`
-							: result.message,
-				};
-			}
-			return {
-				role: "tool-call",
-				id: "append-1",
-				name: appendTool.name,
-				input: { text: last?.role === "user" ? last.text : "" },
-			};
-		}),
-});
-
 export class EffectHarnessTestObject extends DurableObject<Env> {
 	readonly #instance = crypto.randomUUID();
 	readonly #workspace = new Workspace({
@@ -123,13 +102,7 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 								return { status: recovering ? "unknown" : "failed", message: result.stderr };
 							}
 							// Pause after Computer commits, while the Task's tool checkpoint is still open.
-							if (await this.ctx.storage.get("pause")) {
-								await this.ctx.storage.put("executionId", idempotencyKey);
-								while (await this.ctx.storage.get("pause")) {
-									signal.throwIfAborted();
-									await new Promise((resolve) => setTimeout(resolve, 10));
-								}
-							}
+							await this.#pauseAt("after-write", signal, idempotencyKey);
 							return { status: "completed", output: result.value ?? null };
 						} catch (error) {
 							// A pruned execution ID can be started again. Recovery only reattaches.
@@ -143,12 +116,48 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 				});
 			}),
 	});
+	readonly #fakeModel = TurnModel.of({
+		complete: (messages) =>
+			Effect.gen({ self: this }, function* () {
+				const first = messages[0];
+				const last = messages.at(-1);
+				const appendTwice = first?.role === "user" && first.text === "Append hello, then world.";
+				if (last?.role === "tool") {
+					if (appendTwice && last.callId === "append-1") {
+						yield* Effect.tryPromise({
+							try: (signal) => this.#pauseAt("between-tools", signal),
+							catch: (cause) => new TurnIoError({ operation: "pause between tools", cause }),
+						});
+						return {
+							role: "tool-call",
+							id: "append-2",
+							name: appendTool.name,
+							input: { text: " world" },
+						};
+					}
+					const { result } = last;
+					return {
+						role: "assistant",
+						text:
+							result.status === "completed"
+								? `Wrote ${JSON.stringify(result.output)}`
+								: result.message,
+					};
+				}
+				return {
+					role: "tool-call",
+					id: "append-1",
+					name: appendTool.name,
+					input: { text: appendTwice ? "hello" : first?.role === "user" ? first.text : "" },
+				};
+			}),
+	});
 	readonly #model = this.env.EFFECT_HARNESS_AI
 		? workersAiTurnModel(this.env.EFFECT_HARNESS_AI, appendTool)
-		: fakeModel;
+		: this.#fakeModel;
 	readonly #tasks = new Tasks({
 		definitions: {
-			"turn@v1": (input: typeof TurnSubmission.Type, step: TaskStep) =>
+			[turnDefinition]: (input: typeof TurnSubmission.Type, step: TaskStep) =>
 				Effect.runPromise(
 					runTurn(input, taskJournal(step)).pipe(
 						Effect.provideService(TurnModel, this.#model),
@@ -165,7 +174,8 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 			Schema.decodeUnknownEffect(TurnSubmission)(input).pipe(
 				Effect.flatMap((submission) =>
 					Effect.tryPromise({
-						try: () => this.#tasks.run("turn@v1", submission, { idempotencyKey: submission.id }),
+						try: () =>
+							this.#tasks.run(turnDefinition, submission, { idempotencyKey: submission.id }),
 						catch: (cause) => new TurnIoError({ operation: "submit", cause }),
 					}),
 				),
@@ -177,7 +187,7 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 	}
 
 	async turn(runId: string) {
-		const run = await this.#tasks.handle("turn@v1").get(runId);
+		const run = await this.#tasks.handle(turnDefinition).get(runId);
 		return {
 			state: run?.state ?? "missing",
 			transcript: run?.state === "completed" ? run.result : null,
@@ -187,17 +197,30 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 
 	async state() {
 		const executionId = await this.ctx.storage.get<string>("executionId");
+		const pausedAt = await this.ctx.storage.get<PausePoint>("pausedAt");
 		const text = await this.#workspace.fs
 			.readFile(workspaceFile, "utf8")
 			.catch((error: unknown) => {
 				if (isMissing(error)) return "";
 				throw error;
 			});
-		return { instance: this.#instance, executionId, text };
+		return { instance: this.#instance, executionId, pausedAt, text };
 	}
 
-	pause() {
-		return this.ctx.storage.put("pause", true);
+	async #pauseAt(point: PausePoint, signal: AbortSignal, executionId?: string) {
+		if ((await this.ctx.storage.get("pause")) !== point) return;
+		await this.ctx.storage.put({
+			pausedAt: point,
+			...(executionId === undefined ? {} : { executionId }),
+		});
+		while ((await this.ctx.storage.get("pause")) === point) {
+			signal.throwIfAborted();
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+
+	pause(point: PausePoint) {
+		return this.ctx.storage.put("pause", point);
 	}
 
 	release() {

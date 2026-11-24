@@ -35,10 +35,18 @@ const ToolMessage = Schema.Struct({
 });
 
 const Message = Schema.Union([UserMessage, Reply, ToolCall, ToolMessage]);
-const ModelResponse = Schema.Union([
-	Reply,
-	Schema.Struct({ ...ToolCall.fields, continuation: Schema.optionalKey(Schema.Json) }),
-]);
+const ModelToolCall = Schema.Struct({
+	...ToolCall.fields,
+	// Adapter context belongs to the checkpointed model response.
+	continuation: Schema.optionalKey(Schema.Json),
+});
+const ModelResponse = Schema.Union([Reply, ModelToolCall]);
+
+type ModelHistoryEntry =
+	| typeof UserMessage.Type
+	| typeof ModelToolCall.Type
+	| typeof ToolMessage.Type;
+const MAX_TOOL_CALLS = 8;
 
 export const TurnTranscript = Schema.Struct({
 	submissionId: Schema.NonEmptyString,
@@ -72,9 +80,8 @@ export class TurnModel extends Context.Service<
 	TurnModel,
 	{
 		readonly complete: (
-			messages: ReadonlyArray<typeof Message.Type>,
-			/** Adapter context from the checkpointed model response that requested the tool. */
-			continuation?: Schema.Json,
+			messages: ReadonlyArray<ModelHistoryEntry>,
+			options: { readonly allowTools: boolean },
 		) => Effect.Effect<unknown, TurnIoError>;
 	}
 >()("@trajan/effect-harness/TurnModel") {}
@@ -89,35 +96,35 @@ export class TurnTools extends Context.Service<
 	}
 >()("@trajan/effect-harness/TurnTools") {}
 
-/** Run one turn through a direct reply or a single tool call followed by a reply. */
+/** Run a turn until the model replies, with a checkpoint for each decision and tool result. */
 export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 	submission: typeof TurnSubmission.Type,
 	journal: TurnJournal,
 ) {
 	const model = yield* TurnModel;
-	const prompt = { role: "user", text: submission.prompt } satisfies typeof UserMessage.Type;
-	const initial = yield* journal.checkpoint("initial-model", ModelResponse, () =>
-		model.complete([prompt]),
-	);
-
-	if (initial.role === "assistant") {
-		return { submissionId: submission.id, messages: [prompt, initial] };
-	}
-
-	const { continuation, ...call } = initial;
 	const tools = yield* TurnTools;
-	const result = yield* journal.checkpoint("tool", ToolResult, (attempt) =>
-		tools.execute(call, attempt),
-	);
-	const toolMessage = {
-		role: "tool",
-		callId: call.id,
-		result,
-	} satisfies typeof ToolMessage.Type;
-	const history = [prompt, call, toolMessage];
-	const reply = yield* journal.checkpoint("final-model", Reply, () =>
-		model.complete(history, continuation),
-	);
+	const history: ModelHistoryEntry[] = [{ role: "user", text: submission.prompt }];
 
-	return { submissionId: submission.id, messages: [...history, reply] };
+	for (let index = 0; ; index++) {
+		const allowTools = index < MAX_TOOL_CALLS;
+		const decision = yield* journal.checkpoint(
+			`model:${index}`,
+			allowTools ? ModelResponse : Reply,
+			() => model.complete([...history], { allowTools }),
+		);
+
+		if (decision.role === "assistant") {
+			// Project the transcript without adapter continuation data.
+			return yield* Schema.decodeEffect(TurnTranscript)({
+				submissionId: submission.id,
+				messages: [...history, decision],
+			});
+		}
+
+		const { continuation: _continuation, ...call } = decision;
+		const result = yield* journal.checkpoint(`tool:${index}`, ToolResult, (attempt) =>
+			tools.execute(call, attempt),
+		);
+		history.push(decision, { role: "tool", callId: call.id, result });
+	}
 });

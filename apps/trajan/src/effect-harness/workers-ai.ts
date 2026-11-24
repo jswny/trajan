@@ -43,55 +43,68 @@ export function workersAiTurnModel(binding: Env["AI"], tool: Tool) {
 	const ai = createAI({ binding });
 	const model = ai(MODEL_ID);
 	return TurnModel.of({
-		complete: (messages, continuation) =>
+		complete: (messages, { allowTools }) =>
 			Effect.gen(function* () {
-				const [user, call, outcome] = messages;
-				if (user?.role !== "user") {
-					return yield* modelFailure("The turn must start with a user message.");
-				}
-
 				const timestamp = Date.now();
-				const context: Message[] = [{ role: "user", content: user.text, timestamp }];
-				const followUp = call?.role === "tool-call" && outcome?.role === "tool";
-				if (followUp) {
-					// Carry DeepSeek's reasoning through the tool-result request.
-					const content = yield* Schema.decodeUnknownEffect(AssistantContext)(continuation).pipe(
-						Effect.mapError(modelFailure),
-					);
-					const args = yield* Schema.decodeUnknownEffect(Schema.JsonObject)(call.input).pipe(
-						Effect.mapError(modelFailure),
-					);
-					context.push(
-						{
-							role: "assistant",
-							api: model.api,
-							provider: model.provider,
-							model: model.id,
-							content: [
-								...content,
-								{ type: "toolCall", id: call.id, name: call.name, arguments: args },
-							],
-							stopReason: "toolUse",
-							usage: emptyUsage,
-							timestamp,
-						},
-						{
-							role: "toolResult",
-							toolCallId: outcome.callId,
-							toolName: call.name,
-							content: [
-								{
-									type: "text",
-									text:
-										outcome.result.status === "completed"
-											? JSON.stringify(outcome.result.output)
-											: outcome.result.message,
-								},
-							],
-							isError: outcome.result.status !== "completed",
-							timestamp,
-						},
-					);
+				const context: Message[] = [];
+				let pendingCall: { id: string; name: string } | undefined;
+
+				for (const message of messages) {
+					switch (message.role) {
+						case "user":
+							context.push({ role: "user", content: message.text, timestamp });
+							break;
+						case "tool-call": {
+							// Each tool request carries its own DeepSeek reasoning history.
+							const content = yield* Schema.decodeUnknownEffect(AssistantContext)(
+								message.continuation,
+							).pipe(Effect.mapError(modelFailure));
+							const args = yield* Schema.decodeUnknownEffect(Schema.JsonObject)(message.input).pipe(
+								Effect.mapError(modelFailure),
+							);
+							context.push({
+								role: "assistant",
+								api: model.api,
+								provider: model.provider,
+								model: model.id,
+								content: [
+									...content,
+									{ type: "toolCall", id: message.id, name: message.name, arguments: args },
+								],
+								stopReason: "toolUse",
+								usage: emptyUsage,
+								timestamp,
+							});
+							pendingCall = { id: message.id, name: message.name };
+							break;
+						}
+						case "tool": {
+							if (pendingCall?.id !== message.callId) {
+								return yield* modelFailure(
+									"The tool result did not match the preceding tool call.",
+								);
+							}
+							const result = message.result;
+							context.push({
+								role: "toolResult",
+								toolCallId: message.callId,
+								toolName: pendingCall.name,
+								content: [
+									{
+										type: "text",
+										text:
+											result.status === "completed"
+												? JSON.stringify(result.output)
+												: result.message,
+									},
+								],
+								isError: result.status !== "completed",
+								timestamp,
+							});
+							pendingCall = undefined;
+							break;
+						}
+					}
 				}
 
 				const response = yield* Effect.tryPromise({
@@ -101,7 +114,7 @@ export function workersAiTurnModel(binding: Env["AI"], tool: Tool) {
 							{ messages: context, tools: [tool] },
 							{
 								reasoning: "low",
-								toolChoice: followUp ? "none" : "auto",
+								toolChoice: allowTools ? "auto" : "none",
 								samplingParams: { parallel_tool_calls: false },
 								signal,
 							},
@@ -118,7 +131,7 @@ export function workersAiTurnModel(binding: Env["AI"], tool: Tool) {
 					return yield* modelFailure("The model returned an empty reply.");
 				}
 
-				if (response.stopReason === "toolUse" && !followUp) {
+				if (response.stopReason === "toolUse" && allowTools) {
 					const calls = response.content.filter((part) => part.type === "toolCall");
 					const [next] = calls;
 					if (calls.length === 1 && next.name === tool.name && !next.argumentsError) {
