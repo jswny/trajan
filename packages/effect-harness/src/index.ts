@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Schema } from "effect";
+import { Context, Effect, Schema } from "effect";
 
 export const TurnSubmission = Schema.Struct({
 	id: Schema.NonEmptyString,
@@ -22,7 +22,7 @@ const ToolCall = Schema.Struct({
 	input: Schema.Json,
 });
 
-const ToolResult = Schema.Union([
+export const ToolResult = Schema.Union([
 	Schema.Struct({ status: Schema.Literal("completed"), output: Schema.Json }),
 	Schema.Struct({ status: Schema.Literal("failed"), message: Schema.String }),
 	Schema.Struct({ status: Schema.Literal("unknown"), message: Schema.String }),
@@ -54,13 +54,18 @@ export const TurnTranscript = Schema.Struct({
 	messages: Schema.Array(TurnMessage),
 });
 
-export class TurnIoError extends Data.TaggedError("TurnIoError")<{
-	readonly operation: string;
-	readonly cause: unknown;
-	readonly message?: string;
-}> {}
+export class TurnIoError extends Schema.TaggedError<TurnIoError>()("TurnIoError", {
+	operation: Schema.String,
+	cause: Schema.Defect(),
+	message: Schema.optionalKey(Schema.String),
+}) {}
 
-type TurnError = TurnIoError | Schema.SchemaError;
+export class TurnModelError extends Schema.TaggedError<TurnModelError>()("TurnModelError", {
+	message: Schema.String,
+	cause: Schema.optionalKey(Schema.Defect()),
+}) {}
+
+type TurnError = TurnIoError | TurnModelError | Schema.SchemaError;
 
 export interface StepAttempt {
 	readonly idempotencyKey: string;
@@ -83,7 +88,7 @@ export class TurnModel extends Context.Service<
 		readonly complete: (
 			messages: ReadonlyArray<ModelHistoryEntry>,
 			options: { readonly allowTools: boolean },
-		) => Effect.Effect<unknown, TurnIoError>;
+		) => Effect.Effect<unknown, TurnModelError>;
 	}
 >()("@trajan/effect-harness/TurnModel") {}
 

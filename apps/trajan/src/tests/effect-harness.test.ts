@@ -69,6 +69,26 @@ test("validates a submission before it can start a task", async () => {
 	expect(await stub.state()).toMatchObject({ text: "" });
 });
 
+test("returns invalid tool arguments to the model without writing to the workspace", async () => {
+	const stub = openFixture();
+	const { runId } = await submit(stub, { id: "bad-append", prompt: "Call append without text." });
+	const message = "Invalid append arguments. Provide a non-empty text string.";
+	await expect
+		.poll(() => readTurn(stub, runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: "Call append without text." },
+					{ role: "tool-call", name: "append", input: { text: "" } },
+					{ role: "tool", callId: "append-1", result: { status: "failed", message } },
+					{ role: "assistant", text: message },
+				],
+			},
+		});
+	expect(await stub.state()).toMatchObject({ text: "" });
+});
+
 test.each([
 	{
 		name: "reattaches to the completed tool after a restart before its checkpoint",
@@ -284,7 +304,7 @@ test("keeps a large exchange in history when it falls outside the model's contex
 });
 
 test("settles a failed model turn and proceeds to the next queued submission", async () => {
-	const stub = openFixture();
+	let stub = openFixture();
 	const first = await submit(stub, { id: "fail", prompt: "Fail this turn." });
 	const second = await submit(stub, remember("a later submission"));
 
@@ -293,11 +313,18 @@ test("settles a failed model turn and proceeds to the next queued submission", a
 		.toMatchObject({
 			state: "failed",
 			error: "The fixture model failed.",
+			failure: { code: "model", message: "The fixture model failed." },
 			transcript: null,
 		});
 	await expect
 		.poll(() => stub.turn(second.runId), { timeout: 5000 })
 		.toMatchObject({ state: "completed" });
+	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
+	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	expect(await stub.turn(first.runId)).toMatchObject({
+		state: "failed",
+		failure: { code: "model", message: "The fixture model failed." },
+	});
 	expect(await stub.history({})).toMatchObject({
 		entries: [{ submissionId: "remember" }, { submissionId: "remember" }],
 	});

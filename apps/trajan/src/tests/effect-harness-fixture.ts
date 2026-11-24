@@ -1,33 +1,37 @@
-import { DurableObject } from "cloudflare:workers";
 import { Workspace } from "@cloudflare/computer";
 import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import {
-	runTurn,
 	TurnIoError,
-	type TurnJournal,
+	type StepAttempt,
+	ToolResult,
 	TurnMessage,
 	TurnModel,
-	TurnSubmission,
+	TurnModelError,
 	TurnTools,
 	TurnTranscript,
 } from "@trajan/effect-harness";
-import { Lifecycle, type LifecycleJobContext, type LifecycleJobOutcome } from "agents/lifecycle";
-import { Tasks, type TaskStep } from "agents/tasks";
-import { Effect, Schema } from "effect";
-import { ConversationStore, HistoryQuery } from "../effect-harness/conversation-store";
+import { Context, Effect, Layer, Option, Predicate, Schema, Stream } from "effect";
+import { Tool, Toolkit } from "effect/ai";
+import { HistoryQuery } from "../effect-harness/conversation-store";
+import { EffectHarnessObject } from "../effect-harness/worker-host";
 import { workersAiTurnModel } from "../effect-harness/workers-ai";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
-const turnDefinition = "turn@v3";
-const inboxJob = "effect-harness-inbox";
 type PausePoint = "before-task" | "after-write" | "between-tools" | "after-commit";
 const workspaceFile = "/workspace/turn.txt";
-const appendInput = Schema.Struct({ text: Schema.NonEmptyString });
-const appendTool = {
-	name: "append",
-	description: "Append text to the fixture workspace file and return its full contents.",
-	parameters: Schema.toJsonSchemaDocument(appendInput).schema,
-};
+class AppendAttempt extends Context.Service<AppendAttempt, StepAttempt>()(
+	"trajan/fixture/AppendAttempt",
+) {}
+
+const appendDescription = "Append text to the fixture workspace file and return its full contents.";
+const Append = Tool.make("append", {
+	description: appendDescription,
+	parameters: Schema.Struct({ text: Schema.NonEmptyString }),
+	success: ToolResult,
+	failure: TurnIoError,
+	dependencies: [AppendAttempt],
+});
+const AppendToolkit = Toolkit.make(Append);
 
 const appendScript = `
 import fs from "node:fs/promises";
@@ -47,270 +51,161 @@ export default async function (text) {
 const transcriptJson = Schema.fromJsonString(TurnTranscript);
 const messageJson = Schema.fromJsonString(TurnMessage);
 
-function conversationEffect<A>(operation: string, run: () => A) {
-	return Effect.try({ try: run, catch: (cause) => new TurnIoError({ operation, cause }) });
-}
-
-function taskJournal(step: TaskStep): TurnJournal {
-	return {
-		checkpoint(name, result, run) {
-			const checkpointJson = Schema.fromJsonString(result);
-			return Effect.tryPromise({
-				try: () =>
-					step.do(name, { retries: { limit: 1 } }, ({ attempt, idempotencyKey, signal }) =>
-						Effect.runPromise(
-							run({
-								idempotencyKey,
-								recovering: step.interrupted?.name === name || attempt > 1,
-							}).pipe(
-								Effect.flatMap(Schema.decodeUnknownEffect(result)),
-								Effect.flatMap(Schema.encodeEffect(checkpointJson)),
-							),
-							{ signal },
-						),
-					),
-				catch: (cause) =>
-					cause instanceof TurnIoError ? cause : new TurnIoError({ operation: name, cause }),
-			}).pipe(Effect.flatMap(Schema.decodeEffect(checkpointJson)));
-		},
-	};
-}
-
 function isMissing(error: unknown): boolean {
-	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+	return Predicate.hasProperty(error, "code") && error.code === "ENOENT";
 }
 
-export class EffectHarnessTestObject extends DurableObject<Env> {
+export class EffectHarnessTestObject extends EffectHarnessObject {
 	readonly #instance = crypto.randomUUID();
-	readonly #conversation = new ConversationStore(this.ctx.storage);
 	readonly #workspace = new Workspace({
 		storage: this.ctx.storage,
 		backends: [new CodemodeBackend({ loader: this.env.LOADER })],
 	});
-	readonly #tools = TurnTools.of({
-		execute: ({ input, name }, { idempotencyKey, recovering }) =>
-			Effect.gen({ self: this }, function* () {
-				if (name !== appendTool.name) {
-					return { status: "failed", message: "Unknown fixture tool" };
-				}
-				const { text } = yield* Schema.decodeUnknownEffect(appendInput)(input);
-				return yield* Effect.tryPromise({
-					try: async (signal) => {
-						const runtime = this.#workspace.runtime;
-						try {
-							using handle = recovering
-								? await runtime.getExec(idempotencyKey, { encoding: "utf8" })
-								: await runtime.exec(appendScript, {
-										id: idempotencyKey,
-										input: text,
-										onInterrupt: "fail",
-										encoding: "utf8",
-									});
-							const result = await handle.result();
-							if (result.status !== "completed") {
-								return { status: recovering ? "unknown" : "failed", message: result.stderr };
-							}
-							// Pause after Computer commits, while the Task's tool checkpoint is still open.
-							await this.#pauseAt("after-write", signal, idempotencyKey);
-							return { status: "completed", output: result.value ?? null };
-						} catch (error) {
-							// A pruned execution ID can be started again. Recovery only reattaches.
-							if (recovering && isMissing(error)) {
-								return { status: "unknown", message: "The previous tool outcome is unknown." };
-							}
-							throw error;
-						}
-					},
-					catch: (cause) => new TurnIoError({ operation: name, cause }),
-				});
-			}),
-	});
-	readonly #fakeModel = TurnModel.of({
-		complete: (messages) =>
-			Effect.gen({ self: this }, function* () {
-				const user = messages.findLast((message) => message.role === "user");
-				const last = messages.at(-1);
-				const appendTwice = user?.text === "Append hello, then world.";
-				if (last?.role === "user" && last.text === "Fail this turn.") {
-					return yield* new TurnIoError({
-						operation: "fixture model",
-						cause: null,
-						message: "The fixture model failed.",
-					});
-				}
-				if (last?.role === "user" && last.text.startsWith("Remember ")) {
-					return { role: "assistant", text: `Remembering ${last.text.slice("Remember ".length)}` };
-				}
-				if (last?.role === "user" && last.text === "What did I ask you to remember?") {
-					const memory = messages.findLast(
-						(message) => message.role === "assistant" && message.text.startsWith("Remembering "),
-					);
-					return {
-						role: "assistant",
-						text:
-							memory?.role === "assistant"
-								? memory.text.slice("Remembering ".length)
-								: "I don't know.",
-					};
-				}
-				if (last?.role === "tool") {
-					if (appendTwice && last.callId === "append-1") {
-						yield* Effect.tryPromise({
-							try: (signal) => this.#pauseAt("between-tools", signal),
-							catch: (cause) => new TurnIoError({ operation: "pause between tools", cause }),
-						});
-						return {
-							role: "tool-call",
-							id: "append-2",
-							name: appendTool.name,
-							input: { text: " world" },
-						};
+	readonly #append = Effect.fn("effect-harness.fixture.append")(function* (
+		this: EffectHarnessTestObject,
+		{ text }: { text: string },
+	): Effect.fn.Return<typeof ToolResult.Type, TurnIoError, AppendAttempt> {
+		const { idempotencyKey, recovering } = yield* AppendAttempt;
+		return yield* Effect.tryPromise({
+			try: async (signal): Promise<typeof ToolResult.Type> => {
+				const runtime = this.#workspace.runtime;
+				try {
+					using handle = recovering
+						? await runtime.getExec(idempotencyKey, { encoding: "utf8" })
+						: await runtime.exec(appendScript, {
+								id: idempotencyKey,
+								input: text,
+								onInterrupt: "fail",
+								encoding: "utf8",
+							});
+					const result = await handle.result();
+					if (result.status !== "completed") {
+						return { status: recovering ? "unknown" : "failed", message: result.stderr };
 					}
-					const { result } = last;
-					return {
-						role: "assistant",
-						text:
-							result.status === "completed"
-								? `Wrote ${JSON.stringify(result.output)}`
-								: result.message,
-					};
+					// Pause after Computer commits, while the Task's tool checkpoint is still open.
+					await this.#pauseAt("after-write", signal, idempotencyKey);
+					return { status: "completed", output: result.value ?? null };
+				} catch (error) {
+					// A pruned execution ID can be started again. Recovery only reattaches.
+					if (recovering && isMissing(error)) {
+						return { status: "unknown", message: "The previous tool outcome is unknown." };
+					}
+					throw error;
 				}
+			},
+			catch: (cause) => new TurnIoError({ operation: Append.name, cause }),
+		});
+	});
+
+	readonly #toolsLayer = Layer.effect(
+		TurnTools,
+		Effect.gen(function* () {
+			const toolkit = yield* AppendToolkit;
+			return TurnTools.of({
+				execute: Effect.fn("effect-harness.fixture.executeTool")(function* (call, attempt) {
+					if (call.name !== Append.name) {
+						return { status: "failed", message: "Unknown fixture tool" };
+					}
+					const result = yield* toolkit.handle(Append.name, call.input, call.id).pipe(
+						Effect.flatMap(Stream.runLast),
+						Effect.flatMap((last) =>
+							Option.isSome(last)
+								? Effect.succeed(last.value.result)
+								: Effect.fail(
+										new TurnIoError({ operation: Append.name, cause: "Missing tool result" }),
+									),
+						),
+						Effect.provideService(AppendAttempt, attempt),
+						Effect.catchTag("AiError", (error) =>
+							error.reason._tag === "ToolParameterValidationError"
+								? Effect.succeed({
+										status: "failed" as const,
+										message: "Invalid append arguments. Provide a non-empty text string.",
+									})
+								: Effect.fail(new TurnIoError({ operation: Append.name, cause: error })),
+						),
+					);
+					return result;
+				}),
+			});
+		}),
+	).pipe(Layer.provide(AppendToolkit.toLayer({ append: (input) => this.#append(input) })));
+
+	readonly #fakeComplete = Effect.fnUntraced(function* (
+		this: EffectHarnessTestObject,
+		messages: Parameters<TurnModel["Service"]["complete"]>[0],
+	): Effect.fn.Return<unknown, TurnModelError> {
+		const user = messages.findLast((message) => message.role === "user");
+		const last = messages.at(-1);
+		const appendTwice = user?.text === "Append hello, then world.";
+		if (last?.role === "user" && last.text === "Fail this turn.") {
+			return yield* new TurnModelError({
+				message: "The fixture model failed.",
+			});
+		}
+		if (last?.role === "user" && last.text.startsWith("Remember ")) {
+			return { role: "assistant", text: `Remembering ${last.text.slice("Remember ".length)}` };
+		}
+		if (last?.role === "user" && last.text === "What did I ask you to remember?") {
+			const memory = messages.findLast(
+				(message) => message.role === "assistant" && message.text.startsWith("Remembering "),
+			);
+			return {
+				role: "assistant",
+				text:
+					memory?.role === "assistant" ? memory.text.slice("Remembering ".length) : "I don't know.",
+			};
+		}
+		if (last?.role === "tool") {
+			if (appendTwice && last.callId === "append-1") {
+				yield* Effect.tryPromise({
+					try: (signal) => this.#pauseAt("between-tools", signal),
+					catch: (cause) => new TurnModelError({ message: "Fixture model pause failed.", cause }),
+				});
 				return {
 					role: "tool-call",
-					id: "append-1",
-					name: appendTool.name,
-					input: { text: appendTwice ? "hello" : (user?.text ?? "") },
+					id: "append-2",
+					name: Append.name,
+					input: { text: " world" },
 				};
-			}),
-	});
-	readonly #model = this.env.EFFECT_HARNESS_AI
-		? workersAiTurnModel(this.env.EFFECT_HARNESS_AI, appendTool)
-		: this.#fakeModel;
-	readonly #tasks = new Tasks({
-		onError: () => this.#wakeInbox(),
-		definitions: {
-			[turnDefinition]: ({ runId }: { runId: string }, step: TaskStep) =>
-				Effect.runPromise(
-					this.#runSubmission(runId, step).pipe(
-						Effect.provideService(TurnModel, this.#model),
-						Effect.provideService(TurnTools, this.#tools),
-					),
-				),
-		},
-	});
-	readonly lifecycle = Lifecycle.install(this).use(this.#tasks);
-
-	async onStart() {
-		this.#conversation.initialize();
-		if (this.#conversation.head() && !this.lifecycle.jobs.get(inboxJob)) {
-			await this.#wakeInbox();
-		}
-	}
-
-	async #wakeInbox() {
-		await this.lifecycle.jobs.push({ id: inboxJob, fn: inboxJob, time: Date.now() });
-	}
-
-	async onJob({ job }: LifecycleJobContext): Promise<LifecycleJobOutcome> {
-		if (job.fn !== inboxJob) return;
-		return Effect.runPromise(
-			Effect.tryPromise({
-				try: async (signal) => {
-					const head = this.#conversation.head();
-					if (!head) return undefined;
-
-					const runId = head.run_id;
-					const task = await this.#tasks.handle(turnDefinition).get(runId);
-					if (!task) {
-						await this.#pauseAt("before-task", signal);
-						await this.#tasks.run(turnDefinition, { runId }, { runId });
-					} else if (
-						task.state === "failed" ||
-						task.state === "cancelled" ||
-						task.state === "completed"
-					) {
-						// A settled task can only leave a pending row when it could not commit the turn.
-						const message =
-							task.state === "failed" ? task.error.message : "The turn ended without a transcript.";
-						this.#conversation.fail(runId, message);
-						return "yield" as const;
-					}
-					// A task that terminates before committing may never signal the inbox.
-					return { rescheduleAt: Date.now() + 30_000 };
-				},
-				catch: (cause) => new TurnIoError({ operation: "drain inbox", cause }),
-			}),
-		);
-	}
-
-	#runSubmission(runId: string, step: TaskStep) {
-		return Effect.gen({ self: this }, function* () {
-			const row = yield* conversationEffect("start turn", () => this.#conversation.start(runId));
-			if (row.state === "completed" || row.state === "failed") return;
-			const through = row.context_through;
-			if (through === null) {
-				return yield* new TurnIoError({
-					operation: "read context",
-					cause: null,
-					message: "The turn has no context cursor.",
-				});
 			}
-			const context = yield* conversationEffect("read context", () =>
-				this.#conversation.context(through),
-			);
-			const transcript = yield* runTurn(
-				{ id: row.submission_id, prompt: row.prompt },
-				taskJournal(step),
-				context,
-			);
+			const { result } = last;
+			return {
+				role: "assistant",
+				text:
+					result.status === "completed" ? `Wrote ${JSON.stringify(result.output)}` : result.message,
+			};
+		}
+		return {
+			role: "tool-call",
+			id: "append-1",
+			name: Append.name,
+			input: {
+				text: appendTwice
+					? "hello"
+					: user?.text === "Call append without text."
+						? ""
+						: (user?.text ?? ""),
+			},
+		};
+	});
 
-			yield* conversationEffect("commit turn", () => this.#conversation.commit(runId, transcript));
-			yield* Effect.tryPromise({
-				try: async (signal) => {
-					await this.#pauseAt("after-commit", signal);
-					await this.#wakeInbox();
-				},
-				catch: (cause) => new TurnIoError({ operation: "wake inbox", cause }),
-			});
-		});
-	}
+	protected readonly turnLayer = Layer.merge(
+		Layer.succeed(
+			TurnModel,
+			this.env.EFFECT_HARNESS_AI
+				? workersAiTurnModel(this.env.EFFECT_HARNESS_AI, {
+						name: Append.name,
+						description: appendDescription,
+						parameters: Tool.getJsonSchema(Append),
+					})
+				: TurnModel.of({ complete: (messages) => this.#fakeComplete(messages) }),
+		),
+		this.#toolsLayer,
+	);
 
-	submit(input: unknown) {
-		return Effect.runPromise(
-			Schema.decodeUnknownEffect(TurnSubmission)(input).pipe(
-				Effect.flatMap((submission) =>
-					Effect.tryPromise({
-						try: async () => {
-							await this.lifecycle.start();
-							return this.ctx.blockConcurrencyWhile(async () => {
-								// Arm the durable wake first. The input gate keeps it from draining
-								// before this submission is committed.
-								await this.#wakeInbox();
-								return this.#conversation.admit(submission);
-							});
-						},
-						catch: (cause) => new TurnIoError({ operation: "submit", cause }),
-					}),
-				),
-				Effect.catchTag("SchemaError", (error) =>
-					Effect.succeed({ accepted: false, runId: null, error: error.message }),
-				),
-			),
-		);
-	}
-
-	async turn(runId: string) {
-		await this.lifecycle.start();
-		return this.#conversation.turn(runId);
-	}
-
-	async history(query: typeof HistoryQuery.Type) {
-		await this.lifecycle.start();
-		return this.#conversation.history(query);
-	}
-
-	async taskState(runId: string) {
-		return (await this.#tasks.handle(turnDefinition).get(runId))?.state ?? "missing";
+	protected override onTurnPhase(phase: "before-task" | "after-commit", signal: AbortSignal) {
+		return this.#pauseAt(phase, signal);
 	}
 
 	async state() {
