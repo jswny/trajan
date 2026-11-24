@@ -13,11 +13,18 @@ export default defineConfig(({ mode }) => ({
 			CODEMODE_SANDBOX:
 				mode === "browser-smoke" &&
 				bindings.durableObject({ worker: codemode.worker, exportName: "CodemodeSandbox" }),
+			EFFECT_HARNESS_TEST: bindings.durableObject({
+				worker: "trajan-test",
+				exportName: "EffectHarnessTestObject",
+			}),
 			PI_HARNESS_TEST: bindings.durableObject({
 				worker: "trajan-test",
 				exportName: "PiHarnessTestObject",
 			}),
 		},
-		exports: { PiHarnessTestObject: exports.durableObject({ storage: "sqlite" }) },
+		exports: {
+			EffectHarnessTestObject: exports.durableObject({ storage: "sqlite" }),
+			PiHarnessTestObject: exports.durableObject({ storage: "sqlite" }),
+		},
 	},
 }));

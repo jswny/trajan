@@ -1,3 +1,4 @@
+export { EffectHarnessTestObject } from "./effect-harness-fixture";
 import {
 	fauxAssistantMessage,
 	fauxProvider,
