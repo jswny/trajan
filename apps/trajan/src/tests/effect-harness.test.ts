@@ -1,6 +1,6 @@
 import { runDurableObjectAlarm } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { TurnTranscript } from "@trajan/effect-harness";
+import { TurnMessage, TurnTranscript } from "@trajan/effect-harness";
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 
@@ -165,4 +165,140 @@ test("a restart between tool calls reuses the first result and still executes th
 		});
 	expect(await stub.submit(input)).toMatchObject({ runId, accepted: false });
 	expect(await stub.state()).toMatchObject({ text: "hello world" });
+});
+
+const remember = (phrase: string) => ({ id: "remember", prompt: `Remember ${phrase}` });
+const recall = { id: "recall", prompt: "What did I ask you to remember?" };
+const messageJson = Schema.fromJsonString(TurnMessage);
+
+test("recovers the inbox if the object restarts before starting the accepted task", async () => {
+	const phrase = crypto.randomUUID();
+	let stub = openFixture();
+	await stub.pause("before-task");
+	const first = await submit(stub, remember(phrase));
+	await expect
+		.poll(() => stub.state(), { timeout: 5000 })
+		.toMatchObject({ pausedAt: "before-task" });
+	const second = await submit(stub, recall);
+	expect(await stub.taskState(first.runId)).toBe("missing");
+	expect(await stub.taskState(second.runId)).toBe("missing");
+
+	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
+	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await stub.release();
+	await runDurableObjectAlarm(stub);
+
+	await expect
+		.poll(() => readTurn(stub, second.runId), { timeout: 5000 })
+		.toMatchObject({
+			state: "completed",
+			result: {
+				submissionId: recall.id,
+				messages: [
+					{ role: "user", text: recall.prompt },
+					{ role: "assistant", text: phrase },
+				],
+			},
+		});
+	expect(await stub.submit(remember(phrase))).toMatchObject({
+		accepted: false,
+		runId: first.runId,
+	});
+});
+
+test("a turn committed before the task settles appears once in history and in the next turn's context", async () => {
+	const phrase = crypto.randomUUID();
+	const input = remember(phrase);
+	let stub = openFixture();
+	await stub.pause("after-commit");
+	const first = await submit(stub, input);
+	await expect
+		.poll(() => stub.state(), { timeout: 5000 })
+		.toMatchObject({ pausedAt: "after-commit" });
+	expect(await stub.turn(first.runId)).toMatchObject({ state: "completed" });
+	expect(await stub.taskState(first.runId)).toBe("running");
+
+	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
+	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await stub.release();
+	await runDurableObjectAlarm(stub);
+
+	const second = await submit(stub, recall);
+	await expect
+		.poll(() => readTurn(stub, second.runId), { timeout: 5000 })
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: recall.prompt },
+					{ role: "assistant", text: phrase },
+				],
+			},
+		});
+	expect(await stub.submit(recall)).toMatchObject({ accepted: false, runId: second.runId });
+
+	const newest = await stub.history({ limit: 2 });
+	if (newest.nextBefore === null) throw new Error("Expected an earlier history page");
+	const older = await stub.history({ before: newest.nextBefore, limit: 2 });
+	expect(older.nextBefore).toBeNull();
+	expect(
+		[...older.entries, ...newest.entries].map(({ id, submissionId, message }) => ({
+			id,
+			submissionId,
+			...Schema.decodeSync(messageJson)(message),
+		})),
+	).toEqual([
+		{ id: 1, submissionId: input.id, role: "user", text: input.prompt },
+		{ id: 2, submissionId: input.id, role: "assistant", text: `Remembering ${phrase}` },
+		{ id: 3, submissionId: recall.id, role: "user", text: recall.prompt },
+		{ id: 4, submissionId: recall.id, role: "assistant", text: phrase },
+	]);
+	await expect.poll(() => stub.taskState(first.runId), { timeout: 5000 }).toBe("completed");
+});
+
+test("keeps a large exchange in history when it falls outside the model's context budget", async () => {
+	const stub = openFixture();
+	const input = remember("a".repeat(16_000));
+	const first = await submit(stub, input);
+	await expect
+		.poll(() => stub.turn(first.runId), { timeout: 5000 })
+		.toMatchObject({ state: "completed" });
+	const second = await submit(stub, recall);
+	await expect
+		.poll(() => readTurn(stub, second.runId), { timeout: 5000 })
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: recall.prompt },
+					{ role: "assistant", text: "I don't know." },
+				],
+			},
+		});
+	const { entries } = await stub.history({});
+	expect(entries).toHaveLength(4);
+	expect(Schema.decodeSync(messageJson)(entries[0].message)).toEqual({
+		role: "user",
+		text: input.prompt,
+	});
+});
+
+test("settles a failed model turn and proceeds to the next queued submission", async () => {
+	const stub = openFixture();
+	const first = await submit(stub, { id: "fail", prompt: "Fail this turn." });
+	const second = await submit(stub, remember("a later submission"));
+
+	await expect
+		.poll(() => stub.turn(first.runId), { timeout: 5000 })
+		.toMatchObject({
+			state: "failed",
+			error: "The fixture model failed.",
+			transcript: null,
+		});
+	await expect
+		.poll(() => stub.turn(second.runId), { timeout: 5000 })
+		.toMatchObject({ state: "completed" });
+	expect(await stub.history({})).toMatchObject({
+		entries: [{ submissionId: "remember" }, { submissionId: "remember" }],
+	});
 });

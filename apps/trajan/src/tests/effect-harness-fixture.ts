@@ -5,19 +5,22 @@ import {
 	runTurn,
 	TurnIoError,
 	type TurnJournal,
+	TurnMessage,
 	TurnModel,
 	TurnSubmission,
 	TurnTools,
 	TurnTranscript,
 } from "@trajan/effect-harness";
-import { Lifecycle } from "agents/lifecycle";
+import { Lifecycle, type LifecycleJobContext, type LifecycleJobOutcome } from "agents/lifecycle";
 import { Tasks, type TaskStep } from "agents/tasks";
 import { Effect, Schema } from "effect";
+import { ConversationStore, HistoryQuery } from "../effect-harness/conversation-store";
 import { workersAiTurnModel } from "../effect-harness/workers-ai";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
-const turnDefinition = "turn@v2";
-type PausePoint = "after-write" | "between-tools";
+const turnDefinition = "turn@v3";
+const inboxJob = "effect-harness-inbox";
+type PausePoint = "before-task" | "after-write" | "between-tools" | "after-commit";
 const workspaceFile = "/workspace/turn.txt";
 const appendInput = Schema.Struct({ text: Schema.NonEmptyString });
 const appendTool = {
@@ -42,6 +45,11 @@ export default async function (text) {
 `;
 
 const transcriptJson = Schema.fromJsonString(TurnTranscript);
+const messageJson = Schema.fromJsonString(TurnMessage);
+
+function conversationEffect<A>(operation: string, run: () => A) {
+	return Effect.try({ try: run, catch: (cause) => new TurnIoError({ operation, cause }) });
+}
 
 function taskJournal(step: TaskStep): TurnJournal {
 	return {
@@ -74,6 +82,7 @@ function isMissing(error: unknown): boolean {
 
 export class EffectHarnessTestObject extends DurableObject<Env> {
 	readonly #instance = crypto.randomUUID();
+	readonly #conversation = new ConversationStore(this.ctx.storage);
 	readonly #workspace = new Workspace({
 		storage: this.ctx.storage,
 		backends: [new CodemodeBackend({ loader: this.env.LOADER })],
@@ -119,9 +128,31 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 	readonly #fakeModel = TurnModel.of({
 		complete: (messages) =>
 			Effect.gen({ self: this }, function* () {
-				const first = messages[0];
+				const user = messages.findLast((message) => message.role === "user");
 				const last = messages.at(-1);
-				const appendTwice = first?.role === "user" && first.text === "Append hello, then world.";
+				const appendTwice = user?.text === "Append hello, then world.";
+				if (last?.role === "user" && last.text === "Fail this turn.") {
+					return yield* new TurnIoError({
+						operation: "fixture model",
+						cause: null,
+						message: "The fixture model failed.",
+					});
+				}
+				if (last?.role === "user" && last.text.startsWith("Remember ")) {
+					return { role: "assistant", text: `Remembering ${last.text.slice("Remember ".length)}` };
+				}
+				if (last?.role === "user" && last.text === "What did I ask you to remember?") {
+					const memory = messages.findLast(
+						(message) => message.role === "assistant" && message.text.startsWith("Remembering "),
+					);
+					return {
+						role: "assistant",
+						text:
+							memory?.role === "assistant"
+								? memory.text.slice("Remembering ".length)
+								: "I don't know.",
+					};
+				}
 				if (last?.role === "tool") {
 					if (appendTwice && last.callId === "append-1") {
 						yield* Effect.tryPromise({
@@ -148,7 +179,7 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 					role: "tool-call",
 					id: "append-1",
 					name: appendTool.name,
-					input: { text: appendTwice ? "hello" : first?.role === "user" ? first.text : "" },
+					input: { text: appendTwice ? "hello" : (user?.text ?? "") },
 				};
 			}),
 	});
@@ -156,26 +187,108 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 		? workersAiTurnModel(this.env.EFFECT_HARNESS_AI, appendTool)
 		: this.#fakeModel;
 	readonly #tasks = new Tasks({
+		onError: () => this.#wakeInbox(),
 		definitions: {
-			[turnDefinition]: (input: typeof TurnSubmission.Type, step: TaskStep) =>
+			[turnDefinition]: ({ runId }: { runId: string }, step: TaskStep) =>
 				Effect.runPromise(
-					runTurn(input, taskJournal(step)).pipe(
+					this.#runSubmission(runId, step).pipe(
 						Effect.provideService(TurnModel, this.#model),
 						Effect.provideService(TurnTools, this.#tools),
-						Effect.flatMap(Schema.encodeEffect(transcriptJson)),
 					),
 				),
 		},
 	});
 	readonly lifecycle = Lifecycle.install(this).use(this.#tasks);
 
+	async onStart() {
+		this.#conversation.initialize();
+		if (this.#conversation.head() && !this.lifecycle.jobs.get(inboxJob)) {
+			await this.#wakeInbox();
+		}
+	}
+
+	async #wakeInbox() {
+		await this.lifecycle.jobs.push({ id: inboxJob, fn: inboxJob, time: Date.now() });
+	}
+
+	async onJob({ job }: LifecycleJobContext): Promise<LifecycleJobOutcome> {
+		if (job.fn !== inboxJob) return;
+		return Effect.runPromise(
+			Effect.tryPromise({
+				try: async (signal) => {
+					const head = this.#conversation.head();
+					if (!head) return undefined;
+
+					const runId = head.run_id;
+					const task = await this.#tasks.handle(turnDefinition).get(runId);
+					if (!task) {
+						await this.#pauseAt("before-task", signal);
+						await this.#tasks.run(turnDefinition, { runId }, { runId });
+					} else if (
+						task.state === "failed" ||
+						task.state === "cancelled" ||
+						task.state === "completed"
+					) {
+						// A settled task can only leave a pending row when it could not commit the turn.
+						const message =
+							task.state === "failed" ? task.error.message : "The turn ended without a transcript.";
+						this.#conversation.fail(runId, message);
+						return "yield" as const;
+					}
+					// A task that terminates before committing may never signal the inbox.
+					return { rescheduleAt: Date.now() + 30_000 };
+				},
+				catch: (cause) => new TurnIoError({ operation: "drain inbox", cause }),
+			}),
+		);
+	}
+
+	#runSubmission(runId: string, step: TaskStep) {
+		return Effect.gen({ self: this }, function* () {
+			const row = yield* conversationEffect("start turn", () => this.#conversation.start(runId));
+			if (row.state === "completed" || row.state === "failed") return;
+			const through = row.context_through;
+			if (through === null) {
+				return yield* new TurnIoError({
+					operation: "read context",
+					cause: null,
+					message: "The turn has no context cursor.",
+				});
+			}
+			const context = yield* conversationEffect("read context", () =>
+				this.#conversation.context(through),
+			);
+			const transcript = yield* runTurn(
+				{ id: row.submission_id, prompt: row.prompt },
+				taskJournal(step),
+				context,
+			);
+
+			yield* conversationEffect("commit turn", () => this.#conversation.commit(runId, transcript));
+			yield* Effect.tryPromise({
+				try: async (signal) => {
+					await this.#pauseAt("after-commit", signal);
+					await this.#wakeInbox();
+				},
+				catch: (cause) => new TurnIoError({ operation: "wake inbox", cause }),
+			});
+		});
+	}
+
 	submit(input: unknown) {
 		return Effect.runPromise(
 			Schema.decodeUnknownEffect(TurnSubmission)(input).pipe(
 				Effect.flatMap((submission) =>
 					Effect.tryPromise({
-						try: () =>
-							this.#tasks.run(turnDefinition, submission, { idempotencyKey: submission.id }),
+						try: async () => {
+							await this.lifecycle.start();
+							return this.ctx.blockConcurrencyWhile(async () => {
+								// Arm the durable wake first. The input gate keeps it from draining
+								// before this submission is committed.
+								await this.#wakeInbox();
+								return this.#conversation.admit(submission);
+							});
+						},
 						catch: (cause) => new TurnIoError({ operation: "submit", cause }),
 					}),
 				),
@@ -187,12 +300,17 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 	}
 
 	async turn(runId: string) {
-		const run = await this.#tasks.handle(turnDefinition).get(runId);
-		return {
-			state: run?.state ?? "missing",
-			transcript: run?.state === "completed" ? run.result : null,
-			error: run?.state === "failed" ? run.error.message : null,
-		};
+		await this.lifecycle.start();
+		return this.#conversation.turn(runId);
+	}
+
+	async history(query: typeof HistoryQuery.Type) {
+		await this.lifecycle.start();
+		return this.#conversation.history(query);
+	}
+
+	async taskState(runId: string) {
+		return (await this.#tasks.handle(turnDefinition).get(runId))?.state ?? "missing";
 	}
 
 	async state() {
@@ -239,7 +357,7 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 /** The development-only Worker exposes completed turns for a real-model smoke test. */
 export async function serveEffectHarness(request: Request, env: Env) {
 	const url = new URL(request.url);
-	if (url.pathname !== "/__effect-harness/turns") {
+	if (url.pathname !== "/__effect-harness/turns" && url.pathname !== "/__effect-harness/history") {
 		return new Response("Not found", { status: 404 });
 	}
 	const origin = request.headers.get("Origin");
@@ -248,6 +366,27 @@ export async function serveEffectHarness(request: Request, env: Env) {
 	}
 
 	const stub = env.EFFECT_HARNESS_TEST.getByName("live-model");
+	if (url.pathname === "/__effect-harness/history") {
+		if (request.method !== "GET")
+			return new Response(null, { status: 405, headers: { Allow: "GET" } });
+		const before = url.searchParams.get("before");
+		const limit = url.searchParams.get("limit");
+		const query = Schema.decodeUnknownOption(HistoryQuery)({
+			...(before === null ? {} : { before: Number(before) }),
+			...(limit === null ? {} : { limit: Number(limit) }),
+		});
+		if (query._tag === "None")
+			return Response.json({ error: "Invalid history cursor or limit." }, { status: 400 });
+		const { entries, nextBefore } = await stub.history(query.value);
+		return Response.json({
+			entries: entries.map((entry) => ({
+				...entry,
+				message: Schema.decodeSync(messageJson)(entry.message),
+			})),
+			nextBefore,
+		});
+	}
+
 	if (request.method === "POST") {
 		let submission: unknown;
 		try {

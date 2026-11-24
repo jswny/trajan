@@ -54,6 +54,18 @@ export function workersAiTurnModel(binding: Env["AI"], tool: Tool) {
 						case "user":
 							context.push({ role: "user", content: message.text, timestamp });
 							break;
+						case "assistant":
+							context.push({
+								role: "assistant",
+								api: model.api,
+								provider: model.provider,
+								model: model.id,
+								content: [{ type: "text", text: message.text }],
+								stopReason: "stop",
+								usage: emptyUsage,
+								timestamp,
+							});
+							break;
 						case "tool-call": {
 							// Each tool request carries its own DeepSeek reasoning history.
 							const content = yield* Schema.decodeUnknownEffect(AssistantContext)(

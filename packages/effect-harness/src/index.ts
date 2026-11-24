@@ -34,7 +34,8 @@ const ToolMessage = Schema.Struct({
 	result: ToolResult,
 });
 
-const Message = Schema.Union([UserMessage, Reply, ToolCall, ToolMessage]);
+export const TurnMessage = Schema.Union([UserMessage, Reply, ToolCall, ToolMessage]);
+export const ConversationMessage = Schema.Union([UserMessage, Reply]);
 const ModelToolCall = Schema.Struct({
 	...ToolCall.fields,
 	// Adapter context belongs to the checkpointed model response.
@@ -43,14 +44,14 @@ const ModelToolCall = Schema.Struct({
 const ModelResponse = Schema.Union([Reply, ModelToolCall]);
 
 type ModelHistoryEntry =
-	| typeof UserMessage.Type
+	| typeof ConversationMessage.Type
 	| typeof ModelToolCall.Type
 	| typeof ToolMessage.Type;
 const MAX_TOOL_CALLS = 8;
 
 export const TurnTranscript = Schema.Struct({
 	submissionId: Schema.NonEmptyString,
-	messages: Schema.Array(Message),
+	messages: Schema.Array(TurnMessage),
 });
 
 export class TurnIoError extends Data.TaggedError("TurnIoError")<{
@@ -100,10 +101,11 @@ export class TurnTools extends Context.Service<
 export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 	submission: typeof TurnSubmission.Type,
 	journal: TurnJournal,
+	context: ReadonlyArray<typeof ConversationMessage.Type> = [],
 ) {
 	const model = yield* TurnModel;
 	const tools = yield* TurnTools;
-	const history: ModelHistoryEntry[] = [{ role: "user", text: submission.prompt }];
+	const history: ModelHistoryEntry[] = [...context, { role: "user", text: submission.prompt }];
 
 	for (let index = 0; ; index++) {
 		const allowTools = index < MAX_TOOL_CALLS;
@@ -117,7 +119,7 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 			// Project the transcript without adapter continuation data.
 			return yield* Schema.decodeEffect(TurnTranscript)({
 				submissionId: submission.id,
-				messages: [...history, decision],
+				messages: [...history.slice(context.length), decision],
 			});
 		}
 
