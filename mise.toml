@@ -1,0 +1,3 @@
+# Install the launcher once per machine with `mise exec -- hk install --global --mise`.
+[tools]
+hk = "2.14.0"

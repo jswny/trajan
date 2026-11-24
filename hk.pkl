@@ -1,0 +1,24 @@
+amends "package://github.com/jdx/hk/releases/download/v2.14.0/hk@2.14.0#/Config.pkl"
+
+local sourceFiles = "**/*.{js,mjs,cjs,jsx,ts,mts,cts,tsx}"
+local npmExec = List("npm", "exec", "--no", "--")
+local viteCheck = npmExec + List("effect-tsgo", "vp", "check", "--no-error-on-unmatched-pattern")
+
+steps {
+  ["worker-types"] {
+    glob = sourceFiles
+    check = new Command {
+      argv = npmExec + List("vp", "run", "-r", "types")
+    }
+  }
+  ["vite-check"] {
+    glob = List(sourceFiles, "**/*.{css,html,json,jsonc,md,mdx,toml,yaml,yml}")
+    depends = "worker-types"
+    check = new Command {
+      argv = viteCheck + List("--", "{{files}}")
+    }
+    fix = new Command {
+      argv = viteCheck + List("--fix", "--", "{{files}}")
+    }
+  }
+}
