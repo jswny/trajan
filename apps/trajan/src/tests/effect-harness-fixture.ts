@@ -5,7 +5,7 @@ import { TurnIoError, ToolResult, TurnModel, TurnModelError, TurnTools } from "@
 import type { TurnMessage, TurnModelEvent } from "@trajan/harness";
 import { Effect, Layer, Predicate, Schema, Stream } from "effect";
 import { clearToolState } from "../effect-harness/tool-activity";
-import { EffectHarnessObject } from "../effect-harness/worker-host";
+import { TrajanChatObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
 import { codeModeError, createTrajanWorkspace, workspaceToolset } from "../workspace";
 import {
@@ -55,7 +55,7 @@ function isMissing(error: unknown): boolean {
 	return Predicate.hasProperty(error, "code") && error.code === "ENOENT";
 }
 
-export class EffectHarnessTestObject extends EffectHarnessObject {
+export class EffectHarnessTestObject extends TrajanChatObject {
 	readonly #instance = crypto.randomUUID();
 	readonly #workspace = createTrajanWorkspace(this.ctx);
 	readonly #effectTools = this.#createTools();

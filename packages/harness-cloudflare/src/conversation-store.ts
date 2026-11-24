@@ -1,8 +1,6 @@
 import { ConversationMessage, TurnMessage, TurnTranscript } from "@trajan/harness";
 import type { TurnCompletion, TurnSubmission } from "@trajan/harness";
 import { Schema } from "effect";
-import { ChatHistoryQuery } from "./chat-protocol";
-import { clearToolState } from "./tool-activity";
 
 const contextTurnLimit = 16;
 const contextByteLimit = 32_000;
@@ -12,7 +10,10 @@ const transcriptJson = Schema.fromJsonString(TurnTranscript);
 const modelContextKey = "effect-model-context";
 const decodeModelContext = Schema.decodeUnknownSync(Schema.UndefinedOr(Schema.Json));
 
-export const HistoryQuery = ChatHistoryQuery;
+export type HistoryQuery = {
+	readonly before?: number;
+	readonly limit?: number;
+};
 
 type SubmissionRow = {
 	seq: number;
@@ -27,7 +28,10 @@ type SubmissionRow = {
 type EntryRow = { seq: number; submission_id: string; message: string };
 
 export class ConversationStore {
-	constructor(private readonly storage: DurableObjectStorage) {}
+	constructor(
+		private readonly storage: DurableObjectStorage,
+		private readonly clearRunState: (runId: string) => undefined,
+	) {}
 
 	initialize() {
 		this.storage.sql.exec(`
@@ -181,7 +185,7 @@ export class ConversationStore {
 			if (transcript.modelContext !== undefined) {
 				this.storage.kv.put(modelContextKey, transcript.modelContext);
 			}
-			clearToolState(this.storage, runId);
+			this.clearRunState(runId);
 		});
 	}
 
@@ -231,11 +235,11 @@ export class ConversationStore {
 				row.seq,
 				Schema.encodeSync(messageJson)({ role: "notice", status, text }),
 			);
-			clearToolState(this.storage, runId);
+			this.clearRunState(runId);
 		});
 	}
 
-	chatStatus() {
+	status() {
 		const head = this.head();
 		const active =
 			head && (head.state === "pending" || head.state === "running" || head.state === "stopping")
@@ -257,7 +261,7 @@ export class ConversationStore {
 		};
 	}
 
-	chatPage(query: typeof HistoryQuery.Type) {
+	page(query: HistoryQuery) {
 		const { entries, nextBefore } = this.history(query);
 		return {
 			entries: entries.map((entry) => ({
@@ -284,7 +288,7 @@ export class ConversationStore {
 		return { state: row?.state ?? "missing", error: row?.error ?? null, transcript };
 	}
 
-	history({ before, limit = 50 }: typeof HistoryQuery.Type) {
+	history({ before, limit = 50 }: HistoryQuery) {
 		const rows = this.storage.sql
 			.exec<EntryRow>(
 				`

@@ -1,14 +1,14 @@
 import { TurnModel, TurnTools } from "@trajan/harness";
 import { Data, Effect, Layer } from "effect";
 import { ChatPath, isEffectChatPath } from "./effect-harness/chat-protocol";
-import { EffectHarnessObject } from "./effect-harness/worker-host";
+import { TrajanChatObject } from "./effect-harness/worker-host";
 import { openAiTurnModel } from "./effect-harness/openai-responses";
 import { effectWorkspaceTools } from "./effect-harness/workspace-tools";
 import { createTrajanWorkspace, WORKSPACE_PROMPT, workspaceToolset } from "./workspace";
 
 class ChatRouteError extends Data.TaggedError("ChatRouteError")<{ readonly cause: unknown }> {}
 
-export class Trajan extends EffectHarnessObject {
+export class Trajan extends TrajanChatObject {
 	readonly #tools = effectWorkspaceTools(
 		this.env.LOADER,
 		this.ctx.storage,
