@@ -1,5 +1,5 @@
 import { RpcTarget } from "cloudflare:workers";
-import { Data, Effect, Schema } from "effect";
+import { Clock, Data, Effect, Random, Schema } from "effect";
 import { loadGuest } from "./guest";
 import type { ToolReply } from "./guest";
 
@@ -28,8 +28,10 @@ interface RunOptions {
 	readonly onActivity?: (activity: CodeModeActivity) => Effect.Effect<void, CodeModeError>;
 }
 
+const applicationModules = ["codemode:tools", "codemode:git"] as const;
+const runtimeModule = "codemode:runtime";
 const ToolCall = Schema.Struct({
-	module: Schema.Literals(["codemode:tools", "codemode:git"]),
+	module: Schema.Literals([...applicationModules, runtimeModule]),
 	name: Schema.String,
 	input: Schema.Json,
 });
@@ -41,7 +43,8 @@ type Entry = {
 	readonly reply?: ToolReply;
 };
 type Run = { readonly source: string; readonly result?: { readonly value: Schema.Json } };
-type Catalog = Partial<Record<ToolCall["module"], Readonly<Record<string, CodeModeTool>>>>;
+type ToolNamespace = Readonly<Record<string, CodeModeTool>>;
+type Catalog = Partial<Record<(typeof applicationModules)[number], ToolNamespace>>;
 
 const maxCalls = 64;
 const maxValueBytes = 64 * 1024;
@@ -53,6 +56,22 @@ const interrupted: ToolReply = {
 const failed = (message: string): ToolReply => ({ status: "failed", message });
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const ioError = (error: unknown) => new CodeModeError({ message: errorMessage(error) });
+const decodeRuntimeInput = Schema.decodeUnknownEffect(Schema.Null);
+
+function runtimeTool(sample: Effect.Effect<Schema.Json>): CodeModeTool {
+	return {
+		replay: "safe",
+		run: (input) =>
+			decodeRuntimeInput(input).pipe(Effect.mapError(ioError), Effect.andThen(sample)),
+	};
+}
+
+const runtimeTools = {
+	now: runtimeTool(Clock.currentTimeMillis),
+	random: runtimeTool(Random.next),
+	randomUUID: runtimeTool(Effect.sync(() => crypto.randomUUID())),
+} satisfies ToolNamespace;
+
 const boundedJson = Schema.Json.check(
 	Schema.makeFilter(
 		(value: Schema.Json) =>
@@ -89,8 +108,11 @@ export function createCodeMode(
 	storage: DurableObjectStorage,
 	catalog: Catalog,
 ) {
+	const toolsByModule = new Map<string, ToolNamespace>(
+		Object.entries({ ...catalog, [runtimeModule]: runtimeTools }),
+	);
 	const namespaces = new Map(
-		Object.entries(catalog).map(([name, tools]) => [name, Object.keys(tools)]),
+		Array.from(toolsByModule, ([name, tools]) => [name, Object.keys(tools)]),
 	);
 	const active = new Set<string>();
 
@@ -142,7 +164,7 @@ export function createCodeMode(
 					const request = JSON.stringify(
 						yield* Schema.decodeEffect(boundedJson)(input).pipe(Effect.mapError(ioError)),
 					);
-					const tools = catalog[input.module];
+					const tools = toolsByModule.get(input.module);
 					const tool = tools && Object.hasOwn(tools, input.name) ? tools[input.name] : undefined;
 					const prior = storage.kv.get<Entry>(callId);
 					if (prior && (prior.request !== request || prior.replay !== tool?.replay)) {
@@ -151,7 +173,10 @@ export function createCodeMode(
 					if (!tool) {
 						return failed("Unknown Code Mode tool.");
 					}
-					const name = input.module === "codemode:git" ? `git.${input.name}` : input.name;
+					const name =
+						input.module === "codemode:tools"
+							? input.name
+							: `${input.module.slice("codemode:".length)}.${input.name}`;
 					const publish = (status: CodeModeActivity["status"]) =>
 						options.onActivity?.({ id: callId, name, status }) ?? Effect.void;
 					const publishReply = (reply: ToolReply) =>

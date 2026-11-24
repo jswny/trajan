@@ -152,6 +152,33 @@ test("shows live tool progress and the final answer after replaying a read-only 
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Succeeded/]);
 });
 
+test("replays time and randomness when reopening a file after a restart", async ({ page }) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/pause-replay`)).status()).toBe(204);
+	await composer.fill("Recover a file named with time and randomness.");
+	await composer.press("Enter");
+	const calls = page.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
+	await expect(calls).toHaveText([
+		/runtime\.now.*Succeeded/,
+		/runtime\.randomUUID.*Succeeded/,
+		/runtime\.random.*Succeeded/,
+		/write.*Succeeded/,
+		/read_second.*Running/,
+	]);
+
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await page.reload();
+	await expect(calls.last()).toHaveText(/read_second.*Running/);
+	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
+
+	const transcript = page.getByRole("main");
+	await expect(transcript.getByText(/^Wrote "\/workspace\/\d+-[a-f0-9-]{36}\.txt"$/)).toHaveCount(
+		1,
+	);
+	await transcript.getByText("Done", { exact: true }).click();
+	await expect(calls.last()).toHaveText(/^read.*Succeeded/);
+});
+
 test("replay shows the interrupted stock edit and finishes without editing the file again", async ({
 	page,
 }) => {

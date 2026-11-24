@@ -100,6 +100,7 @@ export function effectWorkspaceTools(
 				"Run a JavaScript module. Use export default async function () { ... } and return a JSON result.",
 				"console.log and console.error are captured.",
 				"Use registered tools for all workspace and external operations. Capabilities cannot be accessed directly by the script.",
+				"Import replayable helpers from codemode:runtime for time or randomness that affects tool calls. Await now() for Unix time in milliseconds, random() for a number in [0, 1), or randomUUID() for a version 4 UUID. Each returned value is reused during replay.",
 				"Tools execute in call order. If a tool throws with code 'interrupted', inspect its effects before retrying. Base replay-sensitive branches and arguments on stable input and tool results.",
 				"Write large results to a workspace file and return the path.",
 				instructions,

@@ -199,6 +199,29 @@ export default async function () {
 				},
 			};
 		}
+		if (last?.role === "user" && last.text === "Recover a file named with time and randomness.") {
+			return {
+				role: "tool-call",
+				id: "exec-replay-runtime",
+				name: "exec",
+				input: {
+					code: `import { now, random, randomUUID } from "codemode:runtime";
+import { read, read_second, write } from "codemode:tools";
+export default async function () {
+  const path = "/workspace/" + await now() + "-" + await randomUUID() + ".txt";
+  const sample = await random();
+  if (!(sample >= 0 && sample < 1)) throw new Error("Expected a sample in [0, 1)");
+  const content = String(sample);
+  const written = await write({ path, content });
+  if (written.isError) throw new Error(written.text);
+  await read_second();
+  const restored = await read({ path });
+  if (restored.isError || restored.text !== content) throw new Error("Expected the original file");
+  return path;
+}`,
+				},
+			};
+		}
 		if (last?.role === "user" && last.text === editReplayPrompt) {
 			return {
 				role: "tool-call",
