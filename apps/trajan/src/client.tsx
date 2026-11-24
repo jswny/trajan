@@ -1,7 +1,6 @@
 import { Badge, Button, Dialog, Empty, InputArea, Surface } from "@cloudflare/kumo";
 import { useAtom } from "@effect/atom-react";
 import {
-	IconAgentFill,
 	IconArrowShortUp,
 	IconArrowUpFill,
 	IconCircleCheck,
@@ -203,28 +202,23 @@ function AssistantMessage({
 	runningTools: ReadonlyArray<string>;
 }) {
 	return (
-		<div className="flex items-start gap-3">
-			<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-(--pierre-on-accent)">
-				<IconAgentFill aria-hidden="true" />
-			</div>
-			<div className="min-w-0 flex-1 space-y-3">
-				{message.parts.map((part, index) => (
-					<AssistantPart
-						key={`${message.id}-${index}`}
-						part={part}
-						streaming={streaming && index === message.parts.length - 1}
-						running={streaming && part.type === "tool-call" && runningTools.includes(part.name)}
-					/>
-				))}
-				{streaming ? <span className="streaming-cursor" /> : null}
-			</div>
+		<div className="min-w-0 space-y-3">
+			{message.parts.map((part, index) => (
+				<AssistantPart
+					key={`${message.id}-${index}`}
+					part={part}
+					streaming={streaming && index === message.parts.length - 1}
+					running={streaming && part.type === "tool-call" && runningTools.includes(part.name)}
+				/>
+			))}
+			{streaming ? <span className="streaming-cursor" /> : null}
 		</div>
 	);
 }
 
 function ToolMessage({ message }: { message: ChatEntry }) {
 	return (
-		<div className="ml-11 space-y-2">
+		<div className="space-y-2">
 			{message.parts.map((part, index) =>
 				part.type === "tool-result" ? (
 					<ToolResultCard key={`${message.id}-${index}`} part={part} />
@@ -251,7 +245,7 @@ function Message({ message, streaming = false }: { message: ChatMessage; streami
 					{message.text}
 				</div>
 			) : (
-				<p className="ml-11 text-sm text-kumo-subtle">{message.text}</p>
+				<p className="text-sm text-kumo-subtle">{message.text}</p>
 			);
 	}
 }
@@ -400,12 +394,7 @@ function App() {
 			>
 				<header className="shrink-0 border-b border-kumo-line bg-kumo-base">
 					<div className="mx-auto flex min-h-15 max-w-3xl items-center justify-between gap-2 px-3 py-2 sm:px-5">
-						<div className="flex min-w-0 items-center gap-2">
-							<div className="hidden size-8 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-(--pierre-on-accent) min-[23.4375rem]:flex">
-								<IconAgentFill size={24} aria-hidden="true" />
-							</div>
-							<h1 className="text-base font-semibold">Trajan</h1>
-						</div>
+						<h1 className="text-base font-semibold">Trajan</h1>
 						<div className="flex shrink-0 items-center gap-1 sm:gap-2">
 							<Badge variant={synced ? "success" : "secondary"}>{connectionLabel}</Badge>
 							<Dialog.Trigger
@@ -460,26 +449,21 @@ function App() {
 						{live ? <Message message={live} streaming /> : null}
 
 						{running && !live ? (
-							<div className="flex items-start gap-3">
-								<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-(--pierre-on-accent)">
-									<IconAgentFill aria-hidden="true" />
+							<Surface className="w-fit max-w-full space-y-2 rounded-xl px-4 py-3 ring ring-kumo-line">
+								<div className="flex items-center gap-2 text-sm text-kumo-subtle">
+									<IconLoader aria-hidden="true" className="motion-safe:animate-spin" />
+									{active?.state === "stopping"
+										? "Stopping"
+										: runningTools.length > 0
+											? `Running ${runningTools.join(", ")}`
+											: "Waiting for the model"}
 								</div>
-								<Surface className="min-w-0 space-y-2 rounded-xl px-4 py-3 ring ring-kumo-line">
-									<div className="flex items-center gap-2 text-sm text-kumo-subtle">
-										<IconLoader aria-hidden="true" className="motion-safe:animate-spin" />
-										{active?.state === "stopping"
-											? "Stopping"
-											: runningTools.length > 0
-												? `Running ${runningTools.join(", ")}`
-												: "Waiting for the model"}
-									</div>
-									{toolActivity.length > 0 ? <ToolActivityList activity={toolActivity} /> : null}
-								</Surface>
-							</div>
+								{toolActivity.length > 0 ? <ToolActivityList activity={toolActivity} /> : null}
+							</Surface>
 						) : null}
 
 						{queued > 0 ? (
-							<p className="ml-11 text-xs text-kumo-subtle">{queued} queued behind this run</p>
+							<p className="text-xs text-kumo-subtle">{queued} queued behind this run</p>
 						) : null}
 
 						<div ref={endRef} />
