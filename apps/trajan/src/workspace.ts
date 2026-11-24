@@ -17,8 +17,12 @@ export function codeModeError(cause: unknown) {
 	return new CodeModeError({ message: cause instanceof Error ? cause.message : String(cause) });
 }
 
-export function createTrajanWorkspace(storage: DurableObjectStorage) {
-	return new Workspace({ storage, git: createGitClient() });
+export function createTrajanWorkspace(ctx: DurableObjectState) {
+	const workspace = new Workspace({ storage: ctx.storage, git: createGitClient() });
+	void ctx.blockConcurrencyWhile(() =>
+		Effect.runPromise(Effect.tryPromise(() => workspace.fs.mkdir(root, { recursive: true }))),
+	);
+	return workspace;
 }
 
 const directory = { dir: Schema.optionalKey(Schema.String) };

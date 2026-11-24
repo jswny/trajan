@@ -12,7 +12,7 @@ export class Trajan extends EffectHarnessObject {
 	readonly #tools = effectWorkspaceTools(
 		this.env.LOADER,
 		this.ctx.storage,
-		workspaceToolset(createTrajanWorkspace(this.ctx.storage)),
+		workspaceToolset(createTrajanWorkspace(this.ctx)),
 	);
 
 	protected override readonly toolCatalog = [

@@ -63,7 +63,7 @@ function isMissing(error: unknown): boolean {
 
 export class EffectHarnessTestObject extends EffectHarnessObject {
 	readonly #instance = crypto.randomUUID();
-	readonly #workspace = createTrajanWorkspace(this.ctx.storage);
+	readonly #workspace = createTrajanWorkspace(this.ctx);
 	readonly #effectTools = this.#createTools();
 	readonly #responses = createOpenAiResponsesFixture(
 		this.#effectTools.declaration,

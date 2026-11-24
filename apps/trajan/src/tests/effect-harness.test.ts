@@ -99,6 +99,36 @@ test("retries a model step after a successful tool without running the tool agai
 	expect(await stub.state()).toMatchObject({ text: "Retry after append." });
 });
 
+test("lists an empty workspace before the first write and preserves files across a reset", async () => {
+	let stub = openFixture();
+	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));
+	const list = {
+		code: `import { ls } from "codemode:tools";
+export default async function () {
+  return await ls({ path: "/workspace" });
+}`,
+	};
+	expect(decode(await stub.workspaceTool("exec", list))).toMatchObject({
+		status: "completed",
+		activity: [{ name: "ls", status: "completed" }],
+		output: { isError: false, details: { path: "/workspace", count: 0, entries: [] } },
+	});
+	expect(decode(await stub.workspaceTool("exec", appendExecInput("hello")))).toMatchObject({
+		status: "completed",
+		output: "hello",
+	});
+	const before = await stub.state();
+	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	expect(decode(await stub.workspaceTool("exec", list))).toMatchObject({
+		status: "completed",
+		output: { isError: false, details: { count: 1, entries: [{ name: "turn.txt" }] } },
+	});
+	const after = await stub.state();
+	expect(after.instance).not.toBe(before.instance);
+	expect(after.text).toBe("hello");
+});
+
 test("exposes stock Computer tools inside exec and rejects direct calls", async () => {
 	const stub = openFixture();
 	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));
