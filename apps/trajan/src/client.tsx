@@ -520,7 +520,7 @@ function App() {
 							event.preventDefault();
 							submit();
 						}}
-						className="mx-auto max-w-3xl px-5 pt-3 pb-3 sm:pt-4 sm:pb-0"
+						className="mx-auto max-w-3xl px-5 py-3 sm:py-4"
 					>
 						<div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-focus">
 							<InputArea
@@ -560,9 +560,6 @@ function App() {
 							/>
 						</div>
 					</form>
-					<div className="hidden px-5 py-3 text-center text-[10px] text-kumo-inactive sm:block">
-						Enter to send · Shift+Enter for a new line
-					</div>
 				</div>
 			</section>
 			<ToolsDialog tools={catalog} activeTools={runningTools} />
