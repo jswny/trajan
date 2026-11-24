@@ -4,17 +4,19 @@ import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/effect-harness"
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../effect-harness/chat-protocol";
+import { appendExecInput } from "./effect-harness-fixture";
 
 const submission = { id: "submission-1", prompt: "hello" };
 const prompt = { role: "user", text: submission.prompt };
 const toolCall = {
 	role: "tool-call",
 	id: "append-1",
-	name: "append",
-	input: { text: submission.prompt },
+	name: "exec",
+	input: appendExecInput(submission.prompt),
 };
 const completedTool = { status: "completed", output: "hello" };
-const unknownTool = { status: "unknown", message: "The previous tool outcome is unknown." };
+const unknownMessage = expect.stringContaining("Inspect it before repeating the action.");
+const unknownTool = { status: "unknown", message: unknownMessage };
 
 function openFixture() {
 	return env.EFFECT_HARNESS_TEST.getByName(crypto.randomUUID());
@@ -91,30 +93,46 @@ test("retries a model step after a successful tool without running the tool agai
 	expect(await stub.state()).toMatchObject({ text: "Retry after append." });
 });
 
-test("Effect workspace tools validate file calls and preserve unsafe recovery", async () => {
+test("exposes stock Computer tools inside exec and rejects direct calls", async () => {
 	const stub = openFixture();
-	const path = "/workspace/notes.txt";
 	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));
-	expect(decode(await stub.workspaceTool("write", { path, content: "milk" }))).toMatchObject({
+	const code = `
+import * as tools from "codemode:tools";
+export default async function () {
+  const path = "/workspace/notes.txt";
+  const invalid = await tools.write({ path });
+  const outside = await tools.write({ path: "/outside.txt", content: "escape" });
+  const absent = await tools.read({ path });
+  const written = await tools.write({ path, content: "milk" });
+  const read = await tools.read({ path });
+  return { names: Object.keys(tools).sort(), invalid: invalid.isError, outside: outside.isError,
+    absent: absent.isError, written: written.isError, text: read.text };
+}`;
+	expect(decode(await stub.workspaceTool("exec", { code }))).toMatchObject({
 		status: "completed",
+		output: {
+			names: ["delete", "edit", "find", "grep", "ls", "read", "write"],
+			invalid: true,
+			outside: true,
+			absent: true,
+			written: false,
+			text: expect.stringContaining("milk"),
+		},
 	});
-	expect(decode(await stub.workspaceTool("read", { path }, true))).toMatchObject({
-		status: "completed",
-		output: expect.arrayContaining([{ type: "text", text: expect.stringContaining("milk") }]),
-	});
-	expect(decode(await stub.workspaceTool("write", { path }))).toMatchObject({ status: "failed" });
-	expect(decode(await stub.workspaceTool("codemode", { code: "return 1" }, true))).toMatchObject({
+	expect(decode(await stub.workspaceTool("write", { path: "/workspace/notes.txt" }))).toMatchObject(
+		{
+			status: "failed",
+		},
+	);
+	expect(decode(await stub.workspaceTool("exec", { code }, true))).toMatchObject({
 		status: "unknown",
-	});
-	expect(decode(await stub.workspaceTool("exec", { command: "return 1" }))).toMatchObject({
-		status: "failed",
 	});
 });
 
 test("returns invalid tool arguments to the model without writing to the workspace", async () => {
 	const stub = openFixture();
 	const { runId } = await submit(stub, { id: "bad-append", prompt: "Call append without text." });
-	const message = "Invalid append arguments. Provide a non-empty text string.";
+	const message = "Provide non-empty JavaScript source in the code argument.";
 	await expect
 		.poll(() => readTurn(stub, runId))
 		.toMatchObject({
@@ -122,7 +140,7 @@ test("returns invalid tool arguments to the model without writing to the workspa
 			result: {
 				messages: [
 					{ role: "user", text: "Call append without text." },
-					{ role: "tool-call", name: "append", input: { text: "" } },
+					{ role: "tool-call", name: "exec", input: { code: "" } },
 					{ role: "tool", callId: "append-1", result: { status: "failed", message } },
 					{ role: "assistant", text: message },
 				],
@@ -197,7 +215,7 @@ test.each([
 		name: "reports an unknown outcome when the interrupted tool record is gone",
 		discardExecution: true,
 		toolResult: unknownTool,
-		reply: unknownTool.message,
+		reply: unknownMessage,
 	},
 ])("$name", async ({ discardExecution, toolResult, reply }) => {
 	let stub = openFixture();
@@ -242,6 +260,48 @@ test.each([
 	expect(await stub.state()).toMatchObject({ text: "hello" });
 });
 
+test("does not restart a script interrupted while it is still running", async () => {
+	let stub = openFixture();
+	const { runId } = await submit(stub, {
+		id: "interrupted-exec",
+		prompt: "Interrupt after writing.",
+	});
+	await expect.poll(() => stub.state()).toMatchObject({ text: "once" });
+	expect(await stub.turn(runId)).toMatchObject({ state: "running" });
+
+	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
+	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	await runDurableObjectAlarm(stub);
+
+	await expect
+		.poll(() => readTurn(stub, runId), { timeout: 5000 })
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user" },
+					{ role: "tool-call", name: "exec" },
+					{ role: "tool", result: unknownTool },
+					{ role: "assistant", text: unknownMessage },
+				],
+			},
+		});
+	expect(await stub.state()).toMatchObject({ text: "once" });
+});
+
+test("stopping a turn cancels its active Computer execution", async () => {
+	const stub = openFixture();
+	const { runId } = await submit(stub, { id: "stop-exec", prompt: "Interrupt after writing." });
+	await expect.poll(() => stub.state()).toMatchObject({ text: "once" });
+	const { executionId } = await stub.state();
+	if (executionId === undefined) {
+		throw new Error("Expected the active Computer execution ID");
+	}
+	expect(await stub.stop(runId)).toEqual({ runId, stopped: true });
+	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "cancelled" });
+	expect(await stub.executionStatus(executionId)).toBe("cancelled");
+});
+
 test("a restart between tool calls reuses the first result and still executes the second call", async () => {
 	const input = { id: "multi-tool", prompt: "Append hello, then world." };
 	let stub = openFixture();
@@ -272,7 +332,7 @@ test("a restart between tool calls reuses the first result and still executes th
 					{ role: "user", text: input.prompt },
 					toolCall,
 					{ role: "tool", callId: toolCall.id, result: completedTool },
-					{ role: "tool-call", id: "append-2", name: "append", input: { text: " world" } },
+					{ role: "tool-call", id: "append-2", name: "exec", input: appendExecInput(" world") },
 					{
 						role: "tool",
 						callId: "append-2",

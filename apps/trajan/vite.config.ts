@@ -53,30 +53,13 @@ async function fixtureWorker(mode: "browser-smoke"): Promise<PluginConfig> {
 	};
 }
 
-async function cloudflareWorkers(command: string, mode: string): Promise<PluginConfig> {
-	const sandboxPath = fileURLToPath(import.meta.resolve("@trajan/codemode/cloudflare.config"));
-	const { result } = await loadAndParseConfig(sandboxPath, { isPreview: false, mode });
-	if (!result.success) {
-		throw result.error;
-	}
-	const sandbox = result.data.worker;
-	if (!sandbox) {
-		throw new Error("Missing Pi Code Mode sandbox Worker");
-	}
-	const fixtureMode = command === "serve" && mode === "browser-smoke";
-	return {
-		...(fixtureMode && (await fixtureWorker(mode))),
-		auxiliaryWorkers: [{ config: sandbox, devOnly: true }],
-	};
-}
-
 export default defineConfig(async ({ command, mode }) => ({
 	// Intentional Worker crashes during recovery tests must not obscure other test pages.
 	server: mode === "browser-smoke" ? { hmr: { overlay: false } } : undefined,
 	plugins: [
 		agents(),
 		react(),
-		cloudflare(await cloudflareWorkers(command, mode)),
+		cloudflare(command === "serve" && mode === "browser-smoke" ? await fixtureWorker(mode) : {}),
 		tailwindcss(),
 		{
 			name: "pierre-palette",

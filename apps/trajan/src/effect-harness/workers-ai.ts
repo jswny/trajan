@@ -42,7 +42,7 @@ function modelFailure(cause: unknown): TurnModelError {
 
 const modelResponse = Effect.fnUntraced(function* (
 	response: AssistantMessage,
-	tools: ReadonlyArray<Tool>,
+	tool: Tool,
 	allowTools: boolean,
 ) {
 	if (response.stopReason === "stop") {
@@ -59,11 +59,7 @@ const modelResponse = Effect.fnUntraced(function* (
 	if (response.stopReason === "toolUse" && allowTools) {
 		const calls = response.content.filter((part) => part.type === "toolCall");
 		const [next] = calls;
-		if (
-			calls.length === 1 &&
-			tools.some(({ name }) => name === next.name) &&
-			!next.argumentsError
-		) {
+		if (calls.length === 1 && tool.name === next.name && !next.argumentsError) {
 			return {
 				role: "tool-call",
 				id: next.id,
@@ -78,7 +74,7 @@ const modelResponse = Effect.fnUntraced(function* (
 	return yield* modelFailure(response.errorMessage ?? `Model stopped with ${response.stopReason}.`);
 });
 
-export function workersAiTurnModel(binding: Env["AI"], tools: Array<Tool>, systemPrompt?: string) {
+export function workersAiTurnModel(binding: Env["AI"], tool: Tool, systemPrompt?: string) {
 	const ai = createAI({ binding });
 	const model = ai(MODEL_ID);
 	const openStream = Effect.fn("effect-harness.workersAi.openStream")(function* (
@@ -163,7 +159,7 @@ export function workersAiTurnModel(binding: Env["AI"], tools: Array<Tool>, syste
 			try: () =>
 				ai.streamSimple(
 					model,
-					{ messages: context, tools, systemPrompt },
+					{ messages: context, tools: allowTools ? [tool] : [], systemPrompt },
 					{
 						reasoning: "low",
 						toolChoice: allowTools ? "auto" : "none",
@@ -180,7 +176,7 @@ export function workersAiTurnModel(binding: Env["AI"], tools: Array<Tool>, syste
 					case "text_delta":
 						return Stream.succeed({ type: "text-delta", text: event.delta });
 					case "done":
-						return modelResponse(event.message, tools, allowTools).pipe(
+						return modelResponse(event.message, tool, allowTools).pipe(
 							Effect.map((response) => ({ type: "response" as const, response })),
 							Stream.fromEffect,
 						);

@@ -96,6 +96,29 @@ test("restores an interrupted stream into the chat without repeating the tool", 
 	await expect(transcript.getByText('Wrote "hello"', { exact: true })).toHaveCount(1);
 });
 
+test("recovers a running exec without repeating its write", async ({ page }) => {
+	const composer = await openChat(page);
+	await composer.fill("Interrupt after writing.");
+	await composer.press("Enter");
+	await expect(page.getByText("Running exec", { exact: true })).toBeVisible();
+	await expect
+		.poll(async () => {
+			const response = await page.request.post(`${control}/state`);
+			return Schema.decodeUnknownSync(Schema.Struct({ text: Schema.String }))(await response.json())
+				.text;
+		})
+		.toBe("once");
+
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	const transcript = page.getByRole("main");
+	await expect(
+		transcript.getByText(/Inspect it before repeating the action/).first(),
+	).toBeVisible();
+	await composer.fill("hello");
+	await composer.press("Enter");
+	await expect(transcript.getByText('Wrote "oncehello"', { exact: true })).toBeVisible();
+});
+
 test("stops the active reply and continues a follow-up submitted from another tab", async ({
 	page,
 	context,
@@ -174,7 +197,7 @@ test("keeps the transcript height and restores focus on a short iPhone viewport"
 	const transcript = page.locator("main");
 	const height = await transcript.evaluate((el) => el.clientHeight);
 	await tools.click();
-	await expect(dialog.getByText("append", { exact: true })).toBeVisible();
+	await expect(dialog.getByText("exec", { exact: true })).toBeVisible();
 	expect(await transcript.evaluate((el) => el.clientHeight)).toBe(height);
 	await expect.poll(() => close.evaluate((el) => el.clientHeight)).toBeGreaterThanOrEqual(44);
 	await close.click();

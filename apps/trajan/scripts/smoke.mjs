@@ -38,7 +38,7 @@ function watch(accept) {
 	});
 }
 
-async function send(prompt, tools) {
+async function send(prompt) {
 	const id = crypto.randomUUID();
 	let deltas = 0;
 	const ready = Promise.withResolvers();
@@ -49,6 +49,10 @@ async function send(prompt, tools) {
 		if (event.type !== "snapshot") {
 			return;
 		}
+		assert.deepEqual(
+			event.catalog.map(({ name }) => name),
+			["exec"],
+		);
 		ready.resolve();
 		const messages = event.page.entries
 			.filter((entry) => entry.submissionId === id)
@@ -60,19 +64,18 @@ async function send(prompt, tools) {
 		if (reply?.role !== "assistant") {
 			return;
 		}
-		for (const tool of tools) {
-			const call = messages.find(
-				(message) => message.role === "tool-call" && message.name === tool,
-			);
-			assert.ok(call, `The model did not call ${tool}`);
-			assert.ok(
+		const calls = messages.filter((message) => message.role === "tool-call");
+		assert.ok(calls.length > 0 && calls.every((call) => call.name === "exec"));
+		assert.ok(
+			calls.some((call) => call.input.code.includes("codemode:tools")) &&
 				messages.some(
 					(item) =>
-						item.role === "tool" && item.callId === call.id && item.result.status === "completed",
+						item.role === "tool" &&
+						item.result.status === "completed" &&
+						JSON.stringify(item.result.output).includes(marker),
 				),
-				`The ${tool} call did not complete`,
-			);
-		}
+			"Expected Computer's registered tools to return the workspace marker",
+		);
 		assert.ok(reply.text.includes(marker), "The reply did not include the workspace marker");
 		return deltas;
 	});
@@ -86,13 +89,20 @@ async function send(prompt, tools) {
 	assert.equal((await response.json()).submissionId, id);
 	const streamed = await completion;
 	assert.ok(streamed > 0, "The model did not stream text");
-	stdout.write(`Passed: ${tools.join(", ")} with ${streamed} streamed text updates\n`);
+	stdout.write(`Passed: Computer read/write through exec with ${streamed} streamed text updates\n`);
 	return id;
 }
 
+const code = `import { read, write } from "codemode:tools";
+export default async function () {
+  const written = await write({ path: ${JSON.stringify(file)}, content: ${JSON.stringify(marker)} });
+  if (written.isError) throw new Error(written.text);
+  const result = await read({ path: ${JSON.stringify(file)} });
+  if (result.isError) throw new Error(result.text);
+  return result.text;
+}`;
 const first = await send(
-	`Use write to save exactly ${marker} to ${file}, then use read to read that file back. Reply only with the file contents.`,
-	["write", "read"],
+	`Run this exact JavaScript module using exec. Reply with only the marker you read from the file:\n${code}`,
 );
 const restored = await watch((event) =>
 	event.type === "snapshot" ? event.page.entries : undefined,
@@ -106,9 +116,4 @@ assert.ok(
 	),
 );
 stdout.write("Passed: WebSocket reconnect restores the conversation\n");
-const command = `import { readFile } from "node:fs/promises"; export default async function () { return await readFile(${JSON.stringify(file)}, "utf8"); }`;
-const code = `return await tools.exec({ command: ${JSON.stringify(command)} });`;
-await send(`Run this script with codemode and reply only with the file contents:\n${code}`, [
-	"codemode",
-]);
 stdout.write(`Verified ${base.origin}\n`);

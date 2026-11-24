@@ -18,7 +18,7 @@ export default {
 		if (isEffectChatPath(url.pathname)) {
 			return stub.fetch(request);
 		}
-		const action = /^\/__browser-smoke\/effect-stream\/(pause|release|crash)$/.exec(
+		const action = /^\/__browser-smoke\/effect-stream\/(pause|release|crash|state)$/.exec(
 			url.pathname,
 		)?.[1];
 		if (action && fixture && request.method === "POST") {
@@ -32,6 +32,8 @@ export default {
 				case "crash":
 					await stub.crash();
 					return new Response(null, { status: 204 });
+				case "state":
+					return Response.json(await stub.state());
 			}
 		}
 		return new Response(null, { status: 404 });

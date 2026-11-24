@@ -1,124 +1,96 @@
 import type { Workspace } from "@cloudflare/computer";
-import { renderToolSignature } from "@earendil-works/pi-codemode/declarations";
-import { RemoteCodemodeSandbox } from "@earendil-works/pi-codemode/portable";
-import type { CodemodeRemote, CodemodeTool } from "@earendil-works/pi-codemode/portable";
 import { TurnIoError } from "@trajan/effect-harness";
 import type { ToolResult, TurnTools } from "@trajan/effect-harness";
-import { Effect, Schema } from "effect";
+import { Effect, Exit, Schema } from "effect";
 import { Tool } from "effect/ai";
-import { computerToolset, REPLAY_SAFE } from "../workspace";
 
 const Code = Schema.Struct({ code: Schema.NonEmptyString });
-const Codemode = Tool.make("codemode", { parameters: Code, success: Schema.Json });
+const Exec = Tool.make("exec", { parameters: Code, success: Schema.Json });
 
-function toolError(cause: unknown): Extract<typeof ToolResult.Type, { status: "failed" }> {
-	return {
-		status: "failed",
+function executionError(cause: unknown) {
+	return new TurnIoError({
+		operation: Exec.name,
+		cause,
 		message: cause instanceof Error ? cause.message : String(cause),
-	};
+	});
 }
 
 function unknownOutcome(message: string): Extract<typeof ToolResult.Type, { status: "unknown" }> {
 	return {
 		status: "unknown",
-		message: `${message} The tool may have changed the workspace. Inspect it before repeating the action.`,
+		message: `${message} The script may have changed the workspace. Inspect it before repeating the action.`,
 	};
 }
 
-export function effectWorkspaceTools(workspace: Workspace, remote: () => CodemodeRemote) {
-	const computer = computerToolset(workspace);
-	const direct = computer.tools.filter((tool) => tool.name !== "exec");
-
-	const sandboxTools = computer.tools.map((tool): CodemodeTool => ({
-		name: tool.name,
-		description: tool.description,
-		inputSchema: tool.parameters,
-		async execute(input, { signal }) {
-			const result = await computer.execute(
-				{ id: crypto.randomUUID(), name: tool.name, arguments: input },
-				{ abortSignal: signal },
-			);
-			if (result.isError) {
-				const message = result.content.find((part) => part.type === "text")?.text;
-				throw new Error(message ?? `The ${tool.name} tool failed.`);
+export function effectWorkspaceTools(workspace: Workspace, instructions: string) {
+	const execute = Effect.fn("effect-harness.exec")(
+		function* (
+			...[call, attempt]: Parameters<TurnTools["Service"]["execute"]>
+		): Effect.fn.Return<typeof ToolResult.Type, TurnIoError | Schema.SchemaError> {
+			if (call.name !== Exec.name) {
+				return { status: "failed", message: `Unknown tool: ${call.name}` };
 			}
-			return result.content;
-		},
-	}));
-
-	const declaration = {
-		name: Codemode.name,
-		description: [
-			"Run an async JavaScript function body in a sandbox to compose workspace tools. Use await tools.name(args) and return the result or call text(value). Tools resolve to content parts. The script has no network or imports.",
-			...sandboxTools.map((tool) => `tools.${renderToolSignature(tool)}`),
-			sandboxTools.find((tool) => tool.name === "exec")?.description,
-		].join("\n"),
-		parameters: Tool.getJsonSchema(Codemode),
-	};
-
-	const runCode = Effect.fn("effect-harness.codemode")(
-		function* (input: Schema.Json) {
-			const { code } = yield* Schema.decodeUnknownEffect(Code)(input);
+			const { code } = yield* Schema.decodeUnknownEffect(Code)(call.input);
+			const runtime = workspace.runtime;
 			const result = yield* Effect.acquireUseRelease(
-				Effect.sync(() => new RemoteCodemodeSandbox({ remote, tools: sandboxTools })),
-				(sandbox) =>
-					Effect.tryPromise({
-						try: (signal) => sandbox.execute(code, { signal }),
-						catch: (cause) =>
-							new TurnIoError({ operation: "codemode", cause, message: toolError(cause).message }),
+				Effect.tryPromise({
+					// A missing execution can no longer prove that a mutation didn't happen.
+					try: () =>
+						attempt.recovering
+							? runtime.getExec(attempt.idempotencyKey, { encoding: "utf8" })
+							: runtime.exec(code, {
+									id: attempt.idempotencyKey,
+									onInterrupt: "fail",
+									encoding: "utf8",
+									output: { maxBytes: 16 * 1024 },
+								}),
+					catch: executionError,
+				}),
+				(handle) => Effect.tryPromise({ try: () => handle.result(), catch: executionError }),
+				(handle, exit) =>
+					Effect.gen(function* () {
+						if (Exit.hasInterrupts(exit)) {
+							yield* Effect.tryPromise({ try: () => handle.kill(), catch: executionError }).pipe(
+								Effect.ignore,
+							);
+						}
+						yield* Effect.sync(() => handle[Symbol.dispose]());
 					}),
-				(sandbox) => Effect.promise(() => sandbox.close()),
 			);
-			if (!result.ok) {
-				return result.error.kind === "script" && result.calls.length === 0
-					? toolError(result.error.message)
-					: unknownOutcome(result.error.message);
+			const { value, stdout, stderr, truncated } = result;
+			if (result.status !== "completed") {
+				return unknownOutcome(stderr.trim() || `Execution ended with status ${result.status}.`);
 			}
-			const output = yield* Schema.decodeUnknownEffect(Schema.Json)({
-				value: result.value ?? null,
-				content: result.output,
-			});
-			return { status: "completed", output } as const;
+			const output = yield* Schema.decodeUnknownEffect(Schema.Json)(
+				stdout || stderr || truncated
+					? { value: value ?? null, stdout, stderr, ...(truncated && { truncated }) }
+					: (value ?? null),
+			).pipe(Effect.mapError(executionError));
+			return { status: "completed", output };
 		},
 		Effect.catch((error) =>
 			Effect.succeed(
-				error instanceof TurnIoError ? unknownOutcome(error.message) : toolError(error),
+				error instanceof TurnIoError
+					? unknownOutcome(error.message)
+					: {
+							status: "failed" as const,
+							message: "Provide non-empty JavaScript source in the code argument.",
+						},
 			),
 		),
 	);
 
-	const execute = Effect.fn("effect-harness.workspaceTool")(function* (
-		call: Parameters<TurnTools["Service"]["execute"]>[0],
-		attempt: Parameters<TurnTools["Service"]["execute"]>[1],
-	): Effect.fn.Return<typeof ToolResult.Type> {
-		if (attempt.recovering && !REPLAY_SAFE.has(call.name)) {
-			return unknownOutcome("The tool was interrupted.");
-		}
-		if (call.name === Codemode.name) {
-			return yield* runCode(call.input);
-		}
-		if (!direct.some((tool) => tool.name === call.name)) {
-			return toolError(`Unknown workspace tool: ${call.name}`);
-		}
-		return yield* Effect.tryPromise({
-			try: (signal) =>
-				computer.execute(
-					{ id: attempt.idempotencyKey, name: call.name, arguments: call.input },
-					{ abortSignal: signal },
-				),
-			catch: toolError,
-		}).pipe(
-			Effect.match({
-				onFailure: (failure) => failure,
-				onSuccess: ({ content, isError }) =>
-					isError
-						? toolError(
-								content.find((part) => part.type === "text")?.text ?? "Workspace tool failed.",
-							)
-						: { status: "completed" as const, output: content },
-			}),
-		);
-	});
-
-	return { declarations: [...direct, declaration], service: { execute } };
+	return {
+		declaration: {
+			name: Exec.name,
+			description: [
+				"Run JavaScript ES module source in the /workspace sandbox. Use export default async function () { ... } and return the result. console.log and console.error are also captured.",
+				"Write large results to a workspace file and return the path.",
+				"Use this for every tool call. The sandbox also supports node:fs/promises and relative imports of workspace .js files. It has no shell, package installation, or direct network access.",
+				instructions,
+			].join("\n"),
+			parameters: Tool.getJsonSchema(Exec),
+		},
+		service: { execute },
+	};
 }

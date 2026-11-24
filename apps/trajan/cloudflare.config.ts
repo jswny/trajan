@@ -1,5 +1,4 @@
 import { bindings, defineConfig, exports } from "cf/config";
-import codemode from "@trajan/codemode/cloudflare.config";
 // oxlint-disable-next-line import/no-namespace -- The cf-worker namespace import preserves the typed Durable Object exports.
 import * as entrypoint from "./src/server.ts" with { type: "cf-worker" };
 
@@ -26,10 +25,6 @@ export default defineConfig(({ mode }) => {
 			env: {
 				AI: bindings.ai({ dev: { remote: true } }),
 				LOADER: bindings.workerLoader(),
-				CODEMODE_SANDBOX: bindings.durableObject({
-					worker: codemode.worker,
-					exportName: "CodemodeSandbox",
-				}),
 				Trajan: bindings.durableObject({ worker: name, exportName: "Trajan" }),
 			},
 			exports: { Trajan: exports.durableObject({ storage: "sqlite" }) },

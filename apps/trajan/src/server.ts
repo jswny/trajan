@@ -1,44 +1,27 @@
-import { Workspace } from "@cloudflare/computer";
-import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
-import { createGitClient } from "@cloudflare/computer/git";
-import { createGitModule } from "@cloudflare/computer/modules/git";
 import { TurnModel, TurnTools } from "@trajan/effect-harness";
 import { Data, Effect, Layer } from "effect";
 import { ChatPath, isEffectChatPath } from "./effect-harness/chat-protocol";
 import { EffectHarnessObject } from "./effect-harness/worker-host";
 import { workersAiTurnModel } from "./effect-harness/workers-ai";
 import { effectWorkspaceTools } from "./effect-harness/workspace-tools";
-import { WORKSPACE_PROMPT } from "./workspace";
+import { createTrajanWorkspace, WORKSPACE_PROMPT } from "./workspace";
 
 class ChatRouteError extends Data.TaggedError("ChatRouteError")<{ readonly cause: unknown }> {}
 
 export class Trajan extends EffectHarnessObject {
-	readonly #workspace = new Workspace({
-		storage: this.ctx.storage,
-		git: createGitClient(),
-		backends: [
-			new CodemodeBackend({
-				loader: this.env.LOADER,
-				root: "/workspace",
-				access: "read-write",
-				modules: { "codemode:git": createGitModule({ allowNetwork: true }) },
-			}),
-		],
-	});
-	readonly #tools = effectWorkspaceTools(this.#workspace, () =>
-		this.env.CODEMODE_SANDBOX.getByName(this.ctx.id.toString()),
-	);
+	readonly #computer = createTrajanWorkspace(this.ctx.storage, this.env.LOADER);
+	readonly #tools = effectWorkspaceTools(this.#computer.workspace, this.#computer.instructions);
 
-	protected override readonly toolCatalog = this.#tools.declarations.map(
-		({ name, description }) => ({
-			name,
-			description,
-		}),
-	);
+	protected override readonly toolCatalog = [
+		{
+			name: this.#tools.declaration.name,
+			description: this.#tools.declaration.description,
+		},
+	];
 	protected readonly turnLayer = Layer.merge(
 		Layer.succeed(
 			TurnModel,
-			workersAiTurnModel(this.env.AI, this.#tools.declarations, WORKSPACE_PROMPT),
+			workersAiTurnModel(this.env.AI, this.#tools.declaration, WORKSPACE_PROMPT),
 		),
 		Layer.succeed(TurnTools, this.#tools.service),
 	);

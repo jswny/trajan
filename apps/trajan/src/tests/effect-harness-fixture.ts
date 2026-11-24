@@ -1,5 +1,3 @@
-import { Workspace } from "@cloudflare/computer";
-import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import {
 	TurnIoError,
 	ToolResult,
@@ -7,128 +5,65 @@ import {
 	TurnModelError,
 	TurnTools,
 } from "@trajan/effect-harness";
-import type { StepAttempt, TurnMessage, TurnModelEvent } from "@trajan/effect-harness";
-import { Context, Effect, Layer, Option, Predicate, Schema, Stream } from "effect";
-import { Tool, Toolkit } from "effect/ai";
+import type { TurnMessage, TurnModelEvent } from "@trajan/effect-harness";
+import { Effect, Layer, Predicate, Schema, Stream } from "effect";
 import { EffectHarnessObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
+import { createTrajanWorkspace } from "../workspace";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
 type PausePoint = "before-task" | "after-write" | "between-tools" | "during-reply" | "after-commit";
 const workspaceFile = "/workspace/turn.txt";
-class AppendAttempt extends Context.Service<AppendAttempt, StepAttempt>()(
-	"trajan/fixture/AppendAttempt",
-) {}
-
-const appendDescription = "Append text to the fixture workspace file and return its full contents.";
-const Append = Tool.make("append", {
-	description: appendDescription,
-	parameters: Schema.Struct({ text: Schema.NonEmptyString }),
-	success: ToolResult,
-	failure: TurnIoError,
-	dependencies: [AppendAttempt],
-});
-const AppendToolkit = Toolkit.make(Append);
-
-const appendScript = `
+export function appendExecInput(text: string) {
+	return {
+		code: `
 import fs from "node:fs/promises";
-export default async function (text) {
+export default async function () {
   await fs.mkdir("/workspace", { recursive: true });
   const path = ${JSON.stringify(workspaceFile)};
   const previous = await fs.readFile(path, "utf8").catch((error) => {
     if (error.code === "ENOENT") return "";
     throw error;
   });
-  const content = previous + text;
+  const content = previous + ${JSON.stringify(text)};
   await fs.writeFile(path, content);
   return content;
 }
-`;
+`,
+	};
+}
 
 function isMissing(error: unknown): boolean {
 	return Predicate.hasProperty(error, "code") && error.code === "ENOENT";
 }
 
 export class EffectHarnessTestObject extends EffectHarnessObject {
-	protected override readonly toolCatalog = [{ name: Append.name, description: appendDescription }];
 	readonly #instance = crypto.randomUUID();
-	readonly #workspace = new Workspace({
-		storage: this.ctx.storage,
-		backends: [new CodemodeBackend({ loader: this.env.LOADER })],
-	});
-	readonly #effectTools = effectWorkspaceTools(this.#workspace, () =>
-		this.env.CODEMODE_SANDBOX.getByName(this.ctx.id.toString()),
+	readonly #computer = createTrajanWorkspace(this.ctx.storage, this.env.LOADER);
+	readonly #effectTools = effectWorkspaceTools(
+		this.#computer.workspace,
+		this.#computer.instructions,
 	);
-	readonly #append = Effect.fn("effect-harness.fixture.append")(function* (
-		this: EffectHarnessTestObject,
-		{ text }: { text: string },
-	): Effect.fn.Return<typeof ToolResult.Type, TurnIoError, AppendAttempt> {
-		const { idempotencyKey, recovering } = yield* AppendAttempt;
-		return yield* Effect.tryPromise({
-			try: async (signal): Promise<typeof ToolResult.Type> => {
-				const runtime = this.#workspace.runtime;
-				try {
-					using handle = recovering
-						? await runtime.getExec(idempotencyKey, { encoding: "utf8" })
-						: await runtime.exec(appendScript, {
-								id: idempotencyKey,
-								input: text,
-								onInterrupt: "fail",
-								encoding: "utf8",
-							});
-					const result = await handle.result();
-					if (result.status !== "completed") {
-						return { status: recovering ? "unknown" : "failed", message: result.stderr };
-					}
-					// Pause after Computer commits, while the Task's tool checkpoint is still open.
-					await this.#pauseAt("after-write", signal, idempotencyKey);
-					return { status: "completed", output: result.value ?? null };
-				} catch (error) {
-					// A pruned execution ID can be started again. Recovery only reattaches.
-					if (recovering && isMissing(error)) {
-						return { status: "unknown", message: "The previous tool outcome is unknown." };
-					}
-					throw error;
-				}
-			},
-			catch: (cause) => new TurnIoError({ operation: Append.name, cause }),
-		});
-	});
+	protected override readonly toolCatalog = [this.#effectTools.declaration];
 
-	readonly #toolsLayer = Layer.effect(
-		TurnTools,
-		Effect.gen({ self: this }, function* () {
-			const toolkit = yield* AppendToolkit;
-			const workspaceTools = this.#effectTools;
-			return TurnTools.of({
-				execute: Effect.fn("effect-harness.fixture.executeTool")(function* (call, attempt) {
-					if (call.name !== Append.name) {
-						return yield* workspaceTools.service.execute(call, attempt);
-					}
-					const result = yield* toolkit.handle(Append.name, call.input, call.id).pipe(
-						Effect.flatMap(Stream.runLast),
-						Effect.flatMap((last) =>
-							Option.isSome(last)
-								? Effect.succeed(last.value.result)
-								: Effect.fail(
-										new TurnIoError({ operation: Append.name, cause: "Missing tool result" }),
-									),
-						),
-						Effect.provideService(AppendAttempt, attempt),
-						Effect.catchTag("AiError", (error) =>
-							error.reason._tag === "ToolParameterValidationError"
-								? Effect.succeed({
-										status: "failed" as const,
-										message: "Invalid append arguments. Provide a non-empty text string.",
-									})
-								: Effect.fail(new TurnIoError({ operation: Append.name, cause: error })),
-						),
-					);
-					return result;
-				}),
+	readonly #execute = Effect.fn("effect-harness.fixture.executeTool")(function* (
+		this: EffectHarnessTestObject,
+		...args: Parameters<TurnTools["Service"]["execute"]>
+	) {
+		const [call, attempt] = args;
+		if (call.id === "exec-interrupt") {
+			yield* Effect.promise(() => this.ctx.storage.put("executionId", attempt.idempotencyKey));
+		}
+		const result = yield* this.#effectTools.service.execute(call, attempt);
+		if (result.status === "completed") {
+			// Pause after Computer settles while the turn's checkpoint is still open.
+			yield* Effect.tryPromise({
+				try: (signal) => this.#pauseAt("after-write", signal, attempt.idempotencyKey),
+				catch: (cause) => new TurnIoError({ operation: call.name, cause }),
 			});
-		}),
-	).pipe(Layer.provide(AppendToolkit.toLayer({ append: (input) => this.#append(input) })));
+		}
+		return result;
+	});
 
 	readonly #fakeComplete = Effect.fnUntraced(function* (
 		this: EffectHarnessTestObject,
@@ -148,21 +83,38 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		if (last?.role === "user" && last.text === "Run a workspace module.") {
 			return {
 				role: "tool-call",
-				id: "codemode-1",
-				name: "codemode",
+				id: "exec-1",
+				name: "exec",
 				input: {
-					code: 'return await tools.exec({ command: "export default () => 42" })',
+					code: "export default () => 42",
 				},
 			};
 		}
 		if (last?.role === "user" && last.text === "Fail Code Mode after a write.") {
 			return {
 				role: "tool-call",
-				id: "codemode-1",
-				name: "codemode",
+				id: "exec-1",
+				name: "exec",
 				input: {
-					code: `await tools.write({ path: ${JSON.stringify(workspaceFile)}, content: "written" });
-throw new Error("Script failed after writing.");`,
+					code: `import { write } from "codemode:tools";
+export default async function () {
+  const result = await write({ path: ${JSON.stringify(workspaceFile)}, content: "written" });
+  if (result.isError) throw new Error(result.text);
+  throw new Error("Script failed after writing.");
+}`,
+				},
+			};
+		}
+		if (last?.role === "user" && last.text === "Interrupt after writing.") {
+			return {
+				role: "tool-call",
+				id: "exec-interrupt",
+				name: "exec",
+				input: {
+					code: appendExecInput("once").code.replace(
+						"return content;",
+						"await new Promise((resolve) => setTimeout(resolve, 45_000)); return content;",
+					),
 				},
 			};
 		}
@@ -204,8 +156,8 @@ throw new Error("Script failed after writing.");`,
 				return {
 					role: "tool-call",
 					id: "append-2",
-					name: Append.name,
-					input: { text: " world" },
+					name: "exec",
+					input: appendExecInput(" world"),
 				};
 			}
 			const { result } = last;
@@ -218,14 +170,11 @@ throw new Error("Script failed after writing.");`,
 		return {
 			role: "tool-call",
 			id: "append-1",
-			name: Append.name,
-			input: {
-				text: appendTwice
-					? "hello"
-					: user?.text === "Call append without text."
-						? ""
-						: (user?.text ?? ""),
-			},
+			name: "exec",
+			input:
+				user?.text === "Call append without text."
+					? { code: "" }
+					: appendExecInput(appendTwice ? "hello" : (user?.text ?? "")),
 		};
 	});
 
@@ -262,7 +211,7 @@ throw new Error("Script failed after writing.");`,
 					),
 			}),
 		),
-		this.#toolsLayer,
+		Layer.succeed(TurnTools, TurnTools.of({ execute: (...args) => this.#execute(...args) })),
 	);
 
 	protected override onTurnPhase(phase: "before-task" | "after-commit", signal: AbortSignal) {
@@ -276,7 +225,7 @@ throw new Error("Script failed after writing.");`,
 	async state() {
 		const executionId = await this.ctx.storage.get<string>("executionId");
 		const pausedAt = await this.ctx.storage.get<PausePoint>("pausedAt");
-		const text = await this.#workspace.fs
+		const text = await this.#computer.workspace.fs
 			.readFile(workspaceFile, "utf8")
 			.catch((error: unknown) => {
 				if (isMissing(error)) {
@@ -292,7 +241,7 @@ throw new Error("Script failed after writing.");`,
 			this.#effectTools.service
 				.execute(
 					{ role: "tool-call", id: "test-call", name, input },
-					{ idempotencyKey: "test-call", recovering },
+					{ idempotencyKey: crypto.randomUUID(), recovering },
 				)
 				.pipe(Effect.flatMap(Schema.encodeEffect(Schema.fromJsonString(ToolResult)))),
 		);
@@ -323,7 +272,12 @@ throw new Error("Script failed after writing.");`,
 	}
 
 	discardExecution(id: string) {
-		return this.#workspace.runtime.disposeExec(id);
+		return this.#computer.workspace.runtime.disposeExec(id);
+	}
+
+	async executionStatus(id: string) {
+		using handle = await this.#computer.workspace.runtime.getExec(id);
+		return (await handle.result()).status;
 	}
 
 	crash() {
