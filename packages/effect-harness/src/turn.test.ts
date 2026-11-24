@@ -7,7 +7,7 @@ const submission = { id: "s1", prompt: "Say hello" };
 
 const journal: TurnJournal = {
 	checkpoint: (name, schema, run) =>
-		run({ idempotencyKey: name, recovering: false }).pipe(
+		run({ runId: "test-run", idempotencyKey: name, recovering: false }).pipe(
 			Effect.flatMap(Schema.decodeUnknownEffect(schema)),
 		),
 };

@@ -1,9 +1,10 @@
-import { runDurableObjectAlarm } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/effect-harness";
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../effect-harness/chat-protocol";
+import { readToolActivity } from "../effect-harness/tool-activity";
 import { appendExecInput } from "./effect-harness-fixture";
 
 const submission = { id: "submission-1", prompt: "hello" };
@@ -288,7 +289,10 @@ test("does not restart a script interrupted while it is still running", async ()
 				messages: [
 					{ role: "user" },
 					{ role: "tool-call", name: "exec" },
-					{ role: "tool", result: unknownTool },
+					{
+						role: "tool",
+						result: { ...unknownTool, activity: [{ name: "write", status: "completed" }] },
+					},
 					{ role: "assistant", text: unknownMessage },
 				],
 			},
@@ -331,7 +335,10 @@ test("a read-only exec replays a completed call and retries an interrupted call 
 						result: {
 							status: "completed",
 							output: ["first", "second"],
-							activity: [{ id: initial.second[0], name: "read_second", status: "completed" }],
+							activity: [
+								{ id: initial.first[0], name: "read_first", status: "completed" },
+								{ id: initial.second[0], name: "read_second", status: "completed" },
+							],
 						},
 					},
 					{ role: "assistant", text: 'Read ["first","second"]' },
@@ -339,6 +346,9 @@ test("a read-only exec replays a completed call and retries an interrupted call 
 			},
 		});
 	expect(await stub.state()).toMatchObject({ text: "" });
+	expect(
+		await runInDurableObject(stub, (_, { storage }) => readToolActivity(storage, runId)),
+	).toBeUndefined();
 });
 
 test("stopping a turn cancels its active Computer execution", async () => {
@@ -352,6 +362,9 @@ test("stopping a turn cancels its active Computer execution", async () => {
 	expect(await stub.stop(runId)).toEqual({ runId, stopped: true });
 	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "cancelled" });
 	expect(await stub.executionStatus(executionId)).toBe("cancelled");
+	expect(
+		await runInDurableObject(stub, (_, { storage }) => readToolActivity(storage, runId)),
+	).toBeUndefined();
 });
 
 test("a restart between tool calls reuses the first result and still executes the second call", async () => {

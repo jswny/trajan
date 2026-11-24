@@ -119,6 +119,8 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 		transcript.getByText(/Inspect it before repeating the action/).first(),
 	).toBeVisible();
 	await expect(activity).toBeHidden();
+	await transcript.getByText("Failed", { exact: true }).click();
+	await expect(activity.getByRole("listitem")).toHaveText(/write.*Succeeded/);
 	await composer.fill("hello");
 	await composer.press("Enter");
 	await expect(transcript.getByText('Wrote "oncehello"', { exact: true })).toBeVisible();
@@ -137,13 +139,13 @@ test("shows live tool progress and the final answer after replaying a read-only 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
 	await expect(page.getByText("Live", { exact: true })).toBeVisible();
-	await expect(calls).toHaveText([/read_second.*Running/]);
+	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Running/]);
 	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
 
 	const transcript = page.getByRole("main");
 	await expect(transcript.getByText('Read ["first","second"]', { exact: true })).toHaveCount(1);
 	await transcript.getByText("Done", { exact: true }).click();
-	await expect(calls).toHaveText([/read_second.*Succeeded/]);
+	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Succeeded/]);
 });
 
 test("stops the active reply and continues a follow-up submitted from another tab", async ({

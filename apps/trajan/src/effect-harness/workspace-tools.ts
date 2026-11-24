@@ -3,10 +3,10 @@ import type { StepAttempt, ToolActivity, ToolResult, TurnTools } from "@trajan/e
 import { Effect, Exit, Schema } from "effect";
 import { Tool } from "effect/ai";
 import type { createTrajanWorkspace } from "../workspace";
+import { RECENT_TOOL_CALLS, readToolActivity, writeToolActivity } from "./tool-activity";
 
 const Code = Schema.Struct({ code: Schema.NonEmptyString });
 const Exec = Tool.make("exec", { parameters: Code, success: Schema.Json });
-const RECENT_TOOL_CALLS = 8;
 
 function executionError(cause: unknown) {
 	return new TurnIoError({
@@ -23,11 +23,16 @@ function unknownOutcome(message: string): Extract<typeof ToolResult.Type, { stat
 	};
 }
 
-export function effectWorkspaceTools({
-	workspace,
-	instructions,
-	observeExecution,
-}: ReturnType<typeof createTrajanWorkspace>) {
+function markInterrupted(activity: ReadonlyArray<typeof ToolActivity.Type>) {
+	return activity.map((entry) =>
+		entry.status === "running" ? { ...entry, status: "interrupted" as const } : entry,
+	);
+}
+
+export function effectWorkspaceTools(
+	{ workspace, instructions, observeExecution }: ReturnType<typeof createTrajanWorkspace>,
+	storage: DurableObjectStorage,
+) {
 	const runScript = Effect.fnUntraced(
 		function* (
 			code: string,
@@ -77,16 +82,29 @@ export function effectWorkspaceTools({
 				return { status: "failed" as const, message: `Unknown tool: ${call.name}` };
 			}
 			const { code } = yield* Schema.decodeUnknownEffect(Code)(call.input);
-			let recent: ReadonlyArray<typeof ToolActivity.Type> = [];
+			const { runId, idempotencyKey: executionId } = attempt;
+			const saved = yield* Effect.try({
+				try: () => readToolActivity(storage, runId),
+				catch: executionError,
+			});
+			let recent = saved?.executionId === executionId ? markInterrupted(saved.activity) : [];
+			if (recent.length > 0) {
+				yield* publishActivity(recent);
+			}
 			const result = yield* Effect.acquireUseRelease(
 				Effect.sync(() =>
-					observeExecution(attempt.idempotencyKey, (entry) =>
-						Effect.suspend(() => {
-							recent = [...recent.filter(({ id }) => id !== entry.id), entry].slice(
-								-RECENT_TOOL_CALLS,
-							);
-							return publishActivity(recent);
-						}),
+					observeExecution(executionId, (entry) =>
+						Effect.tryPromise({
+							try: () => {
+								const activity = [...recent.filter(({ id }) => id !== entry.id), entry].slice(
+									-RECENT_TOOL_CALLS,
+								);
+								writeToolActivity(storage, runId, { executionId, activity });
+								recent = activity;
+								return storage.sync();
+							},
+							catch: executionError,
+						}).pipe(Effect.flatMap(() => publishActivity(recent))),
 					),
 				),
 				() => runScript(code, attempt),
@@ -95,17 +113,18 @@ export function effectWorkspaceTools({
 			if (recent.length === 0) {
 				return result;
 			}
-			return {
-				...result,
-				activity: recent.map((entry) =>
-					entry.status === "running" ? { ...entry, status: "interrupted" as const } : entry,
-				),
-			};
+			return { ...result, activity: markInterrupted(recent) };
 		},
-		Effect.orElseSucceed(() => ({
-			status: "failed" as const,
-			message: "Provide non-empty JavaScript source in the code argument.",
-		})),
+		Effect.catch((error) =>
+			Effect.succeed(
+				error instanceof TurnIoError
+					? unknownOutcome(error.message)
+					: {
+							status: "failed" as const,
+							message: "Provide non-empty JavaScript source in the code argument.",
+						},
+			),
+		),
 	);
 
 	return {

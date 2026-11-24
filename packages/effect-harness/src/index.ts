@@ -97,6 +97,7 @@ export class TurnModelError extends Schema.TaggedError<
 type TurnError = TurnIoError | TurnModelError | Schema.SchemaError;
 
 export interface StepAttempt {
+	readonly runId: string;
 	readonly idempotencyKey: string;
 	/** An earlier attempt may have started this step's external work. */
 	readonly recovering: boolean;

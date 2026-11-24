@@ -9,6 +9,7 @@ import {
 } from "@trajan/effect-harness";
 import type { TurnMessage, TurnModelEvent } from "@trajan/effect-harness";
 import { Effect, Layer, Predicate, Schema, Stream } from "effect";
+import { toolActivityKey } from "../effect-harness/tool-activity";
 import { EffectHarnessObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
 import { createObservedToolBindings, createTrajanWorkspace } from "../workspace";
@@ -50,7 +51,7 @@ function isMissing(error: unknown): boolean {
 export class EffectHarnessTestObject extends EffectHarnessObject {
 	readonly #instance = crypto.randomUUID();
 	readonly #computer = createTrajanWorkspace(this.ctx.storage, this.env.LOADER);
-	readonly #effectTools = effectWorkspaceTools(this.#computer);
+	readonly #effectTools = effectWorkspaceTools(this.#computer, this.ctx.storage);
 	#replayTools: ReturnType<typeof effectWorkspaceTools> | undefined;
 	protected override readonly toolCatalog = [this.#effectTools.declaration];
 
@@ -85,11 +86,14 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 				}),
 			],
 		});
-		return effectWorkspaceTools({
-			workspace,
-			instructions: "Read-only replay fixture.",
-			observeExecution: tools.observeExecution,
-		});
+		return effectWorkspaceTools(
+			{
+				workspace,
+				instructions: "Read-only replay fixture.",
+				observeExecution: tools.observeExecution,
+			},
+			storage,
+		);
 	}
 
 	readonly #execute = Effect.fn("effect-harness.fixture.executeTool")(function* (
@@ -334,14 +338,18 @@ export default async function () {
 	}
 
 	workspaceTool(name: string, input: Schema.Json, recovering = false): Promise<string> {
+		const runId = crypto.randomUUID();
 		return Effect.runPromise(
 			this.#effectTools.service
 				.execute(
 					{ role: "tool-call", id: "test-call", name, input },
-					{ idempotencyKey: crypto.randomUUID(), recovering },
+					{ runId, idempotencyKey: runId, recovering },
 					() => Effect.void,
 				)
-				.pipe(Effect.flatMap(Schema.encodeEffect(Schema.fromJsonString(ToolResult)))),
+				.pipe(
+					Effect.flatMap(Schema.encodeEffect(Schema.fromJsonString(ToolResult))),
+					Effect.ensuring(Effect.sync(() => this.ctx.storage.kv.delete(toolActivityKey(runId)))),
+				),
 		);
 	}
 

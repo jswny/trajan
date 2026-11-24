@@ -71,6 +71,7 @@ function taskJournal(runId: string, step: TaskStep): TurnJournal {
 						({ attempt, idempotencyKey, signal }) =>
 							runPromise(
 								run({
+									runId,
 									idempotencyKey,
 									recovering: step.interrupted?.name === name || attempt > 1,
 								}).pipe(

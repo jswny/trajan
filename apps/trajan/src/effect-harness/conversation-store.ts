@@ -2,6 +2,7 @@ import { ConversationMessage, TurnMessage, TurnTranscript } from "@trajan/effect
 import type { TurnSubmission } from "@trajan/effect-harness";
 import { Schema } from "effect";
 import { ChatHistoryQuery } from "./chat-protocol";
+import { toolActivityKey } from "./tool-activity";
 
 const contextTurnLimit = 16;
 const contextByteLimit = 32_000;
@@ -171,6 +172,7 @@ export class ConversationStore {
 				"UPDATE effect_submissions SET state = 'completed' WHERE seq = ?",
 				row.seq,
 			);
+			this.storage.kv.delete(toolActivityKey(runId));
 		});
 	}
 
@@ -220,6 +222,7 @@ export class ConversationStore {
 				row.seq,
 				Schema.encodeSync(messageJson)({ role: "notice", status, text }),
 			);
+			this.storage.kv.delete(toolActivityKey(runId));
 		});
 	}
 

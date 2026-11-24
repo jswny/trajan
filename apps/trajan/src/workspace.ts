@@ -14,7 +14,7 @@ export const WORKSPACE_PROMPT =
 
 const root = "/workspace";
 type ToolCall = typeof ToolActivity.Type;
-type ToolObserver = (call: ToolCall) => Effect.Effect<void>;
+type ToolObserver = (call: ToolCall) => Effect.Effect<void, TurnIoError>;
 
 export function createObservedToolBindings(bindings: () => ReadonlyArray<ToolBinding>) {
 	const observers = new Map<string, ToolObserver>();
