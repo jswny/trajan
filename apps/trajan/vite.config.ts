@@ -79,6 +79,6 @@ export default defineConfig(async ({ command, mode }) => ({
 		},
 	],
 	resolve: {
-		dedupe: ["react", "react-dom", "@earendil-works/pi-ai"],
+		dedupe: ["react", "react-dom"],
 	},
 }));

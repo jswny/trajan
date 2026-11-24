@@ -1,3 +1,4 @@
+import { setTimeout } from "node:timers/promises";
 import { TurnSubmission } from "@trajan/effect-harness";
 import { devices, expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
@@ -76,6 +77,24 @@ test("retries an uncorrelated receipt with the same operation ID and preserves a
 	await expect(page.getByRole("main").getByText("Remember milk", { exact: true })).toHaveCount(1);
 });
 
+test("keeps browser memory bounded while waiting for a model reply", async ({ context, page }) => {
+	const composer = await openChat(page);
+	const devtools = await context.newCDPSession(page);
+	await page.request.post(`${control}/pause`);
+	await composer.fill("hello");
+	await composer.press("Enter");
+	const transcript = page.getByRole("main");
+	await expect(transcript.getByText("Wrote", { exact: true })).toBeVisible();
+	await devtools.send("HeapProfiler.collectGarbage");
+	const before = await devtools.send("Runtime.getHeapUsage");
+	await setTimeout(1000);
+	await devtools.send("HeapProfiler.collectGarbage");
+	const after = await devtools.send("Runtime.getHeapUsage");
+	expect(after.usedSize - before.usedSize).toBeLessThan(32 * 1024 * 1024);
+	await page.request.post(`${control}/release`);
+	await expect(transcript.getByText('Wrote "hello"', { exact: true })).toBeVisible();
+});
+
 test("restores an interrupted stream into the chat without repeating the tool", async ({
 	page,
 }) => {
@@ -150,6 +169,23 @@ test("shows live tool progress and the final answer after replaying a read-only 
 	await expect(transcript.getByText('Read ["first","second"]', { exact: true })).toHaveCount(1);
 	await transcript.getByText("Done", { exact: true }).click();
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Succeeded/]);
+});
+
+test("restores compacted model context and completes exec after a restart", async ({ page }) => {
+	const composer = await openChat(page);
+	await composer.fill("Prepare the compacted reference.");
+	await composer.press("Enter");
+	const transcript = page.getByRole("main");
+	await expect(transcript.getByText("Reference saved.", { exact: true })).toBeVisible();
+
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await page.reload();
+	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	await composer.fill("Recall the compacted reference and save it using exec.");
+	await composer.press("Enter");
+	await expect(transcript.getByText("Saved amber-heron-795.", { exact: true })).toBeVisible();
+	await transcript.getByText("Done", { exact: true }).click();
+	await expect(transcript.getByRole("list", { name: "Recent tool calls" })).toContainText("write");
 });
 
 test("replays time and randomness when reopening a file after a restart", async ({ page }) => {

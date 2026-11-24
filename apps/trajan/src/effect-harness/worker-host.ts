@@ -220,14 +220,19 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 				message: "The turn has no context cursor.",
 			});
 		}
-		const context = yield* conversationEffect("read context", () =>
-			this.#conversation.context(through),
-		);
+		const { context, modelContext } = yield* conversationEffect("read context", () => {
+			const modelContext = this.#conversation.modelContext();
+			return {
+				modelContext,
+				context: modelContext === undefined ? this.#conversation.context(through) : [],
+			};
+		});
 		const transcript = yield* runTurn(
 			{ id: row.submission_id, prompt: row.prompt },
 			taskJournal(runId, step),
 			context,
 			(event) => this.#publishProgress(runId, event),
+			modelContext,
 		);
 
 		yield* conversationEffect("commit turn", () => this.#conversation.commit(runId, transcript));

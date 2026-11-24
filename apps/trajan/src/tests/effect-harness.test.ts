@@ -6,6 +6,11 @@ import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../effect-harness/chat-protocol";
 import { readToolActivity } from "../effect-harness/tool-activity";
 import { appendExecInput } from "./effect-harness-fixture";
+import {
+	compactReference,
+	compactResumePrompt,
+	compactSetupPrompt,
+} from "./openai-responses-fixture";
 
 const submission = { id: "submission-1", prompt: "hello" };
 const prompt = { role: "user", text: submission.prompt };
@@ -161,6 +166,32 @@ export default async function () {
 		},
 		activity: [{ name: "git.status", status: "failed" }],
 	});
+});
+
+test("restores native compaction across a reset and pairs the resumed exec with its result", async () => {
+	let stub = openFixture();
+	const first = await submit(stub, { id: "compact-first", prompt: compactSetupPrompt });
+	await expect.poll(() => readTurn(stub, first.runId)).toMatchObject({ state: "completed" });
+	const before = await stub.state();
+	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+	stub = env.EFFECT_HARNESS_TEST.get(stub.id);
+	expect((await stub.state()).instance).not.toBe(before.instance);
+	const followUp = await submit(stub, { id: "compact-follow-up", prompt: compactResumePrompt });
+	await expect
+		.poll(() => readTurn(stub, followUp.runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: compactResumePrompt },
+					{ role: "tool-call", name: "exec" },
+					{ role: "tool", result: { status: "completed", output: compactReference } },
+					{ role: "assistant", text: `Saved ${compactReference}.` },
+				],
+			},
+		});
+	expect(await stub.state()).toMatchObject({ text: compactReference });
+	expect(JSON.stringify(await stub.history({}))).not.toContain("opaque-fixture-compaction");
 });
 
 test("returns invalid tool arguments to the model without writing to the workspace", async () => {

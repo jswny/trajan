@@ -64,7 +64,11 @@ const ModelToolCall = Schema.Struct({
 	// Adapter context belongs to the checkpointed model response.
 	continuation: Schema.optionalKey(Schema.Json),
 });
-const ModelResponse = Schema.Union([Reply, ModelToolCall]);
+const ModelReply = Schema.Struct({
+	...Reply.fields,
+	continuation: Schema.optionalKey(Schema.Json),
+});
+const ModelResponse = Schema.Union([ModelReply, ModelToolCall]);
 
 type ModelHistoryEntry =
 	| typeof ConversationMessage.Type
@@ -76,6 +80,8 @@ export const TurnTranscript = Schema.Struct({
 	submissionId: Schema.NonEmptyString,
 	messages: Schema.Array(TurnMessage),
 });
+
+export type TurnCompletion = typeof TurnTranscript.Type & { readonly modelContext?: Schema.Json };
 
 export class TurnIoError extends Schema.TaggedError<
 	TurnIoError,
@@ -117,7 +123,7 @@ export class TurnModel extends Context.Service<
 	{
 		readonly stream: (
 			messages: ReadonlyArray<ModelHistoryEntry>,
-			options: { readonly allowTools: boolean },
+			options: { readonly allowTools: boolean; readonly modelContext?: Schema.Json },
 		) => Stream.Stream<TurnModelEvent, TurnModelError>;
 	}
 >()("@trajan/effect-harness/TurnModel") {}
@@ -149,6 +155,7 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 	journal: TurnJournal,
 	context: ReadonlyArray<typeof ConversationMessage.Type> = [],
 	publish: (event: TurnProgress) => Effect.Effect<void> = () => Effect.void,
+	modelContext?: Schema.Json,
 ) {
 	const model = yield* TurnModel;
 	const tools = yield* TurnTools;
@@ -158,14 +165,19 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 		const allowTools = index < MAX_TOOL_CALLS;
 		const decision = yield* journal.checkpoint(
 			`model:${index}`,
-			allowTools ? ModelResponse : Reply,
+			allowTools ? ModelResponse : ModelReply,
 			() =>
 				Effect.gen(function* () {
 					yield* publish({ type: "reset" });
-					const last = yield* model.stream([...history], { allowTools }).pipe(
-						Stream.tap((event) => (event.type === "text-delta" ? publish(event) : Effect.void)),
-						Stream.runLast,
-					);
+					const last = yield* model
+						.stream([...history], {
+							allowTools,
+							...(modelContext !== undefined && { modelContext }),
+						})
+						.pipe(
+							Stream.tap((event) => (event.type === "text-delta" ? publish(event) : Effect.void)),
+							Stream.runLast,
+						);
 					if (Option.isNone(last) || last.value.type !== "response") {
 						return yield* new TurnModelError({
 							message: "The model stream ended without a response.",
@@ -177,10 +189,14 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 
 		if (decision.role === "assistant") {
 			// Project the transcript without adapter continuation data.
-			return yield* Schema.decodeEffect(TurnTranscript)({
+			const transcript = yield* Schema.decodeEffect(TurnTranscript)({
 				submissionId: submission.id,
 				messages: [...history.slice(context.length), decision],
 			});
+			return {
+				...transcript,
+				...(decision.continuation !== undefined && { modelContext: decision.continuation }),
+			} satisfies TurnCompletion;
 		}
 
 		const { continuation: _continuation, ...call } = decision;

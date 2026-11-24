@@ -1,7 +1,7 @@
 {
 	"extends": "../../tsconfig.base.json",
 	"compilerOptions": {
-		"types": ["@cloudflare/vitest-plugin/types", "vite/client"],
+		"types": ["@cloudflare/vitest-plugin/types", "node", "vite/client"],
 		"lib": ["ES2024", "DOM", "DOM.Iterable"],
 		"jsx": "react-jsx"
 	},

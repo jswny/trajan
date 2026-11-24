@@ -1,5 +1,5 @@
 import { ConversationMessage, TurnMessage, TurnTranscript } from "@trajan/effect-harness";
-import type { TurnSubmission } from "@trajan/effect-harness";
+import type { TurnCompletion, TurnSubmission } from "@trajan/effect-harness";
 import { Schema } from "effect";
 import { ChatHistoryQuery } from "./chat-protocol";
 import { clearToolState } from "./tool-activity";
@@ -9,6 +9,8 @@ const contextByteLimit = 32_000;
 const messageJson = Schema.fromJsonString(TurnMessage);
 const contextJson = Schema.fromJsonString(ConversationMessage);
 const transcriptJson = Schema.fromJsonString(TurnTranscript);
+const modelContextKey = "effect-model-context";
+const decodeModelContext = Schema.decodeUnknownSync(Schema.UndefinedOr(Schema.Json));
 
 export const HistoryQuery = ChatHistoryQuery;
 
@@ -143,7 +145,11 @@ export class ConversationStore {
 			.map(({ message }) => Schema.decodeSync(contextJson)(message));
 	}
 
-	commit(runId: string, transcript: typeof TurnTranscript.Type) {
+	modelContext() {
+		return decodeModelContext(this.storage.kv.get(modelContextKey));
+	}
+
+	commit(runId: string, transcript: TurnCompletion) {
 		const messages = transcript.messages.map((message) => ({
 			role: message.role,
 			json: Schema.encodeSync(messageJson)(message),
@@ -172,6 +178,9 @@ export class ConversationStore {
 				"UPDATE effect_submissions SET state = 'completed' WHERE seq = ?",
 				row.seq,
 			);
+			if (transcript.modelContext !== undefined) {
+				this.storage.kv.put(modelContextKey, transcript.modelContext);
+			}
 			clearToolState(this.storage, runId);
 		});
 	}

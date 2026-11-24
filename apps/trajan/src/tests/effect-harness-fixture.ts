@@ -14,6 +14,12 @@ import { clearToolState } from "../effect-harness/tool-activity";
 import { EffectHarnessObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
 import { codeModeError, createTrajanWorkspace, workspaceToolset } from "../workspace";
+import {
+	compactReference,
+	compactResumePrompt,
+	compactSetupPrompt,
+	createOpenAiResponsesFixture,
+} from "./openai-responses-fixture";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
 type PausePoint =
@@ -59,6 +65,10 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 	readonly #instance = crypto.randomUUID();
 	readonly #workspace = createTrajanWorkspace(this.ctx.storage);
 	readonly #effectTools = this.#createTools();
+	readonly #responses = createOpenAiResponsesFixture(
+		this.#effectTools.declaration,
+		appendExecInput(compactReference),
+	);
 	readonly #codeMode = createCodeModeFixture(
 		this.#workspace,
 		this.ctx.storage,
@@ -400,8 +410,12 @@ export default async function () {
 		Layer.succeed(
 			TurnModel,
 			TurnModel.of({
-				stream: (messages) =>
-					Stream.unwrap(
+				stream: (messages, options) => {
+					const user = messages.findLast((message) => message.role === "user");
+					if (user?.text === compactSetupPrompt || user?.text === compactResumePrompt) {
+						return this.#responses.stream(messages, options);
+					}
+					return Stream.unwrap(
 						Effect.map(this.#fakeComplete(messages), (response) => {
 							const end = Stream.succeed<TurnModelEvent>({ type: "response", response });
 							if (response.role !== "assistant") {
@@ -426,7 +440,8 @@ export default async function () {
 								Stream.concat(end),
 							);
 						}),
-					),
+					);
+				},
 			}),
 		),
 		Layer.succeed(TurnTools, TurnTools.of({ execute: (...args) => this.#execute(...args) })),

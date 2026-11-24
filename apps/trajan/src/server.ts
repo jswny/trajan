@@ -2,7 +2,7 @@ import { TurnModel, TurnTools } from "@trajan/effect-harness";
 import { Data, Effect, Layer } from "effect";
 import { ChatPath, isEffectChatPath } from "./effect-harness/chat-protocol";
 import { EffectHarnessObject } from "./effect-harness/worker-host";
-import { workersAiTurnModel } from "./effect-harness/workers-ai";
+import { openAiTurnModel } from "./effect-harness/openai-responses";
 import { effectWorkspaceTools } from "./effect-harness/workspace-tools";
 import { createTrajanWorkspace, WORKSPACE_PROMPT, workspaceToolset } from "./workspace";
 
@@ -24,7 +24,7 @@ export class Trajan extends EffectHarnessObject {
 	protected readonly turnLayer = Layer.merge(
 		Layer.succeed(
 			TurnModel,
-			workersAiTurnModel(this.env.AI, this.#tools.declaration, WORKSPACE_PROMPT),
+			openAiTurnModel(this.env.AI.gateway("default"), this.#tools.declaration, WORKSPACE_PROMPT),
 		),
 		Layer.succeed(TurnTools, this.#tools.service),
 	);

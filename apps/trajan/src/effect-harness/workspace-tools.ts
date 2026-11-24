@@ -105,7 +105,7 @@ export function effectWorkspaceTools(
 				"Write large results to a workspace file and return the path.",
 				instructions,
 			].join("\n"),
-			parameters: Tool.getJsonSchema(Exec),
+			parameters: { ...Tool.getJsonSchema(Exec), additionalProperties: false },
 		},
 		service: { execute },
 	};

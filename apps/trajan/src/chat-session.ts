@@ -247,7 +247,7 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 		}
 	};
 	yield* Effect.forever(
-		Queue.take(commands).pipe(Effect.flatMap(handle), Effect.forkIn(scope)),
+		Queue.take(commands).pipe(Effect.flatMap((command) => Effect.forkIn(handle(command), scope))),
 	).pipe(Effect.forkScoped);
 
 	return {
