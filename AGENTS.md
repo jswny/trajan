@@ -13,4 +13,5 @@ Keep this file focused on durable decisions that contributors cannot infer from 
 - Review per-chat authorization before widening Cloudflare Access.
 - Treat checked-in Worker configuration as authoritative.
 - Run the repository checks and verify the production bundle before publishing.
+- Before writing or changing Effect code, read the installed `node_modules/effect/AGENTS.md` in full. Follow its links for relevant examples and consult `node_modules/effect/src` for API details the guide doesn’t cover.
 - Check current Cloudflare documentation before changing Workers or Agents SDK behavior. Use `cf docs search` to find platform guidance and `cf cli search` to discover commands. For Pi lifecycle and recovery, consult the [Pi harness guide](https://developers.cloudflare.com/agents/harnesses/pi/).
