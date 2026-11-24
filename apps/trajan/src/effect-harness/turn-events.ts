@@ -6,6 +6,6 @@ export const TurnStreamEvent = Schema.Union([
 	Schema.Struct({ type: Schema.Literal("text-delta"), ...text }),
 	Schema.Struct({
 		type: Schema.Literal("settled"),
-		state: Schema.Literals(["completed", "failed", "missing"]),
+		state: Schema.Literals(["completed", "failed", "missing", "cancelled"]),
 	}),
 ]);

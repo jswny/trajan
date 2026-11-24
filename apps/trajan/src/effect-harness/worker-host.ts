@@ -5,9 +5,12 @@ import { Lifecycle } from "agents/lifecycle";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
 import { Tasks } from "agents/tasks";
 import type { TaskStep } from "agents/tasks";
+import { WebSockets } from "agents/websockets";
 import { Clock, Effect, PubSub, Schema, Stream } from "effect";
 import type { Layer } from "effect";
 import { Sse } from "effect/encoding";
+import { ChatEvent, ChatHistoryQuery, ChatPath, ChatStop } from "./chat-protocol";
+import type { ChatSnapshot, ChatToolInfo } from "./chat-protocol";
 import { ConversationStore } from "./conversation-store";
 import type { HistoryQuery } from "./conversation-store";
 import { TurnStreamEvent } from "./turn-events";
@@ -16,7 +19,22 @@ const turnDefinition = "turn@v3";
 const inboxJob = "effect-harness-inbox";
 const TurnTaskInput = Schema.Struct({ runId: Schema.NonEmptyString });
 const eventJson = Schema.encodeSync(Schema.fromJsonString(TurnStreamEvent));
+const chatEventJson = Schema.encodeSync(Schema.fromJsonString(ChatEvent));
+const chatTag = "chat";
+const decodeSubmission = Schema.decodeUnknownOption(TurnSubmission);
+const decodeHistory = Schema.decodeUnknownOption(ChatHistoryQuery);
+const decodeStop = Schema.decodeUnknownOption(ChatStop);
 type Draft = { text: string; generation: symbol | undefined };
+
+function sendChat(socket: WebSocket, data: string) {
+	if (socket.readyState === 1) {
+		try {
+			socket.send(data);
+		} catch {
+			// A disconnected observer cannot affect the durable turn.
+		}
+	}
+}
 
 class TurnTaskInputError extends Schema.TaggedError<
 	TurnTaskInputError,
@@ -85,12 +103,20 @@ function taskJournal(runId: string, step: TaskStep): TurnJournal {
 
 export abstract class EffectHarnessObject extends DurableObject<Env> {
 	protected abstract readonly turnLayer: Layer.Layer<TurnModel | TurnTools>;
+	protected readonly toolCatalog: ReadonlyArray<typeof ChatToolInfo.Type> = [];
 
 	protected onTurnPhase?(phase: "before-task" | "after-commit", signal: AbortSignal): Promise<void>;
 
 	readonly #conversation = new ConversationStore(this.ctx.storage);
 	readonly #updates = Effect.runSync(PubSub.sliding<void>(1));
-	#draft: (Draft & { runId: string }) | undefined;
+	#draft: (Draft & { runId: string; tool: string | null }) | undefined;
+	readonly #sockets = new WebSockets({
+		protocol: false,
+		getConnectionTags: () => [chatTag],
+		handlers: {
+			onConnect: (socket) => sendChat(socket, chatEventJson(this.#snapshot())),
+		},
+	});
 	readonly #tasks = new Tasks({
 		onError: () => Effect.runPromise(this.#wakeInbox()),
 		definitions: {
@@ -106,10 +132,11 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 				),
 		},
 	});
-	readonly lifecycle = Lifecycle.install(this).use(this.#tasks);
+	readonly lifecycle = Lifecycle.install(this).use(this.#sockets).use(this.#tasks);
 
 	onStart() {
 		this.#conversation.initialize();
+		this.#broadcastSnapshot();
 		if (this.#conversation.head() && !this.lifecycle.jobs.get(inboxJob)) {
 			return Effect.runPromise(this.#wakeInbox());
 		}
@@ -134,6 +161,20 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 		const runId = head.run_id;
 		yield* Effect.annotateCurrentSpan("runId", runId);
 		const task = yield* Effect.promise(() => this.#tasks.handle(turnDefinition).get(runId));
+		if (head.state === "stopping") {
+			if (
+				task &&
+				task.state !== "failed" &&
+				task.state !== "cancelled" &&
+				task.state !== "completed"
+			) {
+				yield* Effect.promise(() => this.#tasks.handle(turnDefinition).cancel(runId));
+				return { rescheduleAt: (yield* Clock.currentTimeMillis) + 250 };
+			}
+			yield* conversationEffect("cancel turn", () => this.#conversation.cancel(runId));
+			yield* this.#settleDraft(runId);
+			return "yield" as const;
+		}
 		if (!task) {
 			yield* Effect.promise(async (signal) => {
 				await this.onTurnPhase?.("before-task", signal);
@@ -166,9 +207,10 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 	) {
 		yield* Effect.annotateCurrentSpan("runId", runId);
 		const row = yield* conversationEffect("start turn", () => this.#conversation.start(runId));
-		if (row.state === "completed" || row.state === "failed") {
+		if (row.state !== "running") {
 			return;
 		}
+		yield* Effect.sync(() => this.#broadcastSnapshot());
 		const through = row.context_through;
 		if (through === null) {
 			return yield* new TurnIoError({
@@ -195,13 +237,53 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 
 	#publishProgress(runId: string, event: TurnProgress) {
 		return Effect.sync(() => {
-			if (event.type === "reset") {
-				this.#draft = { runId, generation: Symbol(), text: "" };
-			} else if (this.#draft?.runId === runId) {
-				this.#draft.text += event.text;
+			switch (event.type) {
+				case "reset":
+				case "tool": {
+					const tool = event.type === "tool" ? event.name : null;
+					this.#draft = { runId, generation: Symbol(), text: "", tool };
+					this.#broadcast({ type: "preview", runId, text: "", tool });
+					break;
+				}
+				case "text-delta":
+					if (this.#draft?.runId === runId) {
+						this.#draft.text += event.text;
+						this.#broadcast({ ...event, runId });
+					}
+					break;
 			}
 			PubSub.publishUnsafe(this.#updates, undefined);
 		});
+	}
+
+	#snapshot(): typeof ChatSnapshot.Type {
+		const { active, queued, error } = this.#conversation.chatStatus();
+		const draft = this.#draft?.runId === active?.runId ? this.#draft : undefined;
+		return {
+			type: "snapshot",
+			page: this.#conversation.chatPage({}),
+			active,
+			queued,
+			error,
+			preview: draft ? { runId: draft.runId, text: draft.text, tool: draft.tool } : null,
+			catalog: this.toolCatalog,
+		};
+	}
+
+	#broadcast(event: typeof ChatEvent.Type) {
+		const sockets = this.ctx.getWebSockets(chatTag);
+		if (sockets.length > 0) {
+			const data = chatEventJson(event);
+			for (const socket of sockets) {
+				sendChat(socket, data);
+			}
+		}
+	}
+
+	#broadcastSnapshot() {
+		if (this.ctx.getWebSockets(chatTag).length > 0) {
+			this.#broadcast(this.#snapshot());
+		}
 	}
 
 	#settleDraft(runId: string) {
@@ -210,6 +292,7 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 				this.#draft = undefined;
 			}
 			PubSub.publishUnsafe(this.#updates, undefined);
+			this.#broadcastSnapshot();
 		});
 	}
 
@@ -230,7 +313,7 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 						draft = { generation: active.generation, text: active.text };
 					} else {
 						const state = this.#conversation.state(runId);
-						if (state !== "pending" && state !== "running") {
+						if (state !== "pending" && state !== "running" && state !== "stopping") {
 							return [undefined, [{ type: "settled", state }]];
 						}
 					}
@@ -266,7 +349,11 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 						return this.ctx.blockConcurrencyWhile(async () => {
 							// Arm the durable wake before committing the submission under the input gate.
 							await Effect.runPromise(this.#wakeInbox());
-							return this.#conversation.admit(submission);
+							const receipt = this.#conversation.admit(submission);
+							if (receipt.accepted) {
+								this.#broadcastSnapshot();
+							}
+							return receipt;
 						});
 					}),
 				),
@@ -275,6 +362,60 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 				),
 			),
 		);
+	}
+
+	async stop(runId: string) {
+		await this.lifecycle.start();
+		return this.ctx.blockConcurrencyWhile(async () => {
+			await Effect.runPromise(this.#wakeInbox());
+			const stopped = this.#conversation.requestStop(runId);
+			if (stopped) {
+				this.#broadcastSnapshot();
+			}
+			return { runId, stopped };
+		});
+	}
+
+	protected async chatRequest(request: Request) {
+		const url = new URL(request.url);
+		if (url.pathname === `${ChatPath}/history` && request.method === "GET") {
+			const before = url.searchParams.get("before");
+			const query = decodeHistory(before === null ? {} : { before: Number(before) });
+			if (query._tag === "None") {
+				return Response.json({ error: "Invalid history cursor." }, { status: 400 });
+			}
+			await this.lifecycle.start();
+			return Response.json(this.#conversation.chatPage(query.value));
+		}
+		if (request.method !== "POST") {
+			return new Response(null, { status: 404 });
+		}
+		const body: unknown = await request.json().catch(() => null);
+		switch (url.pathname) {
+			case ChatPath: {
+				const input = decodeSubmission(body);
+				if (input._tag === "None") {
+					return Response.json(
+						{ accepted: false, runId: null, error: "Invalid submission." },
+						{ status: 400 },
+					);
+				}
+				const receipt = await this.submit(input.value);
+				return Response.json(
+					{ submissionId: input.value.id, ...receipt },
+					{ status: receipt.runId === null ? 400 : 202 },
+				);
+			}
+			case `${ChatPath}/stop`: {
+				const input = decodeStop(body);
+				if (input._tag === "None") {
+					return Response.json({ error: "Invalid run ID." }, { status: 400 });
+				}
+				return Response.json(await this.stop(input.value.runId));
+			}
+			default:
+				return new Response(null, { status: 404 });
+		}
 	}
 
 	async turn(runId: string) {

@@ -17,6 +17,7 @@ import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { Effect, Predicate } from "effect";
 import { workspaceCodemode } from "../codemode";
+import { isEffectChatPath } from "../effect-harness/chat-protocol";
 import { isMainChatUrl } from "../main-chat";
 import { PiSessionSockets } from "../sockets";
 import { projectView } from "../view";
@@ -399,6 +400,13 @@ export default {
 		const fixture = /(?:^|;\s*)trajan-fixture=([a-f0-9-]+)(?:;|$)/.exec(
 			request.headers.get("Cookie") ?? "",
 		)?.[1];
+		if (isEffectChatPath(pathname)) {
+			const origin = request.headers.get("Origin");
+			if (origin !== null && origin !== url.origin) {
+				return new Response(null, { status: 403 });
+			}
+			return env.EFFECT_HARNESS_TEST.getByName(fixture ?? "test-chat").fetch(request);
+		}
 		if (fixture && pathname.startsWith("/__effect-harness/")) {
 			return serveEffectHarness(request, env, fixture);
 		}

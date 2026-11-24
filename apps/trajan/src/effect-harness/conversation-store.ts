@@ -1,6 +1,7 @@
 import { ConversationMessage, TurnMessage, TurnTranscript } from "@trajan/effect-harness";
 import type { TurnSubmission } from "@trajan/effect-harness";
 import { Schema } from "effect";
+import { ChatHistoryQuery } from "./chat-protocol";
 
 const contextTurnLimit = 16;
 const contextByteLimit = 32_000;
@@ -8,17 +9,14 @@ const messageJson = Schema.fromJsonString(TurnMessage);
 const contextJson = Schema.fromJsonString(ConversationMessage);
 const transcriptJson = Schema.fromJsonString(TurnTranscript);
 
-export const HistoryQuery = Schema.Struct({
-	before: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
-	limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
-});
+export const HistoryQuery = ChatHistoryQuery;
 
 type SubmissionRow = {
 	seq: number;
 	run_id: string;
 	submission_id: string;
 	prompt: string;
-	state: "pending" | "running" | "completed" | "failed";
+	state: "pending" | "running" | "stopping" | "completed" | "failed" | "cancelled";
 	context_through: number | null;
 	error: string | null;
 };
@@ -40,7 +38,7 @@ export class ConversationStore {
 				error TEXT
 			);
 			CREATE INDEX IF NOT EXISTS effect_submissions_pending
-				ON effect_submissions(seq) WHERE state IN ('pending', 'running');
+				ON effect_submissions(seq) WHERE state IN ('pending', 'running', 'stopping');
 			CREATE TABLE IF NOT EXISTS effect_entries (
 				seq INTEGER PRIMARY KEY,
 				submission_seq INTEGER NOT NULL REFERENCES effect_submissions(seq),
@@ -79,7 +77,7 @@ export class ConversationStore {
 	head(): SubmissionRow | undefined {
 		return this.storage.sql
 			.exec<SubmissionRow>(`
-			SELECT * FROM effect_submissions WHERE state IN ('pending', 'running') ORDER BY seq LIMIT 1
+			SELECT * FROM effect_submissions WHERE state IN ('pending', 'running', 'stopping') ORDER BY seq LIMIT 1
 		`)
 			.toArray()[0];
 	}
@@ -146,7 +144,7 @@ export class ConversationStore {
 			if (row?.submission_id !== transcript.submissionId) {
 				throw new Error("Transcript submission does not match its run.");
 			}
-			if (row.state === "completed") {
+			if (row.state === "completed" || row.state === "stopping") {
 				return;
 			}
 			if (row.state !== "running") {
@@ -177,6 +175,66 @@ export class ConversationStore {
 			error,
 			runId,
 		);
+	}
+
+	requestStop(runId: string) {
+		return this.storage.transactionSync(() => {
+			const row = this.head();
+			if (row?.run_id !== runId) {
+				return false;
+			}
+			this.storage.sql.exec(
+				"UPDATE effect_submissions SET state = 'stopping' WHERE run_id = ?",
+				runId,
+			);
+			return true;
+		});
+	}
+
+	cancel(runId: string) {
+		this.storage.sql.exec(
+			"UPDATE effect_submissions SET state = 'cancelled' WHERE run_id = ? AND state = 'stopping'",
+			runId,
+		);
+	}
+
+	chatStatus() {
+		const head = this.head();
+		const active =
+			head && (head.state === "pending" || head.state === "running" || head.state === "stopping")
+				? {
+						runId: head.run_id,
+						submissionId: head.submission_id,
+						prompt: head.prompt,
+						state: head.state,
+					}
+				: null;
+		const queued = this.storage.sql
+			.exec<{ count: number }>(
+				"SELECT COUNT(*) AS count FROM effect_submissions WHERE state = 'pending'",
+			)
+			.one().count;
+		const settled = this.storage.sql
+			.exec<Pick<SubmissionRow, "state" | "error">>(
+				"SELECT state, error FROM effect_submissions WHERE state IN ('completed', 'failed', 'cancelled') ORDER BY seq DESC LIMIT 1",
+			)
+			.toArray()[0];
+		return {
+			active,
+			queued: queued - Number(active?.state === "pending"),
+			error: settled?.state === "failed" ? settled.error : null,
+		};
+	}
+
+	chatPage(query: typeof HistoryQuery.Type) {
+		const { entries, nextBefore } = this.history(query);
+		return {
+			entries: entries.map((entry) => ({
+				...entry,
+				message: Schema.decodeSync(messageJson)(entry.message),
+			})),
+			nextBefore,
+		};
 	}
 
 	state(runId: string) {

@@ -45,7 +45,7 @@ async function fixtureWorker(mode: "browser-smoke" | "effect-harness-live"): Pro
 				assets: {
 					runWorkerFirst: live
 						? ["/__effect-harness/*"]
-						: ["/agents/*", "/__browser-smoke/*", "/__effect-harness/*"],
+						: ["/agents/*", "/api/*", "/__browser-smoke/*", "/__effect-harness/*"],
 				},
 			},
 		}),

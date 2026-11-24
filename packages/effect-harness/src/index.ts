@@ -1,8 +1,8 @@
 import { Context, Effect, Option, Schema, Stream } from "effect";
 
 export const TurnSubmission = Schema.Struct({
-	id: Schema.NonEmptyString,
-	prompt: Schema.NonEmptyString,
+	id: Schema.NonEmptyString.check(Schema.isMaxLength(128)),
+	prompt: Schema.NonEmptyString.check(Schema.isMaxLength(32_000), Schema.isTrimmed()),
 });
 
 const UserMessage = Schema.Struct({
@@ -102,7 +102,10 @@ export type TurnModelEvent =
 	| { readonly type: "text-delta"; readonly text: string }
 	| { readonly type: "response"; readonly response: unknown };
 
-export type TurnProgress = Extract<TurnModelEvent, { type: "text-delta" }> | { type: "reset" };
+export type TurnProgress =
+	| Extract<TurnModelEvent, { type: "text-delta" }>
+	| { type: "reset" }
+	| { type: "tool"; name: string };
 
 export class TurnTools extends Context.Service<
 	TurnTools,
@@ -154,10 +157,9 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 			});
 		}
 
-		yield* publish({ type: "reset" });
 		const { continuation: _continuation, ...call } = decision;
 		const result = yield* journal.checkpoint(`tool:${index}`, ToolResult, (attempt) =>
-			tools.execute(call, attempt),
+			publish({ type: "tool", name: call.name }).pipe(Effect.andThen(tools.execute(call, attempt))),
 		);
 		history.push(decision, { role: "tool", callId: call.id, result });
 	}

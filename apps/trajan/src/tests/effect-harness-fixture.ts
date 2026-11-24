@@ -12,6 +12,7 @@ import {
 import type { StepAttempt, TurnModelEvent } from "@trajan/effect-harness";
 import { Context, Effect, Layer, Option, Predicate, Schema, Stream } from "effect";
 import { Tool, Toolkit } from "effect/ai";
+import { isEffectChatPath } from "../effect-harness/chat-protocol";
 import { HistoryQuery } from "../effect-harness/conversation-store";
 import { EffectHarnessObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
@@ -57,6 +58,7 @@ function isMissing(error: unknown): boolean {
 }
 
 export class EffectHarnessTestObject extends EffectHarnessObject {
+	protected override readonly toolCatalog = [{ name: Append.name, description: appendDescription }];
 	readonly #instance = crypto.randomUUID();
 	readonly #workspace = new Workspace({
 		storage: this.ctx.storage,
@@ -239,8 +241,11 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		return this.#pauseAt(phase, signal);
 	}
 
-	override async fetch(request: Request) {
+	async onRequest(request: Request) {
 		const url = new URL(request.url);
+		if (isEffectChatPath(url.pathname)) {
+			return this.chatRequest(request);
+		}
 		if (url.pathname !== "/__effect-harness/events") {
 			return new Response(null, { status: 404 });
 		}

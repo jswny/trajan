@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/effect-harness";
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
+import { ChatEvent, ChatPath } from "../effect-harness/chat-protocol";
 
 const submission = { id: "submission-1", prompt: "hello" };
 const prompt = { role: "user", text: submission.prompt };
@@ -109,6 +110,59 @@ test("returns invalid tool arguments to the model without writing to the workspa
 			},
 		});
 	expect(await stub.state()).toMatchObject({ text: "" });
+});
+
+test("stops only the active run and drains a queued follow-up", async () => {
+	const stub = openFixture();
+	await stub.pause("during-reply");
+	const first = await submit(stub, { id: "stop-this", prompt: "Remember something" });
+	await expect.poll(() => stub.state()).toMatchObject({ pausedAt: "during-reply" });
+	const queued = await submit(stub, { id: "next", prompt: "Remember next" });
+	expect(await stub.stop(queued.runId)).toEqual({ runId: queued.runId, stopped: false });
+	expect(await stub.stop(first.runId)).toEqual({ runId: first.runId, stopped: true });
+	await expect
+		.poll(() => stub.turn(first.runId))
+		.toMatchObject({ state: "cancelled", transcript: null });
+	await stub.release();
+	await expect.poll(() => stub.turn(queued.runId)).toMatchObject({ state: "completed" });
+	expect((await stub.history({})).entries.map(({ submissionId }) => submissionId)).toEqual([
+		"next",
+		"next",
+	]);
+});
+
+test("a chat socket restores a completed transcript from durable history", async () => {
+	const stub = openFixture();
+	const { runId } = await submit(stub, { id: "seen", prompt: "Remember milk" });
+	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "completed" });
+	await expect(stub.crash()).rejects.toThrow(/forced Effect harness fixture restart|reset/i);
+	const response = await env.EFFECT_HARNESS_TEST.get(stub.id).fetch(
+		new Request(`https://fixture${ChatPath}/live`, { headers: { Upgrade: "websocket" } }),
+	);
+	const socket = response.webSocket;
+	if (!socket) {
+		throw new Error("Expected a chat socket");
+	}
+	const first = new Promise<string>((resolve) => {
+		socket.addEventListener("message", (event) => resolve(String(event.data)), { once: true });
+	});
+	socket.accept();
+	try {
+		const frame = Schema.decodeSync(Schema.fromJsonString(ChatEvent))(await first);
+		expect(frame).toMatchObject({
+			type: "snapshot",
+			active: null,
+			preview: null,
+			page: {
+				entries: [
+					{ submissionId: "seen", message: { role: "user", text: "Remember milk" } },
+					{ submissionId: "seen", message: { role: "assistant", text: "Remembering milk" } },
+				],
+			},
+		});
+	} finally {
+		socket.close();
+	}
 });
 
 test.each([
