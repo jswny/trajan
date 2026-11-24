@@ -1,0 +1,70 @@
+import { useAtom, useAtomValue } from "@effect/atom-react";
+import { Effect, Stream } from "effect";
+import { AsyncResult, Atom } from "effect/reactivity";
+import { ChatSession, INITIAL_CHAT } from "./chat-session";
+import type { ChatCommand, PromptDraft } from "./chat-session";
+import { chatMessages, chatText } from "./chat-view";
+
+const draftAtom = Atom.make<PromptDraft>({ text: "" }).pipe(Atom.keepAlive);
+const sessionAtom = Atom.make(({ registry }) =>
+	Stream.unwrap(
+		Effect.map(ChatSession, ({ changes, dispatch }) =>
+			Stream.map(changes, (state) => ({ state, dispatch })),
+		),
+	).pipe(
+		Stream.provide(ChatSession.live),
+		Stream.tap(({ state: { submission } }) =>
+			Effect.sync(() => {
+				if (submission?.status === "accepted" && registry.get(draftAtom) === submission.draft) {
+					registry.set(draftAtom, { text: "" });
+				}
+			}),
+		),
+	),
+).pipe(Atom.setIdleTTL(0));
+const entriesAtom = Atom.make(
+	(get) =>
+		AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.page.entries ??
+		INITIAL_CHAT.page.entries,
+);
+const messagesAtom = Atom.make((get) => chatMessages(get(entriesAtom)));
+
+export function useChatSession() {
+	const session = AsyncResult.getOrElse(useAtomValue(sessionAtom), () => undefined);
+	const state = session?.state ?? INITIAL_CHAT;
+	const [draft, setDraft] = useAtom(draftAtom);
+	const messages = useAtomValue(messagesAtom);
+	const submitting = state.submission?.status === "pending";
+	const canSubmit =
+		state.status === "open" &&
+		draft.text.trim() !== "" &&
+		draft.text.trim().length <= 32_000 &&
+		!submitting &&
+		state.submission?.status !== "unconfirmed";
+	const dispatch = (command: ChatCommand) => session?.dispatch(command);
+	return {
+		...state,
+		messages,
+		earlier: state.page.nextBefore !== null,
+		activePrompt: state.active
+			? chatText(state.active.submissionId, "user", state.active.prompt)
+			: null,
+		live: state.preview?.text
+			? chatText(state.preview.runId, "assistant", state.preview.text)
+			: null,
+		composer: { text: draft.text, canSubmit, submitting },
+		editPrompt: (text: string) => setDraft({ text }),
+		submit: () => {
+			if (canSubmit) {
+				dispatch({ type: "submit", draft });
+			}
+		},
+		retrySubmit: (id: string) => dispatch({ type: "retry", id }),
+		stop: () => {
+			if (state.active) {
+				dispatch({ type: "stop", runId: state.active.runId });
+			}
+		},
+		loadEarlier: () => dispatch({ type: "load-earlier" }),
+	};
+}

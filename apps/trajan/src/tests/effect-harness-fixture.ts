@@ -64,6 +64,9 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		storage: this.ctx.storage,
 		backends: [new CodemodeBackend({ loader: this.env.LOADER })],
 	});
+	readonly #effectTools = effectWorkspaceTools(this.#workspace, () =>
+		this.env.CODEMODE_SANDBOX.getByName(this.ctx.id.toString()),
+	);
 	readonly #append = Effect.fn("effect-harness.fixture.append")(function* (
 		this: EffectHarnessTestObject,
 		{ text }: { text: string },
@@ -102,12 +105,13 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 
 	readonly #toolsLayer = Layer.effect(
 		TurnTools,
-		Effect.gen(function* () {
+		Effect.gen({ self: this }, function* () {
 			const toolkit = yield* AppendToolkit;
+			const workspaceTools = this.#effectTools;
 			return TurnTools.of({
 				execute: Effect.fn("effect-harness.fixture.executeTool")(function* (call, attempt) {
 					if (call.name !== Append.name) {
-						return { status: "failed", message: "Unknown fixture tool" };
+						return yield* workspaceTools.service.execute(call, attempt);
 					}
 					const result = yield* toolkit.handle(Append.name, call.input, call.id).pipe(
 						Effect.flatMap(Stream.runLast),
@@ -148,6 +152,22 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		}
 		if (last?.role === "user" && last.text.startsWith("Remember ")) {
 			return { role: "assistant", text: `Remembering ${last.text.slice("Remember ".length)}` };
+		}
+		if (last?.role === "user" && last.text === "Run a workspace module.") {
+			return {
+				role: "tool-call",
+				id: "codemode-1",
+				name: "codemode",
+				input: {
+					code: 'return await tools.exec({ command: "export default () => 42" })',
+				},
+			};
+		}
+		if (last?.role === "user" && last.text === "Show wide code") {
+			return {
+				role: "assistant",
+				text: `\`\`\`js\nconst message = "${"wide ".repeat(35)}";\n\`\`\``,
+			};
 		}
 		if (last?.role === "user" && last.text === "What did I ask you to remember?") {
 			const memory = messages.findLast(
@@ -273,11 +293,8 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 	}
 
 	workspaceTool(name: string, input: Schema.Json, recovering = false): Promise<string> {
-		const tools = effectWorkspaceTools(this.#workspace, () =>
-			this.env.CODEMODE_SANDBOX.getByName(this.ctx.id.toString()),
-		);
 		return Effect.runPromise(
-			tools.service
+			this.#effectTools.service
 				.execute(
 					{ role: "tool-call", id: "test-call", name, input },
 					{ idempotencyKey: "test-call", recovering },
