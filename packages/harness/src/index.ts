@@ -82,7 +82,19 @@ export const TurnTranscript = Schema.Struct({
 	messages: Schema.Array(TurnMessage),
 });
 
-export type TurnCompletion = typeof TurnTranscript.Type & { readonly modelContext?: Schema.Json };
+const ModelContextFormat = Schema.Struct({
+	adapter: Schema.NonEmptyString,
+	version: Schema.Int.check(Schema.isGreaterThan(0)),
+});
+
+export const SavedModelContext = Schema.Struct({
+	...ModelContextFormat.fields,
+	state: Schema.Json,
+});
+
+export type TurnCompletion = typeof TurnTranscript.Type & {
+	readonly modelContext?: typeof SavedModelContext.Type;
+};
 
 export class TurnIoError extends Schema.TaggedError<
 	TurnIoError,
@@ -122,6 +134,8 @@ export interface TurnJournal {
 export class TurnModel extends Context.Service<
 	TurnModel,
 	{
+		/** Identifies the format of the opaque context this adapter reads and writes. */
+		readonly contextFormat: typeof ModelContextFormat.Type;
 		readonly stream: (
 			messages: ReadonlyArray<ModelHistoryEntry>,
 			options: { readonly allowTools: boolean; readonly modelContext?: Schema.Json },
@@ -196,7 +210,9 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 			});
 			return {
 				...transcript,
-				...(decision.continuation !== undefined && { modelContext: decision.continuation }),
+				...(decision.continuation !== undefined && {
+					modelContext: { ...model.contextFormat, state: decision.continuation },
+				}),
 			} satisfies TurnCompletion;
 		}
 

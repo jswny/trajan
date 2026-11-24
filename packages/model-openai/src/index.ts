@@ -245,6 +245,7 @@ export function openAiTurnModel(request: OpenAiResponsesTransport, options: Open
 		);
 	});
 	return TurnModel.of({
+		contextFormat: { adapter: "openai-responses", version: 1 },
 		stream: (history, options) => Stream.unwrap(openStream(history, options)),
 	});
 }

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import { runTurn, TurnIoError, TurnModelError, TurnSubmission } from "@trajan/harness";
-import type { TurnJournal, TurnModel, TurnProgress, TurnTools } from "@trajan/harness";
+import { runTurn, TurnIoError, TurnModel, TurnModelError, TurnSubmission } from "@trajan/harness";
+import type { TurnJournal, TurnProgress, TurnTools } from "@trajan/harness";
 import { Lifecycle } from "agents/lifecycle";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
 import { Tasks } from "agents/tasks";
@@ -203,12 +203,13 @@ export abstract class CloudflareHarness<
 				message: "The turn has no context cursor.",
 			});
 		}
+		const { contextFormat } = yield* TurnModel;
 		const { context, modelContext } = yield* conversationEffect("read context", () => {
-			const modelContext = this.#conversation.modelContext();
-			return {
-				modelContext,
-				context: modelContext === undefined ? this.#conversation.context(through) : [],
-			};
+			const saved = this.#conversation.modelContext();
+			if (saved?.adapter === contextFormat.adapter && saved.version === contextFormat.version) {
+				return { context: [], modelContext: saved.state };
+			}
+			return { context: this.#conversation.context(through), modelContext: undefined };
 		});
 		const transcript = yield* runTurn(
 			{ id: row.submission_id, prompt: row.prompt },

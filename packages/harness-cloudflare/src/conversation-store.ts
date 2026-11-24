@@ -1,6 +1,11 @@
-import { ConversationMessage, TurnMessage, TurnTranscript } from "@trajan/harness";
+import {
+	ConversationMessage,
+	SavedModelContext,
+	TurnMessage,
+	TurnTranscript,
+} from "@trajan/harness";
 import type { TurnCompletion, TurnSubmission } from "@trajan/harness";
-import { Schema } from "effect";
+import { Option, Schema } from "effect";
 
 const contextTurnLimit = 16;
 const contextByteLimit = 32_000;
@@ -8,7 +13,7 @@ const messageJson = Schema.fromJsonString(TurnMessage);
 const contextJson = Schema.fromJsonString(ConversationMessage);
 const transcriptJson = Schema.fromJsonString(TurnTranscript);
 const modelContextKey = "harness-model-context";
-const decodeModelContext = Schema.decodeUnknownSync(Schema.UndefinedOr(Schema.Json));
+const decodeModelContext = Schema.decodeUnknownOption(SavedModelContext);
 
 export type HistoryQuery = {
 	readonly before?: number;
@@ -150,7 +155,7 @@ export class ConversationStore {
 	}
 
 	modelContext() {
-		return decodeModelContext(this.storage.kv.get(modelContextKey));
+		return Option.getOrUndefined(decodeModelContext(this.storage.kv.get(modelContextKey)));
 	}
 
 	commit(runId: string, transcript: TurnCompletion) {
@@ -184,6 +189,8 @@ export class ConversationStore {
 			);
 			if (transcript.modelContext !== undefined) {
 				this.storage.kv.put(modelContextKey, transcript.modelContext);
+			} else {
+				this.storage.kv.delete(modelContextKey);
 			}
 			this.clearRunState(runId);
 		});

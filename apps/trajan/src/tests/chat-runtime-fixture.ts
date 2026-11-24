@@ -449,6 +449,7 @@ export default async function () {
 		Layer.succeed(
 			TurnModel,
 			TurnModel.of({
+				contextFormat: this.#responses.contextFormat,
 				stream: (messages, options) => {
 					const user = messages.findLast((message) => message.role === "user");
 					if (user?.text === compactSetupPrompt || user?.text === compactResumePrompt) {

@@ -674,6 +674,40 @@ const remember = (phrase: string) => ({ id: "remember", prompt: `Remember ${phra
 const recall = { id: "recall", prompt: "What did I ask you to remember?" };
 const messageJson = Schema.fromJsonString(TurnMessage);
 
+test.each([
+	{ kind: "untagged", saved: [] },
+	{ kind: "from another adapter", saved: { adapter: "other", version: 1, state: [] } },
+	{ kind: "from another version", saved: { adapter: "openai-responses", version: 2, state: [] } },
+])("uses transcript context when saved context is $kind", async ({ saved }) => {
+	const stub = openFixture();
+	const phrase = crypto.randomUUID();
+	const first = await submit(stub, remember(phrase));
+	await expect
+		.poll(() => stub.turn(first.runId), { timeout: 5000 })
+		.toMatchObject({
+			state: "completed",
+		});
+	await runInDurableObject(stub, (_, { storage }) =>
+		storage.kv.put("harness-model-context", saved),
+	);
+
+	const second = await submit(stub, recall);
+	await expect
+		.poll(() => readTurn(stub, second.runId), { timeout: 5000 })
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: recall.prompt },
+					{ role: "assistant", text: phrase },
+				],
+			},
+		});
+	expect(
+		await runInDurableObject(stub, (_, { storage }) => storage.kv.get("harness-model-context")),
+	).toBeUndefined();
+});
+
 test("recovers the inbox if the object restarts before starting the accepted task", async () => {
 	const phrase = crypto.randomUUID();
 	let stub = openFixture();

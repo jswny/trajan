@@ -4,6 +4,7 @@ import { runTurn, TurnModel, TurnModelError, TurnTools } from "./index";
 import type { TurnJournal, TurnModelResponse } from "./index";
 
 const submission = { id: "s1", prompt: "Say hello" };
+const contextFormat = { adapter: "test", version: 1 };
 
 const journal: TurnJournal = {
 	checkpoint: (name, schema, run) =>
@@ -21,6 +22,7 @@ function turnLayer(complete: Complete, execute: TurnTools["Service"]["execute"])
 		Layer.succeed(
 			TurnModel,
 			TurnModel.of({
+				contextFormat,
 				stream: (...args) =>
 					complete(...args).pipe(
 						Effect.map((response) => ({ type: "response" as const, response })),
@@ -59,6 +61,7 @@ it.effect("publishes draft text but fails when the stream has no terminal respon
 		const publish = vi.fn(() => Effect.void);
 		const result = yield* runTurn(submission, journal, [], publish).pipe(
 			Effect.provideService(TurnModel, {
+				contextFormat,
 				stream: () => Stream.succeed({ type: "text-delta", text: "Partial" }),
 			}),
 			Effect.provideService(TurnTools, {
