@@ -22,10 +22,28 @@ const ToolCall = Schema.Struct({
 	input: Schema.Json,
 });
 
+export const ToolActivity = Schema.Struct({
+	id: Schema.NonEmptyString,
+	name: Schema.NonEmptyString,
+	status: Schema.Literals(["running", "completed", "failed", "interrupted"]),
+});
+const toolActivityFields = { activity: Schema.optionalKey(Schema.Array(ToolActivity)) };
 export const ToolResult = Schema.Union([
-	Schema.Struct({ status: Schema.Literal("completed"), output: Schema.Json }),
-	Schema.Struct({ status: Schema.Literal("failed"), message: Schema.String }),
-	Schema.Struct({ status: Schema.Literal("unknown"), message: Schema.String }),
+	Schema.Struct({
+		status: Schema.Literal("completed"),
+		output: Schema.Json,
+		...toolActivityFields,
+	}),
+	Schema.Struct({
+		status: Schema.Literal("failed"),
+		message: Schema.String,
+		...toolActivityFields,
+	}),
+	Schema.Struct({
+		status: Schema.Literal("unknown"),
+		message: Schema.String,
+		...toolActivityFields,
+	}),
 ]);
 
 const ToolMessage = Schema.Struct({
@@ -110,7 +128,8 @@ export type TurnModelEvent =
 export type TurnProgress =
 	| Extract<TurnModelEvent, { type: "text-delta" }>
 	| { type: "reset" }
-	| { type: "tool"; name: string };
+	| { type: "tool"; name: string }
+	| { type: "tool-activity"; activity: ReadonlyArray<typeof ToolActivity.Type> };
 
 export class TurnTools extends Context.Service<
 	TurnTools,
@@ -118,6 +137,7 @@ export class TurnTools extends Context.Service<
 		readonly execute: (
 			call: typeof ToolCall.Type,
 			attempt: StepAttempt,
+			publishActivity: (activity: ReadonlyArray<typeof ToolActivity.Type>) => Effect.Effect<void>,
 		) => Effect.Effect<unknown, TurnError>;
 	}
 >()("@trajan/effect-harness/TurnTools") {}
@@ -164,7 +184,11 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 
 		const { continuation: _continuation, ...call } = decision;
 		const result = yield* journal.checkpoint(`tool:${index}`, ToolResult, (attempt) =>
-			publish({ type: "tool", name: call.name }).pipe(Effect.andThen(tools.execute(call, attempt))),
+			publish({ type: "tool", name: call.name }).pipe(
+				Effect.andThen(
+					tools.execute(call, attempt, (activity) => publish({ type: "tool-activity", activity })),
+				),
+			),
 		);
 		history.push(decision, { role: "tool", callId: call.id, result });
 	}

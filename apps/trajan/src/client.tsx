@@ -11,6 +11,7 @@ import {
 	IconSquircleFill,
 	IconX,
 } from "@pierre/icons/beta";
+import type { ToolActivity } from "@trajan/effect-harness";
 import { Atom } from "effect/reactivity";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
@@ -104,6 +105,7 @@ function ToolResultCard({ part }: { part: Extract<ChatPart, { type: "tool-result
 				<Badge variant={part.error ? "error" : "secondary"}>{part.error ? "Failed" : "Done"}</Badge>
 			</summary>
 			<div className="space-y-3 border-t border-kumo-line px-3 py-3">
+				{part.activity.length > 0 ? <ToolActivityList activity={part.activity} /> : null}
 				{text ? (
 					<div>
 						<p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
@@ -124,6 +126,28 @@ function ToolResultCard({ part }: { part: Extract<ChatPart, { type: "tool-result
 				)}
 			</div>
 		</details>
+	);
+}
+
+const toolActivityLabel = {
+	running: "Running",
+	completed: "Succeeded",
+	failed: "Failed",
+	interrupted: "Interrupted",
+};
+
+function ToolActivityList({ activity }: { activity: ReadonlyArray<typeof ToolActivity.Type> }) {
+	return (
+		<ul role="list" aria-label="Recent tool calls" className="max-h-36 space-y-1 overflow-y-auto">
+			{activity.map(({ id, name, status }) => (
+				<li key={id} className="flex min-w-0 items-center gap-3 text-xs">
+					<span className="min-w-0 flex-1 truncate font-medium">{name}</span>
+					<Badge variant={status === "failed" ? "error" : "secondary"}>
+						{toolActivityLabel[status]}
+					</Badge>
+				</li>
+			))}
+		</ul>
 	);
 }
 
@@ -311,6 +335,7 @@ function App() {
 	} = useChatSession();
 	const running = active !== null;
 	const runningTools = preview?.tool ? [preview.tool] : [];
+	const toolActivity = preview?.activity ?? [];
 	const newestId = messages.at(-1)?.id;
 	const oldestId = messages[0]?.id;
 
@@ -319,7 +344,7 @@ function App() {
 		if (following.current) {
 			endRef.current?.scrollIntoView({ behavior: "smooth" });
 		}
-	}, [newestId, preview?.text, active?.runId]);
+	}, [newestId, preview?.text, active?.runId, toolActivity.length]);
 
 	// Scrolling up stops following; scrolling back to the bottom resumes it.
 	const onScroll = () => {
@@ -439,7 +464,7 @@ function App() {
 								<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-(--pierre-on-accent)">
 									<IconAgentFill aria-hidden="true" />
 								</div>
-								<Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
+								<Surface className="min-w-0 space-y-2 rounded-xl px-4 py-3 ring ring-kumo-line">
 									<div className="flex items-center gap-2 text-sm text-kumo-subtle">
 										<IconLoader aria-hidden="true" className="motion-safe:animate-spin" />
 										{active?.state === "stopping"
@@ -448,6 +473,7 @@ function App() {
 												? `Running ${runningTools.join(", ")}`
 												: "Waiting for the model"}
 									</div>
+									{toolActivity.length > 0 ? <ToolActivityList activity={toolActivity} /> : null}
 								</Surface>
 							</div>
 						) : null}

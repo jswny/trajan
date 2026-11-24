@@ -1,4 +1,4 @@
-import { TurnMessage } from "@trajan/effect-harness";
+import { ToolActivity, TurnMessage } from "@trajan/effect-harness";
 import { Schema } from "effect";
 
 export const ChatPath = "/api/chat";
@@ -39,10 +39,11 @@ export const ChatReceipt = Schema.Union([
 ]);
 export const ChatStopReceipt = Schema.Struct({ runId: RunId, stopped: Schema.Boolean });
 
-const Preview = Schema.Struct({
+export const ChatPreview = Schema.Struct({
 	runId: RunId,
 	text: Schema.String,
 	tool: Schema.NullOr(Schema.NonEmptyString),
+	activity: Schema.Array(ToolActivity),
 });
 export const ChatToolInfo = Schema.Struct({ name: Schema.String, description: Schema.String });
 export const ChatSnapshot = Schema.Struct({
@@ -56,13 +57,13 @@ export const ChatSnapshot = Schema.Struct({
 			state: Schema.Literals(["pending", "running", "stopping"]),
 		}),
 	),
-	preview: Schema.NullOr(Preview),
+	preview: Schema.NullOr(ChatPreview),
 	queued: Schema.Natural,
 	catalog: Schema.Array(ChatToolInfo),
 });
 export const ChatEvent = Schema.Union([
 	ChatSnapshot,
-	Schema.Struct({ type: Schema.Literal("preview"), ...Preview.fields }),
+	Schema.Struct({ type: Schema.Literal("preview"), ...ChatPreview.fields }),
 	Schema.Struct({
 		type: Schema.Literal("text-delta"),
 		runId: RunId,

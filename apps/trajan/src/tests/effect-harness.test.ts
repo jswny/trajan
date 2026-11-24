@@ -110,6 +110,13 @@ export default async function () {
 }`;
 	expect(decode(await stub.workspaceTool("exec", { code }))).toMatchObject({
 		status: "completed",
+		activity: [
+			{ name: "write", status: "failed" },
+			{ name: "write", status: "failed" },
+			{ name: "read", status: "failed" },
+			{ name: "write", status: "completed" },
+			{ name: "read", status: "completed" },
+		],
 		output: {
 			names: ["delete", "edit", "find", "grep", "ls", "read", "write"],
 			invalid: true,

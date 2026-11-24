@@ -1,11 +1,12 @@
-import type { Workspace } from "@cloudflare/computer";
 import { TurnIoError } from "@trajan/effect-harness";
-import type { ToolResult, TurnTools } from "@trajan/effect-harness";
+import type { StepAttempt, ToolActivity, ToolResult, TurnTools } from "@trajan/effect-harness";
 import { Effect, Exit, Schema } from "effect";
 import { Tool } from "effect/ai";
+import type { createTrajanWorkspace } from "../workspace";
 
 const Code = Schema.Struct({ code: Schema.NonEmptyString });
 const Exec = Tool.make("exec", { parameters: Code, success: Schema.Json });
+const RECENT_TOOL_CALLS = 8;
 
 function executionError(cause: unknown) {
 	return new TurnIoError({
@@ -22,15 +23,16 @@ function unknownOutcome(message: string): Extract<typeof ToolResult.Type, { stat
 	};
 }
 
-export function effectWorkspaceTools(workspace: Workspace, instructions: string) {
-	const execute = Effect.fn("effect-harness.exec")(
+export function effectWorkspaceTools({
+	workspace,
+	instructions,
+	observeExecution,
+}: ReturnType<typeof createTrajanWorkspace>) {
+	const runScript = Effect.fnUntraced(
 		function* (
-			...[call, attempt]: Parameters<TurnTools["Service"]["execute"]>
-		): Effect.fn.Return<typeof ToolResult.Type, TurnIoError | Schema.SchemaError> {
-			if (call.name !== Exec.name) {
-				return { status: "failed", message: `Unknown tool: ${call.name}` };
-			}
-			const { code } = yield* Schema.decodeUnknownEffect(Code)(call.input);
+			code: string,
+			attempt: StepAttempt,
+		): Effect.fn.Return<typeof ToolResult.Type, TurnIoError> {
 			const runtime = workspace.runtime;
 			const result = yield* Effect.acquireUseRelease(
 				Effect.tryPromise({
@@ -68,16 +70,43 @@ export function effectWorkspaceTools(workspace: Workspace, instructions: string)
 			).pipe(Effect.mapError(executionError));
 			return { status: "completed", output };
 		},
-		Effect.catch((error) =>
-			Effect.succeed(
-				error instanceof TurnIoError
-					? unknownOutcome(error.message)
-					: {
-							status: "failed" as const,
-							message: "Provide non-empty JavaScript source in the code argument.",
-						},
-			),
-		),
+		Effect.catch((error) => Effect.succeed(unknownOutcome(error.message))),
+	);
+	const execute = Effect.fn("effect-harness.exec")(
+		function* (...[call, attempt, publishActivity]: Parameters<TurnTools["Service"]["execute"]>) {
+			if (call.name !== Exec.name) {
+				return { status: "failed" as const, message: `Unknown tool: ${call.name}` };
+			}
+			const { code } = yield* Schema.decodeUnknownEffect(Code)(call.input);
+			let recent: ReadonlyArray<typeof ToolActivity.Type> = [];
+			const result = yield* Effect.acquireUseRelease(
+				Effect.sync(() =>
+					observeExecution(attempt.idempotencyKey, (entry) =>
+						Effect.suspend(() => {
+							recent = [...recent.filter(({ id }) => id !== entry.id), entry].slice(
+								-RECENT_TOOL_CALLS,
+							);
+							return publishActivity(recent);
+						}),
+					),
+				),
+				() => runScript(code, attempt),
+				(unsubscribe) => Effect.sync(unsubscribe),
+			);
+			if (recent.length === 0) {
+				return result;
+			}
+			return {
+				...result,
+				activity: recent.map((entry) =>
+					entry.status === "running" ? { ...entry, status: "interrupted" as const } : entry,
+				),
+			};
+		},
+		Effect.orElseSucceed(() => ({
+			status: "failed" as const,
+			message: "Provide non-empty JavaScript source in the code argument.",
+		})),
 	);
 
 	return {

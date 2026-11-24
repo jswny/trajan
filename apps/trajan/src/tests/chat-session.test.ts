@@ -33,12 +33,12 @@ test("ignores stale deltas and replaces a discarded draft after a new snapshot",
 	const first = receiveChatEvent(INITIAL_CHAT, {
 		...base,
 		active: { runId: "first", submissionId: "a", state: "running", prompt: "hello" },
-		preview: { runId: "first", text: "partial", tool: null },
+		preview: { runId: "first", text: "partial", tool: null, activity: [] },
 	});
 	const second = receiveChatEvent(first, {
 		...base,
 		active: { runId: "second", submissionId: "b", state: "running", prompt: "again" },
-		preview: { runId: "second", text: "fresh", tool: null },
+		preview: { runId: "second", text: "fresh", tool: null, activity: [] },
 	});
 	expect(receiveChatEvent(second, { type: "text-delta", runId: "first", text: "stale" })).toBe(
 		second,

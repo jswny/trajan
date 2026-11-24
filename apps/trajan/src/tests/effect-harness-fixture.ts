@@ -40,10 +40,7 @@ function isMissing(error: unknown): boolean {
 export class EffectHarnessTestObject extends EffectHarnessObject {
 	readonly #instance = crypto.randomUUID();
 	readonly #computer = createTrajanWorkspace(this.ctx.storage, this.env.LOADER);
-	readonly #effectTools = effectWorkspaceTools(
-		this.#computer.workspace,
-		this.#computer.instructions,
-	);
+	readonly #effectTools = effectWorkspaceTools(this.#computer);
 	protected override readonly toolCatalog = [this.#effectTools.declaration];
 
 	readonly #execute = Effect.fn("effect-harness.fixture.executeTool")(function* (
@@ -54,7 +51,7 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		if (call.id === "exec-interrupt") {
 			yield* Effect.promise(() => this.ctx.storage.put("executionId", attempt.idempotencyKey));
 		}
-		const result = yield* this.#effectTools.service.execute(call, attempt);
+		const result = yield* this.#effectTools.service.execute(...args);
 		if (result.status === "completed") {
 			// Pause after Computer settles while the turn's checkpoint is still open.
 			yield* Effect.tryPromise({
@@ -86,7 +83,14 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 				id: "exec-1",
 				name: "exec",
 				input: {
-					code: "export default () => 42",
+					code: `import { read, write } from "codemode:tools";
+export default async function () {
+  const path = "/workspace/module.txt";
+  const written = await write({ path, content: "hello" });
+  const [found, missing] = await Promise.all([read({ path }), read({ path: "/workspace/missing.txt" })]);
+  if (written.isError || found.isError || !missing.isError) throw new Error("Unexpected tool result");
+  return 42;
+}`,
 				},
 			};
 		}
@@ -111,10 +115,18 @@ export default async function () {
 				id: "exec-interrupt",
 				name: "exec",
 				input: {
-					code: appendExecInput("once").code.replace(
-						"return content;",
-						"await new Promise((resolve) => setTimeout(resolve, 45_000)); return content;",
-					),
+					code: `import { readFile } from "node:fs/promises";
+import { write } from "codemode:tools";
+export default async function () {
+  const path = ${JSON.stringify(workspaceFile)};
+  const previous = await readFile(path, "utf8").catch((error) => {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  });
+  const result = await write({ path, content: previous + "once" });
+  if (result.isError) throw new Error(result.text);
+  await new Promise((resolve) => setTimeout(resolve, 45_000));
+}`,
 				},
 			};
 		}
@@ -242,6 +254,7 @@ export default async function () {
 				.execute(
 					{ role: "tool-call", id: "test-call", name, input },
 					{ idempotencyKey: crypto.randomUUID(), recovering },
+					() => Effect.void,
 				)
 				.pipe(Effect.flatMap(Schema.encodeEffect(Schema.fromJsonString(ToolResult)))),
 		);

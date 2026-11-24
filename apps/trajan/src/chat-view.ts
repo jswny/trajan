@@ -1,3 +1,4 @@
+import type { ToolActivity } from "@trajan/effect-harness";
 import { Schema } from "effect";
 import type { ChatPage } from "./effect-harness/chat-protocol";
 
@@ -21,6 +22,7 @@ export type ChatPart =
 			readonly name: string;
 			readonly content: typeof ContentParts.Type;
 			readonly error: boolean;
+			readonly activity: ReadonlyArray<typeof ToolActivity.Type>;
 	  };
 
 export type ChatEntry = {
@@ -71,6 +73,7 @@ export function chatMessages(entries: (typeof ChatPage.Type)["entries"]): Array<
 							type: "tool-result",
 							name: names.get(message.callId) ?? "Tool",
 							error: result.status !== "completed",
+							activity: result.activity ?? [],
 							content:
 								parts?._tag === "Some"
 									? parts.value

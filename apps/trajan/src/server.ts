@@ -10,7 +10,7 @@ class ChatRouteError extends Data.TaggedError("ChatRouteError")<{ readonly cause
 
 export class Trajan extends EffectHarnessObject {
 	readonly #computer = createTrajanWorkspace(this.ctx.storage, this.env.LOADER);
-	readonly #tools = effectWorkspaceTools(this.#computer.workspace, this.#computer.instructions);
+	readonly #tools = effectWorkspaceTools(this.#computer);
 
 	protected override readonly toolCatalog = [
 		{

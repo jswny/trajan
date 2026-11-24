@@ -9,7 +9,7 @@ import { WebSockets } from "agents/websockets";
 import { Clock, Effect, Schema } from "effect";
 import type { Layer } from "effect";
 import { ChatEvent, ChatHistoryQuery, ChatPath, ChatStop } from "./chat-protocol";
-import type { ChatSnapshot, ChatToolInfo } from "./chat-protocol";
+import type { ChatPreview, ChatSnapshot, ChatToolInfo } from "./chat-protocol";
 import { ConversationStore } from "./conversation-store";
 import type { HistoryQuery } from "./conversation-store";
 
@@ -109,7 +109,7 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 	protected onTurnPhase?(phase: "before-task" | "after-commit", signal: AbortSignal): Promise<void>;
 
 	readonly #conversation = new ConversationStore(this.ctx.storage);
-	#draft: { runId: string; tool: string | null; text: string } | undefined;
+	#draft: typeof ChatPreview.Type | undefined;
 	readonly #sockets = new WebSockets({
 		protocol: false,
 		getConnectionTags: () => [chatTag],
@@ -241,13 +241,19 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 				case "reset":
 				case "tool": {
 					const tool = event.type === "tool" ? event.name : null;
-					this.#draft = { runId, text: "", tool };
-					this.#broadcast({ type: "preview", runId, text: "", tool });
+					this.#draft = { runId, text: "", tool, activity: [] };
+					this.#broadcast({ type: "preview", ...this.#draft });
 					break;
 				}
+				case "tool-activity":
+					if (this.#draft?.runId === runId && this.#draft.tool !== null) {
+						this.#draft = { ...this.#draft, activity: event.activity };
+						this.#broadcast({ type: "preview", ...this.#draft });
+					}
+					break;
 				case "text-delta":
 					if (this.#draft?.runId === runId) {
-						this.#draft.text += event.text;
+						this.#draft = { ...this.#draft, text: this.#draft.text + event.text };
 						this.#broadcast({ ...event, runId });
 					}
 					break;
@@ -257,13 +263,13 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 
 	#snapshot(): typeof ChatSnapshot.Type {
 		const { active, queued } = this.#conversation.chatStatus();
-		const draft = this.#draft?.runId === active?.runId ? this.#draft : undefined;
+		const draft = this.#draft;
 		return {
 			type: "snapshot",
 			page: this.#conversation.chatPage({}),
 			active,
 			queued,
-			preview: draft ? { runId: draft.runId, text: draft.text, tool: draft.tool } : null,
+			preview: draft && draft.runId === active?.runId ? draft : null,
 			catalog: this.toolCatalog,
 		};
 	}

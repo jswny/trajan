@@ -101,6 +101,10 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	await composer.fill("Interrupt after writing.");
 	await composer.press("Enter");
 	await expect(page.getByText("Running exec", { exact: true })).toBeVisible();
+	const activity = page.getByRole("list", { name: "Recent tool calls" });
+	await expect(activity.getByRole("listitem")).toHaveText(/write.*Succeeded/);
+	await page.reload();
+	await expect(activity.getByRole("listitem")).toHaveText(/write.*Succeeded/);
 	await expect
 		.poll(async () => {
 			const response = await page.request.post(`${control}/state`);
@@ -114,6 +118,7 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	await expect(
 		transcript.getByText(/Inspect it before repeating the action/).first(),
 	).toBeVisible();
+	await expect(activity).toBeHidden();
 	await composer.fill("hello");
 	await composer.press("Enter");
 	await expect(transcript.getByText('Wrote "oncehello"', { exact: true })).toBeVisible();
@@ -162,13 +167,20 @@ test("loads older messages without replacing the recent transcript", async ({ pa
 	await expect(transcript.getByText("Remembering page 25", { exact: true })).toHaveCount(1);
 });
 
-test("shows a Code Mode result from a real sandbox and workspace module", async ({ page }) => {
+test("keeps separate outcomes for concurrent calls to the same tool", async ({ page }) => {
 	const composer = await openChat(page);
 	await composer.fill("Run a workspace module.");
 	await composer.press("Enter");
 	const transcript = page.getByRole("main");
 	await expect(transcript.getByText("Done", { exact: true })).toBeVisible();
 	await expect(transcript.getByText(/Wrote .*42/)).toBeVisible();
+	await page.reload();
+	await transcript.getByText("Done", { exact: true }).click();
+	const calls = transcript.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
+	await expect(calls).toHaveCount(3);
+	await expect(calls.filter({ hasText: /write.*Succeeded/ })).toBeVisible();
+	await expect(calls.filter({ hasText: /read.*Succeeded/ })).toBeVisible();
+	await expect(calls.filter({ hasText: /read.*Failed/ })).toBeVisible();
 });
 
 test("warns about a partial Code Mode outcome when a script fails after writing", async ({
