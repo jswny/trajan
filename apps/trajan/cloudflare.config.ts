@@ -21,7 +21,7 @@ export default defineConfig(({ mode }) => {
 			...(!development && { domains: ["trajan.j1.io"] }),
 			assets: {
 				notFoundHandling: "single-page-application",
-				runWorkerFirst: ["/api/*", "/agents/*"],
+				runWorkerFirst: ["/api/*"],
 			},
 			env: {
 				AI: bindings.ai({ dev: { remote: true } }),

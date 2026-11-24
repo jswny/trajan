@@ -6,25 +6,21 @@ import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle"
 import { Tasks } from "agents/tasks";
 import type { TaskStep } from "agents/tasks";
 import { WebSockets } from "agents/websockets";
-import { Clock, Effect, PubSub, Schema, Stream } from "effect";
+import { Clock, Effect, Schema } from "effect";
 import type { Layer } from "effect";
-import { Sse } from "effect/encoding";
 import { ChatEvent, ChatHistoryQuery, ChatPath, ChatStop } from "./chat-protocol";
 import type { ChatSnapshot, ChatToolInfo } from "./chat-protocol";
 import { ConversationStore } from "./conversation-store";
 import type { HistoryQuery } from "./conversation-store";
-import { TurnStreamEvent } from "./turn-events";
 
 const turnDefinition = "turn@v3";
 const inboxJob = "effect-harness-inbox";
 const TurnTaskInput = Schema.Struct({ runId: Schema.NonEmptyString });
-const eventJson = Schema.encodeSync(Schema.fromJsonString(TurnStreamEvent));
 const chatEventJson = Schema.encodeSync(Schema.fromJsonString(ChatEvent));
 const chatTag = "chat";
 const decodeSubmission = Schema.decodeUnknownOption(TurnSubmission);
 const decodeHistory = Schema.decodeUnknownOption(ChatHistoryQuery);
 const decodeStop = Schema.decodeUnknownOption(ChatStop);
-type Draft = { text: string; generation: symbol | undefined };
 
 function sendChat(socket: WebSocket, data: string) {
 	if (socket.readyState === 1) {
@@ -108,8 +104,7 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 	protected onTurnPhase?(phase: "before-task" | "after-commit", signal: AbortSignal): Promise<void>;
 
 	readonly #conversation = new ConversationStore(this.ctx.storage);
-	readonly #updates = Effect.runSync(PubSub.sliding<void>(1));
-	#draft: (Draft & { runId: string; tool: string | null }) | undefined;
+	#draft: { runId: string; tool: string | null; text: string } | undefined;
 	readonly #sockets = new WebSockets({
 		protocol: false,
 		getConnectionTags: () => [chatTag],
@@ -241,7 +236,7 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 				case "reset":
 				case "tool": {
 					const tool = event.type === "tool" ? event.name : null;
-					this.#draft = { runId, generation: Symbol(), text: "", tool };
+					this.#draft = { runId, text: "", tool };
 					this.#broadcast({ type: "preview", runId, text: "", tool });
 					break;
 				}
@@ -252,7 +247,6 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 					}
 					break;
 			}
-			PubSub.publishUnsafe(this.#updates, undefined);
 		});
 	}
 
@@ -291,52 +285,7 @@ export abstract class EffectHarnessObject extends DurableObject<Env> {
 			if (this.#draft?.runId === runId) {
 				this.#draft = undefined;
 			}
-			PubSub.publishUnsafe(this.#updates, undefined);
 			this.#broadcastSnapshot();
-		});
-	}
-
-	protected async streamTurn(runId: string) {
-		await this.lifecycle.start();
-		const events = Stream.unwrap(
-			Effect.map(PubSub.subscribe(this.#updates), (updates) =>
-				Stream.fromSubscription(updates).pipe(Stream.prepend([undefined])),
-			),
-		).pipe(
-			// Read the snapshot after subscribing so a concurrent commit can't be missed.
-			Stream.mapAccum(
-				(): Draft | undefined => undefined,
-				(previous, _): readonly [Draft | undefined, ReadonlyArray<typeof TurnStreamEvent.Type>] => {
-					const active = this.#draft;
-					let draft: Draft = { generation: undefined, text: "" };
-					if (active?.runId === runId) {
-						draft = { generation: active.generation, text: active.text };
-					} else {
-						const state = this.#conversation.state(runId);
-						if (state !== "pending" && state !== "running" && state !== "stopping") {
-							return [undefined, [{ type: "settled", state }]];
-						}
-					}
-					if (!previous || previous.generation !== draft.generation) {
-						return [draft, [{ type: "draft", text: draft.text }]];
-					}
-					const text = draft.text.slice(previous.text.length);
-					return [draft, text ? [{ type: "text-delta", text }] : []];
-				},
-			),
-			Stream.takeUntil((event) => event.type === "settled"),
-			Stream.map((event) =>
-				Sse.encoder.write({
-					_tag: "Event",
-					event: "message",
-					id: undefined,
-					data: eventJson(event),
-				}),
-			),
-			Stream.encodeText,
-		);
-		return new Response(Stream.toReadableStream(events), {
-			headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" },
 		});
 	}
 

@@ -24,8 +24,7 @@ const paletteRoles = {
 	danger: "gitDecoration.deletedResourceForeground",
 };
 
-async function fixtureWorker(mode: "browser-smoke" | "effect-harness-live"): Promise<PluginConfig> {
-	const live = mode === "effect-harness-live";
+async function fixtureWorker(mode: "browser-smoke"): Promise<PluginConfig> {
 	const fixturePath = fileURLToPath(new URL("./src/tests/cloudflare.config.ts", import.meta.url));
 	const { result } = await loadAndParseConfig(fixturePath, {
 		isPreview: false,
@@ -43,14 +42,12 @@ async function fixtureWorker(mode: "browser-smoke" | "effect-harness-live"): Pro
 			worker: {
 				...worker,
 				assets: {
-					runWorkerFirst: live
-						? ["/__effect-harness/*"]
-						: ["/agents/*", "/api/*", "/__browser-smoke/*", "/__effect-harness/*"],
+					runWorkerFirst: ["/api/*", "/__browser-smoke/*"],
 				},
 			},
 		}),
 		persistState: false,
-		remoteBindings: live,
+		remoteBindings: false,
 		inspectorPort: false,
 		types: { generate: false },
 	};
@@ -66,8 +63,7 @@ async function cloudflareWorkers(command: string, mode: string): Promise<PluginC
 	if (!sandbox) {
 		throw new Error("Missing Pi Code Mode sandbox Worker");
 	}
-	const fixtureMode =
-		command === "serve" && (mode === "browser-smoke" || mode === "effect-harness-live");
+	const fixtureMode = command === "serve" && mode === "browser-smoke";
 	return {
 		...(fixtureMode && (await fixtureWorker(mode))),
 		auxiliaryWorkers: [{ config: sandbox, devOnly: true }],
@@ -100,13 +96,6 @@ export default defineConfig(async ({ command, mode }) => ({
 		},
 	],
 	resolve: {
-		dedupe: [
-			"react",
-			"react-dom",
-			"@earendil-works/chord",
-			"@earendil-works/pi-ai",
-			"@earendil-works/pi-durable",
-			"@earendil-works/pi-telemetry",
-		],
+		dedupe: ["react", "react-dom", "@earendil-works/pi-ai"],
 	},
 }));

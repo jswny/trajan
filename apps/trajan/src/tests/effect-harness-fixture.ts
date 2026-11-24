@@ -3,20 +3,15 @@ import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import {
 	TurnIoError,
 	ToolResult,
-	TurnMessage,
 	TurnModel,
 	TurnModelError,
 	TurnTools,
-	TurnTranscript,
 } from "@trajan/effect-harness";
-import type { StepAttempt, TurnModelEvent } from "@trajan/effect-harness";
+import type { StepAttempt, TurnMessage, TurnModelEvent } from "@trajan/effect-harness";
 import { Context, Effect, Layer, Option, Predicate, Schema, Stream } from "effect";
 import { Tool, Toolkit } from "effect/ai";
-import { isEffectChatPath } from "../effect-harness/chat-protocol";
-import { HistoryQuery } from "../effect-harness/conversation-store";
 import { EffectHarnessObject } from "../effect-harness/worker-host";
 import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
-import { workersAiTurnModel } from "../effect-harness/workers-ai";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
 type PausePoint = "before-task" | "after-write" | "between-tools" | "during-reply" | "after-commit";
@@ -49,9 +44,6 @@ export default async function (text) {
   return content;
 }
 `;
-
-const transcriptJson = Schema.fromJsonString(TurnTranscript);
-const messageJson = Schema.fromJsonString(TurnMessage);
 
 function isMissing(error: unknown): boolean {
 	return Predicate.hasProperty(error, "code") && error.code === "ENOENT";
@@ -216,43 +208,35 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 	protected readonly turnLayer = Layer.merge(
 		Layer.succeed(
 			TurnModel,
-			this.env.EFFECT_HARNESS_AI
-				? workersAiTurnModel(this.env.EFFECT_HARNESS_AI, [
-						{
-							name: Append.name,
-							description: appendDescription,
-							parameters: Tool.getJsonSchema(Append),
-						},
-					])
-				: TurnModel.of({
-						stream: (messages) =>
-							Stream.unwrap(
-								Effect.map(this.#fakeComplete(messages), (response) => {
-									const end = Stream.succeed<TurnModelEvent>({ type: "response", response });
-									if (response.role !== "assistant") {
-										return end;
-									}
-									const excerpt = response.text.slice(0, 5);
-									return Stream.succeed<TurnModelEvent>({ type: "text-delta", text: excerpt }).pipe(
-										Stream.concat(
-											Stream.fromEffect(
-												Effect.tryPromise({
-													try: (signal) => this.#pauseAt("during-reply", signal),
-													catch: (cause) =>
-														new TurnModelError({ message: "Fixture model pause failed.", cause }),
-												}).pipe(
-													Effect.as<TurnModelEvent>({
-														type: "text-delta",
-														text: response.text.slice(excerpt.length),
-													}),
-												),
-											),
+			TurnModel.of({
+				stream: (messages) =>
+					Stream.unwrap(
+						Effect.map(this.#fakeComplete(messages), (response) => {
+							const end = Stream.succeed<TurnModelEvent>({ type: "response", response });
+							if (response.role !== "assistant") {
+								return end;
+							}
+							const excerpt = response.text.slice(0, 5);
+							return Stream.succeed<TurnModelEvent>({ type: "text-delta", text: excerpt }).pipe(
+								Stream.concat(
+									Stream.fromEffect(
+										Effect.tryPromise({
+											try: (signal) => this.#pauseAt("during-reply", signal),
+											catch: (cause) =>
+												new TurnModelError({ message: "Fixture model pause failed.", cause }),
+										}).pipe(
+											Effect.as<TurnModelEvent>({
+												type: "text-delta",
+												text: response.text.slice(excerpt.length),
+											}),
 										),
-										Stream.concat(end),
-									);
-								}),
-							),
-					}),
+									),
+								),
+								Stream.concat(end),
+							);
+						}),
+					),
+			}),
 		),
 		this.#toolsLayer,
 	);
@@ -261,21 +245,8 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		return this.#pauseAt(phase, signal);
 	}
 
-	async onRequest(request: Request) {
-		const url = new URL(request.url);
-		if (isEffectChatPath(url.pathname)) {
-			return this.chatRequest(request);
-		}
-		if (url.pathname !== "/__effect-harness/events") {
-			return new Response(null, { status: 404 });
-		}
-		if (request.method !== "GET") {
-			return new Response(null, { status: 405, headers: { Allow: "GET" } });
-		}
-		const runId = url.searchParams.get("runId");
-		return runId
-			? this.streamTurn(runId)
-			: Response.json({ error: "Expected a runId." }, { status: 400 });
+	onRequest(request: Request) {
+		return this.chatRequest(request);
 	}
 
 	async state() {
@@ -334,73 +305,4 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 	crash() {
 		this.ctx.abort(effectHarnessReset);
 	}
-}
-
-/** The development-only Worker exposes turns for model and browser smoke tests. */
-export async function serveEffectHarness(request: Request, env: Env, fixture = "live-model") {
-	const url = new URL(request.url);
-	const origin = request.headers.get("Origin");
-	if (origin !== null && origin !== url.origin) {
-		return new Response("Forbidden", { status: 403 });
-	}
-
-	const stub = env.EFFECT_HARNESS_TEST.getByName(fixture);
-	if (url.pathname === "/__effect-harness/history") {
-		if (request.method !== "GET") {
-			return new Response(null, { status: 405, headers: { Allow: "GET" } });
-		}
-		const before = url.searchParams.get("before");
-		const limit = url.searchParams.get("limit");
-		const query = Schema.decodeOption(HistoryQuery)({
-			...(before !== null && { before: Number(before) }),
-			...(limit !== null && { limit: Number(limit) }),
-		});
-		if (query._tag === "None") {
-			return Response.json({ error: "Invalid history cursor or limit." }, { status: 400 });
-		}
-		const { entries, nextBefore } = await stub.history(query.value);
-		return Response.json({
-			entries: entries.map((entry) => ({
-				...entry,
-				message: Schema.decodeSync(messageJson)(entry.message),
-			})),
-			nextBefore,
-		});
-	}
-
-	if (url.pathname === "/__effect-harness/events") {
-		return stub.fetch(request);
-	}
-
-	if (url.pathname !== "/__effect-harness/turns") {
-		return new Response("Not found", { status: 404 });
-	}
-
-	if (request.method === "POST") {
-		let submission: unknown;
-		try {
-			submission = await request.json();
-		} catch {
-			return Response.json({ error: "Expected a JSON submission." }, { status: 400 });
-		}
-		const receipt = await stub.submit(submission);
-		return Response.json(receipt, { status: receipt.runId === null ? 400 : 202 });
-	}
-
-	if (request.method === "GET") {
-		const runId = url.searchParams.get("runId");
-		if (!runId) {
-			return Response.json({ error: "Expected a runId." }, { status: 400 });
-		}
-		const { transcript, ...turn } = await stub.turn(runId);
-		return Response.json(
-			{
-				...turn,
-				transcript: transcript === null ? null : Schema.decodeSync(transcriptJson)(transcript),
-			},
-			{ status: turn.state === "missing" ? 404 : 200 },
-		);
-	}
-
-	return new Response(null, { status: 405, headers: { Allow: "GET, POST" } });
 }

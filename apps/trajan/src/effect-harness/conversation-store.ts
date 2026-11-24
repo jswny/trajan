@@ -237,17 +237,6 @@ export class ConversationStore {
 		};
 	}
 
-	state(runId: string) {
-		return (
-			this.storage.sql
-				.exec<Pick<SubmissionRow, "state">>(
-					"SELECT state FROM effect_submissions WHERE run_id = ?",
-					runId,
-				)
-				.toArray()[0]?.state ?? "missing"
-		);
-	}
-
 	turn(runId: string) {
 		const row = this.#find(runId);
 		let transcript: string | null = null;

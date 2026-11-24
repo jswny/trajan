@@ -11,7 +11,6 @@ export default defineConfig(({ mode }) => ({
 		compatibilityFlags: ["nodejs_compat"],
 		env: {
 			LOADER: bindings.workerLoader(),
-			EFFECT_HARNESS_AI: mode === "effect-harness-live" && bindings.ai({ dev: { remote: true } }),
 			CODEMODE_SANDBOX:
 				mode === "browser-smoke" &&
 				bindings.durableObject({ worker: codemode.worker, exportName: "CodemodeSandbox" }),
@@ -19,14 +18,9 @@ export default defineConfig(({ mode }) => ({
 				worker: "trajan-test",
 				exportName: "EffectHarnessTestObject",
 			}),
-			PI_HARNESS_TEST: bindings.durableObject({
-				worker: "trajan-test",
-				exportName: "PiHarnessTestObject",
-			}),
 		},
 		exports: {
 			EffectHarnessTestObject: exports.durableObject({ storage: "sqlite" }),
-			PiHarnessTestObject: exports.durableObject({ storage: "sqlite" }),
 		},
 	},
 }));

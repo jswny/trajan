@@ -1,14 +1,13 @@
 import type { Workspace } from "@cloudflare/computer";
 import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
 import type { CreatePiToolsOptions, PiTool } from "@cloudflare/computer/tools/pi-ai";
-import type { ToolRegistration } from "@earendil-works/pi-durable";
 
 /**
  * Tools that can run again after an eviction cut them off. Reads and
  * searches have no effect, `write` replaces the whole file, and `delete`
  * succeeds on a missing path. `edit` would fail to find text it already
- * replaced, and `exec` runs arbitrary code, so pi hands the model an
- * interrupted result for those instead.
+ * replaced, and `exec` runs arbitrary code. Interrupted calls to those
+ * tools return an unknown outcome.
  */
 export const REPLAY_SAFE = new Set(["read", "ls", "find", "grep", "write", "delete"]);
 
@@ -82,39 +81,6 @@ function describeExec(tool: PiTool): PiTool {
 			},
 		},
 	};
-}
-
-/**
- * The Workspace tools from `@cloudflare/computer/tools/pi-ai`, as
- * pi-durable `ToolRegistration`s.
- *
- * `createPiTools` returns pi-ai declarations and one `execute` that runs a
- * call, for a hand-written agent loop. pi-durable runs the loop itself and
- * wants each tool to carry its own `execute`, so this pairs them up by
- * name. `execute` validates the arguments against the tool's schema and
- * reports failures as `isError` results rather than throwing.
- */
-export function createWorkspaceTools(
-	workspace: Workspace,
-	options: Omit<CreatePiToolsOptions, "workspace" | "exec" | "shell"> = {},
-): Array<ToolRegistration> {
-	const { tools, execute } = computerToolset(workspace, options);
-
-	return tools.map((tool): ToolRegistration => ({
-		name: tool.name,
-		description: tool.description,
-		parameters: tool.parameters,
-		...(tool.constrainedSampling && { constrainedSampling: tool.constrainedSampling }),
-		...(tool.name === "exec" && { callers: ["tools"] }),
-		replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
-		async execute(args, api, context) {
-			const { content, isError } = await execute(
-				{ id: api.callId, name: tool.name, arguments: args },
-				{ abortSignal: context.abortSignal },
-			);
-			return { output: content, isError };
-		},
-	}));
 }
 
 export function computerToolset(
