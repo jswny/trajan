@@ -10,7 +10,10 @@ import type { ToolRegistration } from "@earendil-works/pi-durable";
  * replaced, and `exec` runs arbitrary code, so pi hands the model an
  * interrupted result for those instead.
  */
-const REPLAY_SAFE = new Set(["read", "ls", "find", "grep", "write", "delete"]);
+export const REPLAY_SAFE = new Set(["read", "ls", "find", "grep", "write", "delete"]);
+
+export const WORKSPACE_PROMPT =
+	"You are Trajan, a concise and capable assistant. You have a durable workspace at /workspace. Use the direct file tools for simple file operations. Use codemode to compose tools, and call tools.exec from a codemode script to run JavaScript modules against the workspace or use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
 
 /**
  * The shared `exec` description is written for a choice of shell backends.
@@ -95,6 +98,29 @@ export function createWorkspaceTools(
 	workspace: Workspace,
 	options: Omit<CreatePiToolsOptions, "workspace" | "exec" | "shell"> = {},
 ): Array<ToolRegistration> {
+	const { tools, execute } = computerToolset(workspace, options);
+
+	return tools.map((tool): ToolRegistration => ({
+		name: tool.name,
+		description: tool.description,
+		parameters: tool.parameters,
+		...(tool.constrainedSampling && { constrainedSampling: tool.constrainedSampling }),
+		...(tool.name === "exec" && { callers: ["tools"] }),
+		replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
+		async execute(args, api, context) {
+			const { content, isError } = await execute(
+				{ id: api.callId, name: tool.name, arguments: args },
+				{ abortSignal: context.abortSignal },
+			);
+			return { output: content, isError };
+		},
+	}));
+}
+
+export function computerToolset(
+	workspace: Workspace,
+	options: Omit<CreatePiToolsOptions, "workspace" | "exec" | "shell"> = {},
+) {
 	const { tools, execute } = createPiTools({
 		...options,
 		workspace,
@@ -108,24 +134,8 @@ export function createWorkspaceTools(
 		},
 	});
 
-	return tools.map((declared): ToolRegistration => {
-		const tool = declared.name === "exec" ? describeExec(declared) : declared;
-		return {
-			name: tool.name,
-			description: tool.description,
-			// Plain JSON Schema: pi validates it with pi-schema, but
-			// computer's schema type is untyped, so `args` is too.
-			parameters: tool.parameters,
-			...(tool.constrainedSampling && { constrainedSampling: tool.constrainedSampling }),
-			...(tool.name === "exec" && { callers: ["tools"] }),
-			replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
-			async execute(args, api, context) {
-				const { content, isError } = await execute(
-					{ id: api.callId, name: tool.name, arguments: args },
-					{ abortSignal: context.abortSignal },
-				);
-				return { output: content, isError };
-			},
-		};
-	});
+	return {
+		tools: tools.map((tool) => (tool.name === "exec" ? describeExec(tool) : tool)),
+		execute,
+	};
 }

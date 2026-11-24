@@ -42,7 +42,7 @@ function modelFailure(cause: unknown): TurnModelError {
 
 const modelResponse = Effect.fnUntraced(function* (
 	response: AssistantMessage,
-	tool: Tool,
+	tools: ReadonlyArray<Tool>,
 	allowTools: boolean,
 ) {
 	if (response.stopReason === "stop") {
@@ -59,7 +59,11 @@ const modelResponse = Effect.fnUntraced(function* (
 	if (response.stopReason === "toolUse" && allowTools) {
 		const calls = response.content.filter((part) => part.type === "toolCall");
 		const [next] = calls;
-		if (calls.length === 1 && next.name === tool.name && !next.argumentsError) {
+		if (
+			calls.length === 1 &&
+			tools.some(({ name }) => name === next.name) &&
+			!next.argumentsError
+		) {
 			return {
 				role: "tool-call",
 				id: next.id,
@@ -74,7 +78,7 @@ const modelResponse = Effect.fnUntraced(function* (
 	return yield* modelFailure(response.errorMessage ?? `Model stopped with ${response.stopReason}.`);
 });
 
-export function workersAiTurnModel(binding: Env["AI"], tool: Tool) {
+export function workersAiTurnModel(binding: Env["AI"], tools: Array<Tool>, systemPrompt?: string) {
 	const ai = createAI({ binding });
 	const model = ai(MODEL_ID);
 	const openStream = Effect.fn("effect-harness.workersAi.openStream")(function* (
@@ -159,7 +163,7 @@ export function workersAiTurnModel(binding: Env["AI"], tool: Tool) {
 			try: () =>
 				ai.streamSimple(
 					model,
-					{ messages: context, tools: [tool] },
+					{ messages: context, tools, systemPrompt },
 					{
 						reasoning: "low",
 						toolChoice: allowTools ? "auto" : "none",
@@ -176,7 +180,7 @@ export function workersAiTurnModel(binding: Env["AI"], tool: Tool) {
 					case "text_delta":
 						return Stream.succeed({ type: "text-delta", text: event.delta });
 					case "done":
-						return modelResponse(event.message, tool, allowTools).pipe(
+						return modelResponse(event.message, tools, allowTools).pipe(
 							Effect.map((response) => ({ type: "response" as const, response })),
 							Stream.fromEffect,
 						);

@@ -15,10 +15,7 @@ import { workspaceCodemode } from "./codemode";
 import { isMainChatUrl } from "./main-chat";
 import { MODEL_ID } from "./model-id";
 import { PiSessionSockets } from "./sockets";
-import { createWorkspaceTools } from "./workspace";
-
-const PREAMBLE =
-	"You are Trajan, a concise and capable assistant. You have a durable workspace at /workspace. Use the direct file tools for simple file operations. Use codemode to compose tools, and call tools.exec from a codemode script to run JavaScript modules against the workspace or use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
+import { createWorkspaceTools, WORKSPACE_PROMPT } from "./workspace";
 
 class AgentRouteError extends Data.TaggedError("AgentRouteError")<{
 	readonly cause: unknown;
@@ -51,7 +48,7 @@ export class Trajan extends DurableObject<Env> {
 		harness: ({ storage, context, onWake }) => {
 			this.registry.install({
 				name: "playground",
-				sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
+				sections: [{ key: "preamble", render: () => WORKSPACE_PROMPT, tag: false }],
 				tools: createWorkspaceTools(this.workspace),
 			});
 			this.registry.install(

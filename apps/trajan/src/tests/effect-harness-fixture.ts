@@ -14,6 +14,7 @@ import { Context, Effect, Layer, Option, Predicate, Schema, Stream } from "effec
 import { Tool, Toolkit } from "effect/ai";
 import { HistoryQuery } from "../effect-harness/conversation-store";
 import { EffectHarnessObject } from "../effect-harness/worker-host";
+import { effectWorkspaceTools } from "../effect-harness/workspace-tools";
 import { workersAiTurnModel } from "../effect-harness/workers-ai";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
@@ -194,11 +195,13 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 		Layer.succeed(
 			TurnModel,
 			this.env.EFFECT_HARNESS_AI
-				? workersAiTurnModel(this.env.EFFECT_HARNESS_AI, {
-						name: Append.name,
-						description: appendDescription,
-						parameters: Tool.getJsonSchema(Append),
-					})
+				? workersAiTurnModel(this.env.EFFECT_HARNESS_AI, [
+						{
+							name: Append.name,
+							description: appendDescription,
+							parameters: Tool.getJsonSchema(Append),
+						},
+					])
 				: TurnModel.of({
 						stream: (messages) =>
 							Stream.unwrap(
@@ -262,6 +265,20 @@ export class EffectHarnessTestObject extends EffectHarnessObject {
 				throw error;
 			});
 		return { instance: this.#instance, executionId, pausedAt, text };
+	}
+
+	workspaceTool(name: string, input: Schema.Json, recovering = false): Promise<string> {
+		const tools = effectWorkspaceTools(this.#workspace, () =>
+			this.env.CODEMODE_SANDBOX.getByName(this.ctx.id.toString()),
+		);
+		return Effect.runPromise(
+			tools.service
+				.execute(
+					{ role: "tool-call", id: "test-call", name, input },
+					{ idempotencyKey: "test-call", recovering },
+				)
+				.pipe(Effect.flatMap(Schema.encodeEffect(Schema.fromJsonString(ToolResult)))),
+		);
 	}
 
 	async #pauseAt(point: PausePoint, signal: AbortSignal, executionId?: string) {

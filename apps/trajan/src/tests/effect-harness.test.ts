@@ -1,6 +1,6 @@
 import { runDurableObjectAlarm } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { TurnMessage, TurnTranscript } from "@trajan/effect-harness";
+import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/effect-harness";
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 
@@ -69,6 +69,26 @@ test("validates a submission before it can start a task", async () => {
 		error: expect.stringContaining('["id"]'),
 	});
 	expect(await stub.state()).toMatchObject({ text: "" });
+});
+
+test("Effect workspace tools validate file calls and preserve unsafe recovery", async () => {
+	const stub = openFixture();
+	const path = "/workspace/notes.txt";
+	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));
+	expect(decode(await stub.workspaceTool("write", { path, content: "milk" }))).toMatchObject({
+		status: "completed",
+	});
+	expect(decode(await stub.workspaceTool("read", { path }, true))).toMatchObject({
+		status: "completed",
+		output: expect.arrayContaining([{ type: "text", text: expect.stringContaining("milk") }]),
+	});
+	expect(decode(await stub.workspaceTool("write", { path }))).toMatchObject({ status: "failed" });
+	expect(decode(await stub.workspaceTool("codemode", { code: "return 1" }, true))).toMatchObject({
+		status: "unknown",
+	});
+	expect(decode(await stub.workspaceTool("exec", { command: "return 1" }))).toMatchObject({
+		status: "failed",
+	});
 });
 
 test("returns invalid tool arguments to the model without writing to the workspace", async () => {
