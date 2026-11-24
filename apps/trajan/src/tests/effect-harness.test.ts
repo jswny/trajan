@@ -6,7 +6,12 @@ import { expect, test } from "vite-plus/test";
 
 const submission = { id: "submission-1", prompt: "hello" };
 const prompt = { role: "user", text: submission.prompt };
-const toolCall = { role: "tool-call", id: "append-1", name: "append", input: submission.prompt };
+const toolCall = {
+	role: "tool-call",
+	id: "append-1",
+	name: "append",
+	input: { text: submission.prompt },
+};
 const completedTool = { status: "completed", output: "hello" };
 const unknownTool = { status: "unknown", message: "The previous tool outcome is unknown." };
 

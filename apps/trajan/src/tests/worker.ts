@@ -1,4 +1,5 @@
 export { EffectHarnessTestObject } from "./effect-harness-fixture";
+import { serveEffectHarness } from "./effect-harness-fixture";
 import {
 	fauxAssistantMessage,
 	fauxProvider,
@@ -377,6 +378,7 @@ function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
+		if (env.EFFECT_HARNESS_AI) return serveEffectHarness(request, env);
 		const url = new URL(request.url);
 		const { pathname } = url;
 		if (pathname === "/__browser-smoke/ready") return new Response("Trajan browser fixture");

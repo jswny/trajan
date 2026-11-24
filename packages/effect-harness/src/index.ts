@@ -35,7 +35,10 @@ const ToolMessage = Schema.Struct({
 });
 
 const Message = Schema.Union([UserMessage, Reply, ToolCall, ToolMessage]);
-const ModelResponse = Schema.Union([Reply, ToolCall]);
+const ModelResponse = Schema.Union([
+	Reply,
+	Schema.Struct({ ...ToolCall.fields, continuation: Schema.optionalKey(Schema.Json) }),
+]);
 
 export const TurnTranscript = Schema.Struct({
 	submissionId: Schema.NonEmptyString,
@@ -45,6 +48,7 @@ export const TurnTranscript = Schema.Struct({
 export class TurnIoError extends Data.TaggedError("TurnIoError")<{
 	readonly operation: string;
 	readonly cause: unknown;
+	readonly message?: string;
 }> {}
 
 type TurnError = TurnIoError | Schema.SchemaError;
@@ -69,6 +73,8 @@ export class TurnModel extends Context.Service<
 	{
 		readonly complete: (
 			messages: ReadonlyArray<typeof Message.Type>,
+			/** Adapter context from the checkpointed model response that requested the tool. */
+			continuation?: Schema.Json,
 		) => Effect.Effect<unknown, TurnIoError>;
 	}
 >()("@trajan/effect-harness/TurnModel") {}
@@ -98,17 +104,20 @@ export const runTurn = Effect.fn("effect-harness.runTurn")(function* (
 		return { submissionId: submission.id, messages: [prompt, initial] };
 	}
 
+	const { continuation, ...call } = initial;
 	const tools = yield* TurnTools;
 	const result = yield* journal.checkpoint("tool", ToolResult, (attempt) =>
-		tools.execute(initial, attempt),
+		tools.execute(call, attempt),
 	);
 	const toolMessage = {
 		role: "tool",
-		callId: initial.id,
+		callId: call.id,
 		result,
 	} satisfies typeof ToolMessage.Type;
-	const history = [prompt, initial, toolMessage];
-	const reply = yield* journal.checkpoint("final-model", Reply, () => model.complete(history));
+	const history = [prompt, call, toolMessage];
+	const reply = yield* journal.checkpoint("final-model", Reply, () =>
+		model.complete(history, continuation),
+	);
 
 	return { submissionId: submission.id, messages: [...history, reply] };
 });

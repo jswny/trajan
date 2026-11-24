@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect";
+import { type Context, Effect, Schema } from "effect";
 import { expect, test, vi } from "vite-plus/test";
 import { runTurn, type TurnJournal, TurnModel, TurnTools } from "./index";
 
@@ -45,4 +45,31 @@ test("rejects a malformed tool result before sending it back to the model", asyn
 
 	await expect(Effect.runPromise(result)).rejects.toMatchObject({ _tag: "SchemaError" });
 	expect(complete).toHaveBeenCalledTimes(1);
+});
+
+test("keeps model continuation data in the checkpoint and passes it only to the follow-up call", async () => {
+	const continuation = { opaque: "provider context" };
+	const complete = vi.fn<Context.Service.Shape<typeof TurnModel>["complete"]>();
+	complete
+		.mockReturnValueOnce(
+			Effect.succeed({ role: "tool-call", id: "call-1", name: "test", input: null, continuation }),
+		)
+		.mockReturnValueOnce(Effect.succeed({ role: "assistant", text: "Finished" }));
+
+	const result = await Effect.runPromise(
+		runTurn(submission, journal).pipe(
+			Effect.provideService(TurnModel, { complete }),
+			Effect.provideService(TurnTools, {
+				execute: () => Effect.succeed({ status: "completed", output: null }),
+			}),
+		),
+	);
+
+	expect(complete.mock.calls[1]?.[1]).toEqual(continuation);
+	expect(result.messages[1]).toEqual({
+		role: "tool-call",
+		id: "call-1",
+		name: "test",
+		input: null,
+	});
 });

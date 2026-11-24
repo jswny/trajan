@@ -23,21 +23,27 @@ const paletteRoles = {
 	danger: "gitDecoration.deletedResourceForeground",
 };
 
-async function browserSmokeWorker(): Promise<PluginConfig> {
+async function fixtureWorker(mode: "browser-smoke" | "effect-harness-live"): Promise<PluginConfig> {
+	const live = mode === "effect-harness-live";
 	const fixturePath = fileURLToPath(new URL("./src/tests/cloudflare.config.ts", import.meta.url));
 	const { result } = await loadAndParseConfig(fixturePath, {
 		isPreview: false,
-		mode: "browser-smoke",
+		mode,
 	});
 	if (!result.success) throw result.error;
 	const worker = result.data.worker;
-	if (!worker) throw new Error("Missing browser smoke test Worker");
+	if (!worker) throw new Error("Missing Trajan test Worker");
 	return {
 		config: () => ({
-			worker: { ...worker, assets: { runWorkerFirst: ["/agents/*", "/__browser-smoke/*"] } },
+			worker: {
+				...worker,
+				assets: {
+					runWorkerFirst: live ? ["/__effect-harness/*"] : ["/agents/*", "/__browser-smoke/*"],
+				},
+			},
 		}),
 		persistState: false,
-		remoteBindings: false,
+		remoteBindings: live,
 		inspectorPort: false,
 		types: { generate: false },
 	};
@@ -49,9 +55,10 @@ async function cloudflareWorkers(command: string, mode: string): Promise<PluginC
 	if (!result.success) throw result.error;
 	const sandbox = result.data.worker;
 	if (!sandbox) throw new Error("Missing Pi Code Mode sandbox Worker");
-	const browserSmoke = command === "serve" && mode === "browser-smoke";
+	const fixtureMode =
+		command === "serve" && (mode === "browser-smoke" || mode === "effect-harness-live");
 	return {
-		...(browserSmoke ? await browserSmokeWorker() : {}),
+		...(fixtureMode ? await fixtureWorker(mode) : {}),
 		auxiliaryWorkers: [{ config: sandbox, devOnly: true }],
 	};
 }

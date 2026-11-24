@@ -13,10 +13,16 @@ import {
 import { Lifecycle } from "agents/lifecycle";
 import { Tasks, type TaskStep } from "agents/tasks";
 import { Effect, Schema } from "effect";
+import { workersAiTurnModel } from "../effect-harness/workers-ai";
 
 const effectHarnessReset = "Forced Effect harness fixture restart";
 const workspaceFile = "/workspace/turn.txt";
-const toolName = "append";
+const appendInput = Schema.Struct({ text: Schema.NonEmptyString });
+const appendTool = {
+	name: "append",
+	description: "Append text to the fixture workspace file and return its full contents.",
+	parameters: Schema.toJsonSchemaDocument(appendInput).schema,
+};
 
 const appendScript = `
 import fs from "node:fs/promises";
@@ -53,7 +59,8 @@ function taskJournal(step: TaskStep): TurnJournal {
 							{ signal },
 						),
 					),
-				catch: (cause) => new TurnIoError({ operation: name, cause }),
+				catch: (cause) =>
+					cause instanceof TurnIoError ? cause : new TurnIoError({ operation: name, cause }),
 			}).pipe(Effect.flatMap(Schema.decodeEffect(checkpointJson)));
 		},
 	};
@@ -80,8 +87,8 @@ const fakeModel = TurnModel.of({
 			return {
 				role: "tool-call",
 				id: "append-1",
-				name: toolName,
-				input: last?.role === "user" && last.text,
+				name: appendTool.name,
+				input: { text: last?.role === "user" ? last.text : "" },
 			};
 		}),
 });
@@ -95,10 +102,10 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 	readonly #tools = TurnTools.of({
 		execute: ({ input, name }, { idempotencyKey, recovering }) =>
 			Effect.gen({ self: this }, function* () {
-				if (name !== toolName) {
+				if (name !== appendTool.name) {
 					return { status: "failed", message: "Unknown fixture tool" };
 				}
-				const text = yield* Schema.decodeUnknownEffect(Schema.NonEmptyString)(input);
+				const { text } = yield* Schema.decodeUnknownEffect(appendInput)(input);
 				return yield* Effect.tryPromise({
 					try: async (signal) => {
 						const runtime = this.#workspace.runtime;
@@ -136,12 +143,15 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 				});
 			}),
 	});
+	readonly #model = this.env.EFFECT_HARNESS_AI
+		? workersAiTurnModel(this.env.EFFECT_HARNESS_AI, appendTool)
+		: fakeModel;
 	readonly #tasks = new Tasks({
 		definitions: {
 			"turn@v1": (input: typeof TurnSubmission.Type, step: TaskStep) =>
 				Effect.runPromise(
 					runTurn(input, taskJournal(step)).pipe(
-						Effect.provideService(TurnModel, fakeModel),
+						Effect.provideService(TurnModel, this.#model),
 						Effect.provideService(TurnTools, this.#tools),
 						Effect.flatMap(Schema.encodeEffect(transcriptJson)),
 					),
@@ -201,4 +211,43 @@ export class EffectHarnessTestObject extends DurableObject<Env> {
 	crash() {
 		this.ctx.abort(effectHarnessReset);
 	}
+}
+
+/** The development-only Worker exposes completed turns for a real-model smoke test. */
+export async function serveEffectHarness(request: Request, env: Env) {
+	const url = new URL(request.url);
+	if (url.pathname !== "/__effect-harness/turns") {
+		return new Response("Not found", { status: 404 });
+	}
+	const origin = request.headers.get("Origin");
+	if (origin !== null && origin !== url.origin) {
+		return new Response("Forbidden", { status: 403 });
+	}
+
+	const stub = env.EFFECT_HARNESS_TEST.getByName("live-model");
+	if (request.method === "POST") {
+		let submission: unknown;
+		try {
+			submission = await request.json();
+		} catch {
+			return Response.json({ error: "Expected a JSON submission." }, { status: 400 });
+		}
+		const receipt = await stub.submit(submission);
+		return Response.json(receipt, { status: receipt.runId === null ? 400 : 202 });
+	}
+
+	if (request.method === "GET") {
+		const runId = url.searchParams.get("runId");
+		if (!runId) return Response.json({ error: "Expected a runId." }, { status: 400 });
+		const { transcript, ...turn } = await stub.turn(runId);
+		return Response.json(
+			{
+				...turn,
+				transcript: transcript === null ? null : Schema.decodeSync(transcriptJson)(transcript),
+			},
+			{ status: turn.state === "missing" ? 404 : 200 },
+		);
+	}
+
+	return new Response(null, { status: 405, headers: { Allow: "GET, POST" } });
 }

@@ -6,6 +6,7 @@
 	"type": "module",
 	"scripts": {
 		"dev": "cf dev",
+		"dev:effect-harness": "cf dev -- --mode effect-harness-live --host 127.0.0.1",
 		"build": "cf build",
 		"deploy": "cf deploy --force",
 		"types": "cf workers types",

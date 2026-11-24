@@ -10,6 +10,7 @@ export default defineConfig(({ mode }) => ({
 		compatibilityFlags: ["nodejs_compat"],
 		env: {
 			LOADER: bindings.workerLoader(),
+			EFFECT_HARNESS_AI: mode === "effect-harness-live" && bindings.ai({ dev: { remote: true } }),
 			CODEMODE_SANDBOX:
 				mode === "browser-smoke" &&
 				bindings.durableObject({ worker: codemode.worker, exportName: "CodemodeSandbox" }),
