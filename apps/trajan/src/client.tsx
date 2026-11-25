@@ -5,16 +5,15 @@ import {
 	IconArrowShortUp,
 	IconArrowUpFill,
 	IconCheck,
-	IconCircleCheck,
-	IconCircleX,
+	IconChevron,
 	IconLoader,
 	IconSquircleFill,
 } from "@pierre/icons/beta";
 import type { ToolActivity } from "@trajan/harness";
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ChatMarkdown } from "./chat-markdown";
-import type { ChatEntry, ChatMessage, ChatPart } from "./chat-view";
+import { ChatMarkdown, ToolCode } from "./chat-markdown";
+import type { ChatMessage, ChatText, ChatTool } from "./chat-view";
 import { themePreference } from "./theme";
 import { useChatSession } from "./use-chat-session";
 import "./styles.css";
@@ -35,7 +34,7 @@ function ChatSettingsMenu() {
 			</Menu.Trigger>
 			<Menu.Portal>
 				<Menu.Positioner align="end" sideOffset={8} collisionPadding={12} className="z-20">
-					<Menu.Popup className="max-h-(--available-height) w-40 overflow-y-auto overscroll-contain rounded-xl border border-line bg-surface p-1 text-ink shadow-lg outline-none">
+					<Menu.Popup className="max-h-(--available-height) w-40 overflow-y-auto overscroll-contain rounded-(--chat-surface-radius) border border-line bg-surface p-1.5 text-ink shadow-lg outline-none">
 						<Menu.RadioGroup value={mode} onValueChange={setMode}>
 							<Menu.GroupLabel className="px-3 pt-2 pb-1 text-xs font-medium text-muted">
 								Theme
@@ -46,7 +45,7 @@ function ChatSettingsMenu() {
 										key={value}
 										value={value}
 										closeOnClick
-										className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-lg px-3 text-sm outline-none data-highlighted:bg-hover"
+										className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-full px-3 text-sm outline-none data-highlighted:bg-hover"
 									>
 										{label}
 										<Menu.RadioItemIndicator className="text-accent">
@@ -63,88 +62,63 @@ function ChatSettingsMenu() {
 	);
 }
 
-function JsonBlock({ value }: { value: unknown }) {
-	return (
-		<pre className="max-h-40 overflow-auto rounded-lg bg-canvas p-2.5 text-xs leading-5 whitespace-pre-wrap break-words">
-			{typeof value === "string" ? value : JSON.stringify(value, null, 2)}
-		</pre>
-	);
-}
+const toolResultLabel = { completed: "Done", failed: "Failed", unknown: "Outcome unknown" };
 
-function ToolCallCard({
-	part,
-	running,
-}: {
-	part: Extract<ChatPart, { type: "tool-call" }>;
-	running: boolean;
-}) {
-	return (
-		<details className="rounded-xl border border-line bg-surface">
-			<summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
-				{running ? (
-					<IconLoader
-						size={12}
-						aria-hidden="true"
-						className="text-muted motion-safe:animate-spin"
-					/>
-				) : (
-					<IconCircleCheck size={12} aria-hidden="true" className="text-success" />
-				)}
-				<span className="min-w-0 flex-1 truncate text-xs font-semibold">{part.name}</span>
-				<span className="chat-badge">{running ? "Running" : "Called"}</span>
-			</summary>
-			<div className="border-t border-line px-3 py-3">
-				<p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
-					Arguments
-				</p>
-				<JsonBlock value={part.arguments} />
-			</div>
-		</details>
-	);
-}
-
-function ToolResultCard({ part }: { part: Extract<ChatPart, { type: "tool-result" }> }) {
-	const text = part.content
-		.filter((content) => content.type === "text")
-		.map((content) => (content.type === "text" ? content.text : ""))
+function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => void }) {
+	const [open, setOpen] = useState(false);
+	const { input, name, result } = message;
+	const text = result?.content
+		.filter((part) => part.type === "text")
+		.map((part) => part.text)
 		.join("\n");
-	const images = part.content.filter((content) => content.type === "image");
+	const images = result?.content.filter((part) => part.type === "image") ?? [];
+	const activity = result?.activity ?? [];
+	const failed = result?.status === "failed" || result?.status === "unknown";
 	return (
-		<details className="rounded-xl border border-line bg-surface">
-			<summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
-				{part.error ? (
-					<IconCircleX size={12} aria-hidden="true" className="text-danger" />
-				) : (
-					<IconCircleCheck size={12} aria-hidden="true" className="text-success" />
-				)}
-				<span className="min-w-0 flex-1 truncate text-xs">
-					<span className="font-semibold">{part.name}</span>
-					{text ? <span className="ml-2 text-muted">{text}</span> : null}
+		<details
+			className="group rounded-(--chat-surface-radius) border border-line bg-surface"
+			onToggle={(event) => setOpen(event.currentTarget.open)}
+		>
+			<summary
+				className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-(--chat-surface-radius) px-3 py-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus-ring [&::-webkit-details-marker]:hidden"
+				onClick={onInspect}
+			>
+				<span className="min-w-0 flex-1 truncate text-xs font-semibold">{name}</span>
+				<span className="chat-badge" data-tone={failed ? "danger" : undefined}>
+					{result ? toolResultLabel[result.status] : "Called"}
 				</span>
-				<span className="chat-badge" data-tone={part.error ? "danger" : undefined}>
-					{part.error ? "Failed" : "Done"}
-				</span>
+				<IconChevron
+					size={12}
+					aria-hidden="true"
+					className="shrink-0 text-muted group-open:rotate-180"
+				/>
 			</summary>
 			<div className="space-y-3 border-t border-line px-3 py-3">
-				{part.activity.length > 0 ? <ToolActivityList activity={part.activity} /> : null}
+				{activity.length > 0 ? <ToolActivityList activity={activity} /> : null}
 				{text ? (
 					<div>
 						<p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
 							Result
 						</p>
-						<JsonBlock value={text} />
+						<ToolCode text={text} highlight={open && result?.format === "json"} />
 					</div>
 				) : null}
-				{images.map((image, index) =>
-					image.type === "image" ? (
-						<img
-							key={index}
-							src={`data:${image.mimeType};base64,${image.data}`}
-							alt={`${part.name} output`}
-							className="max-w-full rounded-lg"
-						/>
-					) : null,
-				)}
+				{images.map((image, index) => (
+					<img
+						key={index}
+						src={`data:${image.mimeType};base64,${image.data}`}
+						alt={`${name} output`}
+						className="max-w-full rounded-(--chat-inset-radius)"
+					/>
+				))}
+				{input !== undefined ? (
+					<div>
+						<p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
+							Arguments
+						</p>
+						<ToolCode text={JSON.stringify(input, null, 2)} highlight={open} />
+					</div>
+				) : null}
 			</div>
 		</details>
 	);
@@ -172,95 +146,30 @@ function ToolActivityList({ activity }: { activity: ReadonlyArray<typeof ToolAct
 	);
 }
 
-function AssistantPart({
-	part,
-	running,
-	streaming,
-}: {
-	part: ChatPart;
-	running: boolean;
-	streaming: boolean;
-}) {
-	switch (part.type) {
-		case "text":
-			return (
-				<ChatMarkdown className="text-sm leading-6" isAnimating={streaming}>
-					{part.text}
-				</ChatMarkdown>
-			);
-		case "tool-call":
-			return <ToolCallCard part={part} running={running} />;
-		case "tool-result":
-			return <ToolResultCard part={part} />;
-		case "image":
-			return (
-				<img
-					src={`data:${part.mimeType};base64,${part.data}`}
-					alt=""
-					className="max-w-full rounded-lg"
-				/>
-			);
-	}
-}
-
-function UserMessage({ message }: { message: ChatEntry }) {
-	const text = message.parts.map((part) => (part.type === "text" ? part.text : "")).join("");
+function UserMessage({ message }: { message: ChatText }) {
 	return (
 		<div className="flex justify-end">
-			<div className="min-w-0 max-w-[85%] whitespace-pre-wrap wrap-anywhere rounded-2xl rounded-br-md bg-ink px-4 py-2.5 text-sm leading-relaxed text-canvas">
-				{text}
+			<div className="min-w-0 max-w-[85%] whitespace-pre-wrap wrap-anywhere rounded-(--chat-surface-radius) bg-ink px-4 py-2.5 text-sm leading-relaxed text-canvas">
+				{message.text}
 			</div>
 		</div>
 	);
 }
 
-function AssistantMessage({
-	message,
-	streaming = false,
-	runningTools,
-}: {
-	message: ChatEntry;
-	streaming?: boolean;
-	runningTools: ReadonlyArray<string>;
-}) {
-	return (
-		<div className="min-w-0 space-y-3">
-			{message.parts.map((part, index) => (
-				<AssistantPart
-					key={`${message.id}-${index}`}
-					part={part}
-					streaming={streaming && index === message.parts.length - 1}
-					running={streaming && part.type === "tool-call" && runningTools.includes(part.name)}
-				/>
-			))}
-			{streaming ? <span className="streaming-cursor" /> : null}
-		</div>
-	);
-}
-
-function ToolMessage({ message }: { message: ChatEntry }) {
-	return (
-		<div className="space-y-2">
-			{message.parts.map((part, index) =>
-				part.type === "tool-result" ? (
-					<ToolResultCard key={`${message.id}-${index}`} part={part} />
-				) : null,
-			)}
-		</div>
-	);
-}
-
-function Message({ message, streaming = false }: { message: ChatMessage; streaming?: boolean }) {
+function Message({ message, onInspect }: { message: ChatMessage; onInspect: () => void }) {
 	switch (message.role) {
 		case "user":
 			return <UserMessage message={message} />;
 		case "assistant":
-			return <AssistantMessage message={message} streaming={streaming} runningTools={[]} />;
+			return <ChatMarkdown className="min-w-0 text-sm leading-6">{message.text}</ChatMarkdown>;
 		case "tool":
-			return <ToolMessage message={message} />;
+			return <ToolCard message={message} onInspect={onInspect} />;
 		case "notice":
 			return message.status === "failed" ? (
-				<div role="alert" className="rounded-xl bg-danger/10 px-4 py-3 text-sm text-danger">
+				<div
+					role="alert"
+					className="rounded-(--chat-surface-radius) bg-danger/10 px-4 py-3 text-sm text-danger"
+				>
 					{message.text}
 				</div>
 			) : (
@@ -272,6 +181,7 @@ function Message({ message, streaming = false }: { message: ChatMessage; streami
 function App() {
 	const contentRef = useRef<HTMLDivElement>(null);
 	const scrollRef = useRef<HTMLDivElement>(null);
+	const inspectionFrame = useRef<number | null>(null);
 	// Distance from the bottom to keep while earlier messages load above.
 	const keepFromBottom = useRef<number | null>(null);
 	// Whether the reader is at the bottom: new messages scroll into view only
@@ -317,8 +227,27 @@ function App() {
 		});
 		observer.observe(scroller);
 		observer.observe(content);
-		return () => observer.disconnect();
+		return () => {
+			observer.disconnect();
+			if (inspectionFrame.current !== null) {
+				cancelAnimationFrame(inspectionFrame.current);
+			}
+		};
 	}, []);
+
+	// A native disclosure changes layout after the click. Read it before following again.
+	const inspectTool = () => {
+		const scroller = scrollRef.current;
+		if (scroller === null || !following.current) {
+			return;
+		}
+		following.current = false;
+		inspectionFrame.current = requestAnimationFrame(() => {
+			inspectionFrame.current = null;
+			const fromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+			following.current = fromBottom <= BOTTOM_THRESHOLD;
+		});
+	};
 
 	// Scrolling up stops following; scrolling back to the bottom resumes it.
 	const onScroll = () => {
@@ -327,6 +256,10 @@ function App() {
 			return;
 		}
 		const fromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+		if (inspectionFrame.current !== null) {
+			lastScrollTop.current = scroller.scrollTop;
+			return;
+		}
 		if (fromBottom <= BOTTOM_THRESHOLD) {
 			following.current = true;
 		} else if (scroller.scrollTop < lastScrollTop.current - 1) {
@@ -416,13 +349,20 @@ function App() {
 						) : null}
 
 						{messages.map((message) => (
-							<Message key={message.id} message={message} />
+							<Message key={message.id} message={message} onInspect={inspectTool} />
 						))}
-						{activePrompt ? <Message message={activePrompt} /> : null}
-						{live ? <Message message={live} streaming /> : null}
+						{activePrompt ? <UserMessage message={activePrompt} /> : null}
+						{live ? (
+							<div className="min-w-0 space-y-3">
+								<ChatMarkdown className="text-sm leading-6" isAnimating>
+									{live.text}
+								</ChatMarkdown>
+								<span className="streaming-cursor" />
+							</div>
+						) : null}
 
 						{running && !live ? (
-							<div className="w-fit max-w-full space-y-2 rounded-xl bg-surface px-4 py-3 ring ring-line">
+							<div className="w-fit max-w-full space-y-2 rounded-(--chat-surface-radius) border border-line bg-surface px-4 py-3">
 								<div className="flex items-center gap-2 text-sm text-muted">
 									<IconLoader aria-hidden="true" className="motion-safe:animate-spin" />
 									{active?.state === "stopping"
@@ -443,7 +383,7 @@ function App() {
 					<footer className="pointer-events-none sticky bottom-0 z-10">
 						<div className="mx-auto max-w-3xl space-y-2 px-5 py-(--chat-edge-gap)">
 							{submission?.status === "unconfirmed" ? (
-								<div className="chat-floating-surface flex items-center gap-3 rounded-xl px-4 py-2">
+								<div className="chat-floating-surface flex items-center gap-3 px-4 py-2">
 									<p role="status" className="min-w-0 flex-1 truncate text-sm text-muted">
 										Couldn’t confirm delivery of “{submission.draft.text}”.
 									</p>
@@ -458,18 +398,12 @@ function App() {
 								</div>
 							) : null}
 							{submission?.status === "rejected" ? (
-								<p
-									role="alert"
-									className="chat-floating-surface rounded-xl px-4 py-2 text-sm text-danger"
-								>
+								<p role="alert" className="chat-floating-surface px-4 py-2 text-sm text-danger">
 									{submission.message}
 								</p>
 							) : null}
 							{requestError ? (
-								<p
-									role="alert"
-									className="chat-floating-surface rounded-xl px-4 py-2 text-sm text-danger"
-								>
+								<p role="alert" className="chat-floating-surface px-4 py-2 text-sm text-danger">
 									{requestError}
 								</p>
 							) : null}
@@ -481,7 +415,7 @@ function App() {
 								}}
 								className="flex items-end gap-2"
 							>
-								<div className="chat-floating-surface flex min-h-(--chat-control-height) min-w-0 flex-1 items-center rounded-[calc(var(--chat-control-height)/2)] px-4 py-2 focus-within:ring-2 focus-within:ring-focus-ring">
+								<div className="chat-floating-surface flex min-h-(--chat-control-height) min-w-0 flex-1 items-center px-4 py-2 focus-within:ring-2 focus-within:ring-focus-ring">
 									<textarea
 										value={prompt}
 										onChange={(event) => setPrompt(event.currentTarget.value)}

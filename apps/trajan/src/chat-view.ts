@@ -1,4 +1,4 @@
-import type { ToolActivity } from "@trajan/harness";
+import type { ToolActivity, ToolResult } from "@trajan/harness";
 import { Schema } from "effect";
 import type { ChatPage } from "./chat/protocol";
 
@@ -9,29 +9,29 @@ const ContentParts = Schema.Array(
 	]),
 );
 const decodeContent = Schema.decodeUnknownOption(ContentParts);
-export type ChatPart =
-	| (typeof ContentParts.Type)[number]
-	| {
-			readonly type: "tool-call";
-			readonly id: string;
-			readonly name: string;
-			readonly arguments: Schema.Json;
-	  }
-	| {
-			readonly type: "tool-result";
-			readonly name: string;
-			readonly content: typeof ContentParts.Type;
-			readonly error: boolean;
-			readonly activity: ReadonlyArray<typeof ToolActivity.Type>;
-	  };
 
-export type ChatEntry = {
+export type ChatText = {
 	readonly id: string;
-	readonly role: "user" | "assistant" | "tool";
-	readonly parts: ReadonlyArray<ChatPart>;
+	readonly role: "user" | "assistant";
+	readonly text: string;
 };
+
+export type ChatTool = {
+	readonly id: string;
+	readonly role: "tool";
+	readonly name: string;
+	readonly input?: Schema.Json;
+	readonly result?: {
+		readonly status: (typeof ToolResult.Type)["status"];
+		readonly format: "json" | "text";
+		readonly content: typeof ContentParts.Type;
+		readonly activity: ReadonlyArray<typeof ToolActivity.Type>;
+	};
+};
+
 export type ChatMessage =
-	| ChatEntry
+	| ChatText
+	| ChatTool
 	| {
 			readonly id: string;
 			readonly role: "notice";
@@ -39,56 +39,58 @@ export type ChatMessage =
 			readonly text: string;
 	  };
 
-export function chatText(id: string, role: "user" | "assistant", text: string): ChatEntry {
-	return { id, role, parts: [{ type: "text", text }] };
+export function chatText(id: string, role: ChatText["role"], text: string): ChatText {
+	return { id, role, text };
 }
 
 export function chatMessages(entries: (typeof ChatPage.Type)["entries"]): Array<ChatMessage> {
-	const names = new Map<string, string>();
-	return entries.map(({ id, message }) => {
+	return entries.flatMap(({ id, message }, index): ReadonlyArray<ChatMessage> => {
 		const key = String(id);
 		switch (message.role) {
 			case "user":
 			case "assistant":
-				return chatText(key, message.role, message.text);
 			case "notice":
-				return { id: key, ...message };
-			case "tool-call":
-				names.set(message.id, message.name);
-				return {
-					id: key,
-					role: "assistant",
-					parts: [
-						{ type: "tool-call", id: message.id, name: message.name, arguments: message.input },
-					],
-				};
+				return [{ id: key, ...message }];
+			case "tool-call": {
+				const next = entries[index + 1]?.message;
+				if (next?.role === "tool" && next.callId === message.id) {
+					return [];
+				}
+				return [{ id: key, role: "tool", name: message.name, input: message.input }];
+			}
 			case "tool": {
+				// The harness writes each call and result together. A page may start at the result.
+				const previous = entries[index - 1]?.message;
+				const call =
+					previous?.role === "tool-call" && previous.id === message.callId ? previous : undefined;
 				const { result } = message;
-				const parts = result.status === "completed" ? decodeContent(result.output) : null;
-				return {
-					id: key,
-					role: "tool",
-					parts: [
-						{
-							type: "tool-result",
-							name: names.get(message.callId) ?? "Tool",
-							error: result.status !== "completed",
+				const decoded = result.status === "completed" ? decodeContent(result.output) : null;
+				const content =
+					decoded?._tag === "Some"
+						? decoded.value
+						: [
+								{
+									type: "text" as const,
+									text:
+										result.status === "completed"
+											? JSON.stringify(result.output, null, 2)
+											: result.message,
+								},
+							];
+				return [
+					{
+						id: key,
+						role: "tool",
+						name: call?.name ?? "Tool",
+						...(call && { input: call.input }),
+						result: {
+							status: result.status,
+							format: result.status === "completed" && decoded?._tag !== "Some" ? "json" : "text",
+							content,
 							activity: result.activity ?? [],
-							content:
-								parts?._tag === "Some"
-									? parts.value
-									: [
-											{
-												type: "text",
-												text:
-													result.status === "completed"
-														? JSON.stringify(result.output, null, 2)
-														: result.message,
-											},
-										],
 						},
-					],
-				};
+					},
+				];
 			}
 			default:
 				throw new Error("Unsupported chat message");

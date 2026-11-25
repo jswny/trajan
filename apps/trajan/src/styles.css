@@ -22,6 +22,9 @@
 	accent-color: var(--pierre-accent);
 	--chat-line: color-mix(in srgb, var(--pierre-line), var(--pierre-ink) 10%);
 	--chat-focus-ring: color-mix(in srgb, var(--pierre-accent), var(--pierre-ink) 30%);
+	--chat-control-height: 3.25rem;
+	--chat-surface-radius: calc(var(--chat-control-height) / 2);
+	--chat-inset-radius: 0.625rem;
 	/* The same dark foreground stays readable on the shared blue accent in either mode. */
 	--pierre-on-accent: light-dark(var(--pierre-ink), var(--pierre-canvas));
 }
@@ -59,10 +62,24 @@ body {
 
 .chat-layout {
 	--chat-edge-gap: 0.75rem;
-	--chat-control-height: 3.25rem;
 	--chat-transcript-top: calc(var(--chat-edge-gap) + var(--chat-control-height) + 1rem);
 	padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
 		env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
+.chat-layout::before {
+	position: absolute;
+	inset: 0 0 auto;
+	z-index: 5;
+	height: calc(env(safe-area-inset-top, 0px) + var(--chat-transcript-top));
+	background: linear-gradient(
+		to bottom,
+		var(--pierre-canvas),
+		color-mix(in srgb, var(--pierre-canvas) 88%, transparent) 56%,
+		transparent
+	);
+	pointer-events: none;
+	content: "";
 }
 
 .chat-header {
@@ -83,11 +100,11 @@ body {
 
 @layer components {
 	.chat-button {
-		@apply inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg font-medium hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent;
+		@apply inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 rounded-full font-medium hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent;
 	}
 
 	.chat-floating-surface {
-		@apply pointer-events-auto rounded-full border border-line bg-surface/90 shadow-sm backdrop-blur-xl;
+		@apply pointer-events-auto rounded-(--chat-surface-radius) border border-line bg-surface/90 shadow-sm backdrop-blur-xl;
 	}
 
 	.chat-badge {
@@ -124,8 +141,27 @@ body {
 	color: var(--pierre-muted);
 	opacity: 1;
 }
+[data-markdown="table"] {
+	inline-size: fit-content;
+	max-inline-size: 100%;
+	border: 1px solid var(--chat-line);
+	border-radius: var(--chat-inset-radius);
+	border-collapse: separate;
+}
 [data-markdown="root"] :is(th, td) {
 	border-color: var(--chat-line);
+	border-block-start-width: 0;
+	border-inline-start-width: 0;
+	overflow-wrap: normal;
+}
+[data-markdown="table"] tr > :last-child {
+	border-inline-end-width: 0;
+}
+[data-markdown="table"] > :last-child > tr:last-child > * {
+	border-block-end-width: 0;
+}
+[data-markdown="th"] {
+	white-space: nowrap;
 }
 [data-markdown="code"] {
 	background: var(--pierre-control);
@@ -133,6 +169,7 @@ body {
 [data-markdown="code-block"] {
 	background: var(--pierre-canvas);
 	border-color: var(--chat-line);
+	border-radius: var(--chat-inset-radius);
 }
 [data-markdown="code-block"] pre code {
 	background: transparent;

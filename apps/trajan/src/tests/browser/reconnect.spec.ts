@@ -354,9 +354,13 @@ test("warns about a partial Code Mode outcome when a script fails after writing"
 	await composer.fill("Fail Code Mode after a write.");
 	await composer.press("Enter");
 	const transcript = page.getByRole("main");
+	const card = transcript.locator("details");
+	await expect(card.locator("summary")).toHaveText("execOutcome unknown");
 	await expect(
-		transcript.getByText(/Inspect it before repeating the action/).first(),
+		transcript.getByText(/Inspect it before repeating the action/).filter({ visible: true }),
 	).toBeVisible();
+	await card.locator("summary").click();
+	await expect(card.getByText(/Inspect it before repeating the action/)).toBeVisible();
 	await composer.fill("hello");
 	await composer.press("Enter");
 	await expect(transcript.getByText('Wrote "writtenhello"', { exact: true })).toBeVisible();
@@ -459,4 +463,72 @@ test("wraps a long prompt and keeps a wide code block scrollable inside the tran
 	expect(
 		await page.locator(".chat-transcript").evaluate((el) => el.scrollWidth - el.clientWidth),
 	).toBe(0);
+});
+
+test("opens one tool row without scrolling its summary away", async ({ page }) => {
+	await page.setViewportSize({ ...devices["iPhone 17 Pro"].viewport, height: 352 });
+	const composer = await openChat(page);
+	const transcript = page.getByRole("main");
+	await composer.fill(`Remember ${"a short example ".repeat(120).trim()}`);
+	await composer.press("Enter");
+	await expect(transcript.getByText(/^Remembering a short example/)).toBeAttached();
+	await composer.fill("Run a workspace module.");
+	await composer.press("Enter");
+	await expect(transcript.getByText(/Wrote .*42/)).toBeVisible();
+	const card = transcript.locator("details");
+	const summary = card.locator("summary");
+	await expect(card).toHaveCount(1);
+	await expect(summary).toHaveText("execDone");
+	await expect(summary).toBeInViewport();
+	const top = await summary.evaluate((element) => element.getBoundingClientRect().top);
+
+	await summary.press("Enter");
+	await expect(card.getByText("Arguments", { exact: true })).toBeVisible();
+	await expect(card.getByText("Result", { exact: true })).toBeVisible();
+	await expect(card.getByRole("list", { name: "Recent tool calls" })).toBeVisible();
+	const blocks = card.locator("pre code");
+	const themedToken = "span[style*='light-dark(']";
+	await expect(blocks.nth(0).locator(themedToken).first()).toBeAttached();
+	await expect(blocks.nth(1).locator(themedToken).first()).toBeAttached();
+	await expect(blocks.nth(0)).toHaveText("42");
+	expect(JSON.parse((await blocks.nth(1).textContent()) ?? "null")).toMatchObject({
+		code: expect.stringContaining("return 42;"),
+	});
+	const expandedTop = await summary.evaluate(async (element) => {
+		await new Promise<void>((resolve) => {
+			requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+		});
+		return element.getBoundingClientRect().top;
+	});
+	expect(Math.abs(expandedTop - top)).toBeLessThanOrEqual(1);
+	await summary.press("Enter");
+	await expect(card.getByText("Arguments", { exact: true })).toBeHidden();
+});
+
+test("fits Markdown frames to their tables and scrolls wide tables on mobile", async ({ page }) => {
+	const composer = await openChat(page);
+	await composer.fill(
+		"Remember this table.\n\n| First column | Second column | Third column | Fourth column | Fifth column |\n| --- | --- | --- | --- | --- |\n| Alpha result | Beta result | Gamma result | Delta result | Epsilon result |",
+	);
+	await composer.press("Enter");
+	const table = page.getByRole("table");
+	await expect(table).toBeVisible();
+	const scrolled = await table.evaluate((element) => {
+		element.scrollLeft = element.scrollWidth;
+		return element.scrollLeft;
+	});
+	expect(scrolled).toBeGreaterThan(0);
+	expect(
+		await page.locator(".chat-transcript").evaluate((el) => el.scrollWidth - el.clientWidth),
+	).toBe(0);
+
+	await page.setViewportSize({ width: 1280, height: 720 });
+	const rightGap = await table.evaluate((element) => {
+		const lastHeading = element.querySelector("thead th:last-child");
+		return lastHeading
+			? element.getBoundingClientRect().right - lastHeading.getBoundingClientRect().right
+			: Number.POSITIVE_INFINITY;
+	});
+	expect(rightGap).toBeGreaterThanOrEqual(0);
+	expect(rightGap).toBeLessThanOrEqual(4);
 });
