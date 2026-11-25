@@ -1,11 +1,11 @@
 import { Menu } from "@base-ui/react/menu";
 import { useAtom } from "@effect/atom-react";
+import { IconEllipsis } from "@pierre/icons";
 import {
 	IconArrowShortUp,
 	IconArrowUpFill,
 	IconCheck,
 	IconCircleCheck,
-	IconCircleEllipsis,
 	IconCircleX,
 	IconLoader,
 	IconSquircleFill,
@@ -31,7 +31,7 @@ function ChatSettingsMenu() {
 				aria-label="Chat settings"
 				className="chat-button chat-floating-surface size-(--chat-control-height)"
 			>
-				<IconCircleEllipsis size={24} aria-hidden="true" />
+				<IconEllipsis size={18} aria-hidden="true" />
 			</Menu.Trigger>
 			<Menu.Portal>
 				<Menu.Positioner align="end" sideOffset={8} collisionPadding={12} className="z-20">
