@@ -1,8 +1,14 @@
 import { expect, test } from "@playwright/test";
+import type { Locator } from "@playwright/test";
 import { BrowserViewPath } from "../../chat/protocol";
 import type { ChatSnapshot } from "../../chat/protocol";
 
 const hostedView = "https://live.browser.run/ui/view?mode=tab&wss=fixture";
+const chipGeometry = (chip: Locator) =>
+	chip.evaluate((element) => ({
+		height: element.getBoundingClientRect().height,
+		radius: Number.parseFloat(getComputedStyle(element).borderTopLeftRadius),
+	}));
 const browsingTurn = {
 	runId: "browser-run",
 	submissionId: "browser-prompt",
@@ -89,12 +95,17 @@ test("opens the browser in a mobile sheet and docks it on wide screens", async (
 	const idleHeight = await footerHeight();
 	beginTurn?.();
 	await expect(footer.getByRole("status")).toHaveText("Browsing");
+	const statusChip = await chipGeometry(footer.getByRole("status"));
+	expect(statusChip.radius * 2).toBe(statusChip.height);
+	const connectionBadge = await chipGeometry(page.locator("header").getByRole("status"));
+	expect(connectionBadge.radius * 2).toBe(connectionBadge.height);
 	await expect(footer.getByRole("button", { name: "Browsing" })).toHaveCount(0);
 	setBrowser?.(expectedBrowser);
 	await expect(footer.getByRole("button", { name: "Browsing" })).toBeEnabled();
 	finishTurn?.();
 	const trigger = footer.getByRole("button", { name: "Browser open" });
 	await expect(trigger).toBeVisible();
+	expect(await chipGeometry(trigger)).toEqual(statusChip);
 	await expect.poll(distanceFromBottom).toBeLessThanOrEqual(1);
 	const chipBox = (await trigger.boundingBox())!;
 	const composerBox = (await footer.locator("form").boundingBox())!;
@@ -123,6 +134,10 @@ test("opens the browser in a mobile sheet and docks it on wide screens", async (
 	const dialog = page.getByRole("dialog", { name: "Live browser" });
 	const iframe = dialog.locator("iframe");
 	await expect(iframe.contentFrame().getByRole("heading", { name: "Browser page" })).toBeVisible();
+	const closeButton = await chipGeometry(
+		dialog.getByRole("button", { name: "Close live browser view" }),
+	);
+	expect(closeButton.radius * 2).toBe(closeButton.height);
 	await expect(dialog).toHaveAttribute("aria-modal", "true");
 	expect(await dialog.boundingBox()).toMatchObject({ x: 0, y: 0, ...page.viewportSize() });
 	expect(viewRequests).toBe(1);

@@ -47,7 +47,7 @@ function ChatSettingsMenu() {
 										key={value}
 										value={value}
 										closeOnClick
-										className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-full px-3 text-sm outline-none data-highlighted:bg-hover"
+										className="chat-compact-control flex cursor-pointer items-center justify-between gap-3 px-3 text-sm outline-none data-highlighted:bg-hover"
 									>
 										{label}
 										<Menu.RadioItemIndicator className="text-accent">
@@ -78,11 +78,11 @@ function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => 
 	const step = !result && activity.at(-1);
 	return (
 		<details
-			className="group rounded-(--chat-surface-radius) border border-line bg-surface"
+			className="chat-tool-card group w-fit max-w-full border border-line bg-surface open:w-full"
 			onToggle={(event) => setOpen(event.currentTarget.open)}
 		>
 			<summary
-				className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-(--chat-surface-radius) px-3 py-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus-ring [&::-webkit-details-marker]:hidden"
+				className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus-ring [&::-webkit-details-marker]:hidden"
 				onClick={onInspect}
 			>
 				<span className="flex min-w-0 flex-1 items-center gap-2 text-xs">
@@ -423,7 +423,7 @@ function App() {
 							<div className="flex justify-center">
 								<button
 									type="button"
-									className="chat-button min-h-11 px-3 text-xs"
+									className="chat-button chat-compact-control px-3 text-xs"
 									disabled={loading || !synced}
 									aria-busy={loading}
 									onClick={showEarlier}
@@ -468,7 +468,7 @@ function App() {
 									</p>
 									<button
 										type="button"
-										className="chat-button min-h-11 bg-control px-3 text-xs"
+										className="chat-button chat-compact-control bg-control px-3 text-xs"
 										disabled={!synced}
 										onClick={() => retrySubmit(submission.id)}
 									>

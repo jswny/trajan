@@ -463,6 +463,7 @@ test("changes the theme without moving the transcript on a short iPhone viewport
 	await expect(menu.getByRole("menuitemradio", { name: "Auto" })).toBeChecked();
 	expect(await transcript.evaluate((el) => el.clientHeight)).toBe(height);
 	await expect.poll(() => dark.evaluate((el) => el.clientHeight)).toBeGreaterThanOrEqual(44);
+	await expect(dark).toHaveCSS("border-top-left-radius", "22px");
 	await dark.press("Enter");
 	await expect(menu).toBeHidden();
 	await expect(settings).toBeFocused();
@@ -478,17 +479,20 @@ test("keeps the composer one row tall until the draft needs more space", async (
 	const composer = await openChat(page);
 	const settings = page.getByRole("button", { name: "Chat settings" });
 	const send = page.getByRole("button", { name: "Send message" });
+	const composerSurface = composer.locator("..");
 	const composerHeight = () =>
 		composer.evaluate((element) => element.parentElement?.getBoundingClientRect().height);
 	const controlHeight = await settings.evaluate(
 		(element) => element.getBoundingClientRect().height,
 	);
 	await expect.poll(composerHeight).toBe(controlHeight);
+	await expect(composerSurface).toHaveCSS("border-top-left-radius", "26px");
 	await composer.fill("Remember the first line");
 	await composer.press("Shift+Enter");
 	await composer.pressSequentially("and the second");
 	await expect(composer).toHaveValue("Remember the first line\nand the second");
 	await expect.poll(composerHeight).toBeGreaterThan(controlHeight);
+	await expect(composerSurface).toHaveCSS("border-top-left-radius", "26px");
 	await expect(send).toBeInViewport();
 
 	await composer.press("Enter");
@@ -548,7 +552,9 @@ test("wraps a long prompt and keeps a wide code block scrollable inside the tran
 	).toBe(0);
 });
 
-test("opens one tool row without scrolling its summary away", async ({ page }) => {
+test("keeps the collapsed tool card compact and opens it without scrolling its summary away", async ({
+	page,
+}) => {
 	await page.setViewportSize({ ...devices["iPhone 17 Pro"].viewport, height: 352 });
 	const composer = await openChat(page);
 	const transcript = page.getByRole("main");
@@ -563,10 +569,34 @@ test("opens one tool row without scrolling its summary away", async ({ page }) =
 	await expect(card).toHaveCount(1);
 	await expect(summary).toHaveText("execDone");
 	await expect(summary).toBeInViewport();
+	const width = () => card.evaluate((element) => element.getBoundingClientRect().width);
+	const contentWidth = await transcript.evaluate((element) => {
+		const style = getComputedStyle(element);
+		return (
+			element.clientWidth -
+			Number.parseFloat(style.paddingLeft) -
+			Number.parseFloat(style.paddingRight)
+		);
+	});
+	const collapsedWidth = await width();
+	expect(collapsedWidth).toBeLessThan(contentWidth);
+	const collapsedCorners = await card.evaluate((element) => {
+		const style = getComputedStyle(element);
+		return {
+			top: Number.parseFloat(style.borderTopLeftRadius),
+			bottom: Number.parseFloat(style.borderBottomLeftRadius),
+			height: element.getBoundingClientRect().height,
+		};
+	});
+	expect(collapsedCorners.top + collapsedCorners.bottom).toBeLessThanOrEqual(
+		collapsedCorners.height,
+	);
 	const top = await summary.evaluate((element) => element.getBoundingClientRect().top);
 
 	await summary.press("Enter");
 	await expect(card.getByText("Arguments", { exact: true })).toBeVisible();
+	await expect.poll(width).toBeCloseTo(contentWidth, 0);
+	await expect(card).toHaveCSS("border-top-left-radius", `${collapsedCorners.top}px`);
 	await expect(card.getByText("Result", { exact: true })).toBeVisible();
 	await expect(card.getByRole("list", { name: "Recent tool calls" })).toBeVisible();
 	const blocks = card.locator("pre code");
@@ -586,6 +616,7 @@ test("opens one tool row without scrolling its summary away", async ({ page }) =
 	expect(Math.abs(expandedTop - top)).toBeLessThanOrEqual(1);
 	await summary.press("Enter");
 	await expect(card.getByText("Arguments", { exact: true })).toBeHidden();
+	await expect.poll(width).toBeCloseTo(collapsedWidth, 0);
 });
 
 test("fits Markdown frames to their tables and scrolls wide tables on mobile", async ({ page }) => {

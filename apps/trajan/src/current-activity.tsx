@@ -3,8 +3,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { IconChevron, IconGlobe, IconLoader } from "@pierre/icons/beta";
 import { browserWatchId } from "./use-chat-session";
 
-const surface =
-	"chat-floating-surface mx-auto flex min-h-9 w-fit items-center gap-1.5 px-3 text-xs font-medium";
+const surface = "chat-floating-surface chat-activity-chip";
 
 export function CurrentActivityChip({
 	turnStatus,

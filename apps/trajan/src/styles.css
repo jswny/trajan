@@ -23,6 +23,7 @@
 	--chat-line: color-mix(in srgb, var(--pierre-line), var(--pierre-ink) 10%);
 	--chat-focus-ring: color-mix(in srgb, var(--pierre-accent), var(--pierre-ink) 30%);
 	--chat-control-height: 3.25rem;
+	--chat-compact-control-height: 2.75rem;
 	--chat-surface-radius: calc(var(--chat-control-height) / 2);
 	--chat-inset-radius: 0.625rem;
 	/* The same dark foreground stays readable on the shared blue accent in either mode. */
@@ -105,15 +106,47 @@ body {
 
 @layer components {
 	.chat-button {
-		@apply inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 rounded-full font-medium hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent;
+		@apply inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 font-medium hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent;
 	}
 
 	.chat-floating-surface {
-		@apply pointer-events-auto rounded-(--chat-surface-radius) border border-line bg-surface/90 shadow-sm backdrop-blur-xl;
+		@apply pointer-events-auto border border-line bg-surface/90 shadow-sm backdrop-blur-xl;
+	}
+
+	.chat-activity-chip {
+		@apply mx-auto flex w-fit items-center gap-1.5 px-3 text-xs font-medium;
 	}
 
 	.chat-badge {
-		@apply inline-flex shrink-0 items-center rounded-full bg-control px-2 py-0.5 text-xs font-medium text-muted;
+		--chat-pill-height: 1.25rem;
+		@apply inline-flex shrink-0 items-center bg-control px-2 py-0.5 text-xs font-medium text-muted;
+	}
+
+	.chat-compact-control,
+	.chat-tool-card {
+		--chat-pill-height: var(--chat-compact-control-height);
+	}
+
+	.chat-activity-chip,
+	.chat-floating-surface[role="alert"] {
+		--chat-pill-height: 2.25rem;
+	}
+
+	.chat-button,
+	.chat-floating-surface,
+	.chat-activity-chip,
+	.chat-badge,
+	.chat-compact-control,
+	.chat-tool-card,
+	.chat-tool-card > summary {
+		border-radius: calc(var(--chat-pill-height, var(--chat-control-height)) / 2);
+	}
+
+	.chat-activity-chip,
+	.chat-badge,
+	.chat-compact-control,
+	.chat-tool-card > summary {
+		min-height: var(--chat-pill-height);
 	}
 
 	.chat-badge[data-tone="success"] {

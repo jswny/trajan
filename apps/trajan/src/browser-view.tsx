@@ -66,7 +66,7 @@ function BrowserFeed() {
 					Couldn’t connect to the live browser.
 				</p>
 				<button
-					className="chat-button min-h-11 border border-line px-4 text-sm"
+					className="chat-button chat-compact-control border border-line px-4 text-sm"
 					type="button"
 					onClick={refresh}
 				>
@@ -115,7 +115,7 @@ export function BrowserViewer({ children }: { children: ReactNode }) {
 							<Dialog.Title className="text-sm font-semibold">Live browser</Dialog.Title>
 							<Dialog.Close
 								aria-label="Close live browser view"
-								className="chat-button size-11 border border-line"
+								className="chat-button chat-compact-control w-(--chat-compact-control-height) border border-line"
 							>
 								<IconX size={16} aria-hidden="true" />
 							</Dialog.Close>
