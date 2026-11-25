@@ -26,6 +26,17 @@ function toolCards(page: Page) {
 	return page.getByRole("main").locator(":scope > details");
 }
 
+test("uses the submission prompt limit for the composer", async ({ page }) => {
+	const composer = await openChat(page);
+	const send = page.getByRole("button", { name: "Send message" });
+	await composer.fill("   ");
+	await expect(send).toBeDisabled();
+	await composer.fill(` ${"x".repeat(32_000)} `);
+	await expect(send).toBeEnabled();
+	await composer.fill("x".repeat(32_001));
+	await expect(send).toBeDisabled();
+});
+
 test("does not send while the initial snapshot is missing", async ({ page }) => {
 	let deliver: (() => void) | undefined;
 	await page.routeWebSocket("**/api/chat/live", (client) => {

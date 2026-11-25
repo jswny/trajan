@@ -1,8 +1,12 @@
 import { Context, Effect, Option, Schema, Stream } from "effect";
 
+export const TurnPrompt = Schema.NonEmptyString.check(
+	Schema.isMaxLength(32_000),
+	Schema.isTrimmed(),
+);
 export const TurnSubmission = Schema.Struct({
 	id: Schema.NonEmptyString.check(Schema.isMaxLength(128)),
-	prompt: Schema.NonEmptyString.check(Schema.isMaxLength(32_000), Schema.isTrimmed()),
+	prompt: TurnPrompt,
 });
 
 const UserMessage = Schema.Struct({

@@ -1,11 +1,13 @@
 import { useAtom, useAtomValue } from "@effect/atom-react";
-import { Clock, Effect, Stream } from "effect";
+import { TurnPrompt } from "@trajan/harness";
+import { Clock, Effect, Schema, Stream } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { ChatSession, INITIAL_CHAT } from "./chat-session";
 import type { ChatCommand, PromptDraft } from "./chat-session";
 import { chatMessages, chatText, chatTool } from "./chat-view";
 
 const draftAtom = Atom.make<PromptDraft>({ text: "" }).pipe(Atom.keepAlive);
+const isTurnPrompt = Schema.is(TurnPrompt);
 const sessionAtom = Atom.make(({ registry }) =>
 	Stream.unwrap(
 		Effect.map(ChatSession, ({ changes, dispatch }) =>
@@ -76,8 +78,7 @@ export function useChatSession() {
 	const submitting = state.submission?.status === "pending";
 	const canSubmit =
 		state.status === "open" &&
-		draft.text.trim() !== "" &&
-		draft.text.trim().length <= 32_000 &&
+		isTurnPrompt(draft.text.trim()) &&
 		!submitting &&
 		state.submission?.status !== "unconfirmed";
 	const dispatch = (command: ChatCommand) => session?.dispatch(command);

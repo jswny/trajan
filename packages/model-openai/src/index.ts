@@ -34,10 +34,22 @@ const isCompaction = Schema.is(
 	}),
 );
 const UpstreamError = Schema.Struct({
-	error: Schema.optionalKey(Schema.Struct({ message: Schema.String })),
-	incomplete_details: Schema.optionalKey(Schema.Struct({ reason: Schema.String })),
+	error: Schema.optionalKey(Schema.NullOr(Schema.Struct({ message: Schema.String }))),
+	incomplete_details: Schema.optionalKey(Schema.NullOr(Schema.Struct({ reason: Schema.String }))),
 });
-const decodeUpstreamError = Schema.decodeUnknownOption(UpstreamError);
+const TextDeltaEvent = Schema.Struct({
+	type: Schema.Literal("response.output_text.delta"),
+	delta: Schema.String,
+});
+const CompletedEvent = Schema.Struct({
+	type: Schema.Literal("response.completed"),
+	response: Completed,
+});
+const UnsuccessfulEvent = Schema.Struct({
+	type: Schema.Literals(["response.failed", "response.incomplete"]),
+	response: UpstreamError,
+});
+const ErrorEvent = Schema.Struct({ type: Schema.Literal("error"), message: Schema.String });
 const decodeErrorBody = Schema.decodeUnknownOption(Schema.fromJsonString(UpstreamError));
 const decodeToolContent = Schema.decodeUnknownOption(ToolContent);
 type History = Parameters<TurnModel["Service"]["stream"]>[0];
@@ -158,12 +170,11 @@ const buildInput = Effect.fnUntraced(function* (history: History, modelContext?:
 }, Effect.mapError(transportError));
 
 const completedResponse = Effect.fnUntraced(function* (
-	response: Schema.Json | undefined,
+	output: ReadonlyArray<Item>,
 	input: ReadonlyArray<Item>,
 	tool: Tool,
 	allowTools: boolean,
 ) {
-	const { output } = yield* Schema.decodeUnknownEffect(Completed)(response);
 	const calls = output.filter((item) => item.type === "function_call");
 	if (calls.length > 0) {
 		if (!allowTools || calls.length !== 1) {
@@ -196,7 +207,42 @@ const completedResponse = Effect.fnUntraced(function* (
 		text,
 		continuation: compactWindow([...input, ...output]),
 	};
-}, Effect.mapError(transportError));
+});
+
+const readEvent = Effect.fnUntraced(function* (
+	event: Item,
+	input: ReadonlyArray<Item>,
+	tool: Tool,
+	allowTools: boolean,
+): Effect.fn.Return<TurnModelEvent | undefined, TurnModelError | Schema.SchemaError> {
+	switch (event.type) {
+		case "response.output_text.delta": {
+			const { delta } = yield* Schema.decodeUnknownEffect(TextDeltaEvent)(event);
+			return { type: "text-delta", text: delta };
+		}
+		case "response.completed": {
+			const {
+				response: { output },
+			} = yield* Schema.decodeUnknownEffect(CompletedEvent)(event);
+			return {
+				type: "response",
+				response: yield* completedResponse(output, input, tool, allowTools),
+			};
+		}
+		case "response.failed":
+		case "response.incomplete": {
+			const { response } = yield* Schema.decodeUnknownEffect(UnsuccessfulEvent)(event);
+			const message = response.error?.message ?? response.incomplete_details?.reason;
+			return yield* modelError(message ?? `OpenAI stream ended with ${event.type}.`);
+		}
+		case "error": {
+			const { message } = yield* Schema.decodeUnknownEffect(ErrorEvent)(event);
+			return yield* modelError(message);
+		}
+		default:
+			return undefined;
+	}
+});
 
 export function openAiTurnModel(request: OpenAiResponsesTransport, options: OpenAiTurnOptions) {
 	const { tool } = options;
@@ -231,31 +277,16 @@ export function openAiTurnModel(request: OpenAiResponsesTransport, options: Open
 			Stream.pipeThroughChannel(decodeSse()),
 			Stream.filter((event) => event.data !== "[DONE]"),
 			Stream.mapEffect(({ data }) => Schema.decodeEffect(Event)(data)),
-			Stream.flatMap((event): Stream.Stream<TurnModelEvent, TurnModelError> => {
-				switch (event.type) {
-					case "response.output_text.delta":
-						return typeof event.delta === "string"
-							? Stream.succeed({ type: "text-delta", text: event.delta })
-							: Stream.fail(modelError("OpenAI returned an invalid text delta."));
-					case "response.completed":
-						return completedResponse(event.response, input, tool, allowTools).pipe(
-							Effect.map((result) => ({ type: "response" as const, response: result })),
-							Stream.fromEffect,
-						);
-					case "response.failed":
-					case "response.incomplete":
-					case "error": {
-						const decoded = decodeUpstreamError(event.response ?? { error: event });
-						const message =
-							decoded._tag === "Some"
-								? (decoded.value.error?.message ?? decoded.value.incomplete_details?.reason)
-								: undefined;
-						return Stream.fail(modelError(message ?? `OpenAI stream ended with ${event.type}.`));
-					}
-					default:
-						return Stream.empty;
-				}
-			}),
+			Stream.mapEffect((event) =>
+				readEvent(event, input, tool, allowTools).pipe(
+					Effect.mapError((error) =>
+						Schema.isSchemaError(error)
+							? modelError(`OpenAI returned an invalid ${event.type} event.`)
+							: error,
+					),
+				),
+			),
+			Stream.filter((event) => event !== undefined),
 			Stream.takeUntil((event) => event.type === "response"),
 			Stream.mapError(transportError),
 		);
