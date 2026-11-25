@@ -88,8 +88,9 @@ function requestBody(
 
 export type OpenAiResponsesTransport = (
 	body: ReturnType<typeof requestBody>,
+	/** Keep using this signal while the response body is being consumed. */
 	signal: AbortSignal,
-) => Promise<Response>;
+) => Effect.Effect<Response, TurnModelError>;
 
 function modelError(message: string) {
 	return new TurnModelError({ message });
@@ -255,10 +256,7 @@ export function openAiTurnModel(request: OpenAiResponsesTransport, options: Open
 			Effect.sync(() => new AbortController()),
 			(activeRequest) => Effect.sync(() => activeRequest.abort()),
 		);
-		const response = yield* Effect.tryPromise({
-			try: () => request(requestBody(options, input, allowTools), controller.signal),
-			catch: transportError,
-		});
+		const response = yield* request(requestBody(options, input, allowTools), controller.signal);
 		if (!response.ok) {
 			const body = yield* Effect.tryPromise({ try: () => response.text(), catch: transportError });
 			const decoded = decodeErrorBody(body);
