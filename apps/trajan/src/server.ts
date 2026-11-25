@@ -1,17 +1,17 @@
 import { TurnModel, TurnTools } from "@trajan/harness";
 import { openAiTurnModel } from "@trajan/model-openai";
 import { Browser, browserRun } from "agents/browser";
-import { Clock, Data, Effect, Layer, Schema } from "effect";
+import { Clock, Data, Effect, Layer, Option, Schema } from "effect";
 import { browserKeepAliveMs, browserToolset } from "./browser";
 import { openAiGatewayTransport } from "./chat/openai-gateway";
 import {
 	BrowserViewPath,
 	BrowserViewRequest,
 	BrowserViewResponse,
+	BrowserWatch,
 	ChatPath,
 	isChatPath,
 } from "./chat/protocol";
-import type { BrowserWatch } from "./chat/protocol";
 import { TrajanChatObject } from "./chat/worker-host";
 import { createChatTools } from "./chat/tools";
 import { modelConfig } from "./model-config";
@@ -29,6 +29,7 @@ const decodeBrowserViewRequest = Schema.decodeUnknownOption(
 );
 const browserViewHeaders = { "Cache-Control": "no-store" };
 const browserWatchKey = "trajan:browser-watch";
+const decodeBrowserWatch = Schema.decodeUnknownOption(BrowserWatch);
 
 export class Trajan extends TrajanChatObject {
 	readonly #browser = new Browser({
@@ -61,7 +62,7 @@ export class Trajan extends TrajanChatObject {
 	}
 
 	protected override get browserWatch() {
-		return this.ctx.storage.kv.get<typeof BrowserWatch.Type>(browserWatchKey) ?? null;
+		return Option.getOrNull(decodeBrowserWatch(this.ctx.storage.kv.get(browserWatchKey)));
 	}
 
 	#changeBrowserAvailability(status: "open" | "reopened" | "closed") {

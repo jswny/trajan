@@ -1,7 +1,6 @@
 import { RpcTarget } from "cloudflare:workers";
-import { Cause, Clock, Data, Effect, Exit, Fiber, Random, Schema } from "effect";
+import { Cause, Clock, Data, Effect, Exit, Fiber, Option, Random, Schema } from "effect";
 import { loadGuest } from "./guest";
-import type { ToolReply } from "./guest";
 
 export class CodeModeError extends Data.TaggedError("CodeModeError")<{
 	readonly message: string;
@@ -39,12 +38,6 @@ const ToolCall = Schema.Struct({
 });
 
 type ToolCall = typeof ToolCall.Type;
-type Entry = {
-	readonly request: string;
-	readonly replay: CodeModeTool["replay"];
-	readonly reply?: ToolReply;
-};
-type Run = { readonly source: string; readonly result?: { readonly value: Schema.Json } };
 type ToolNamespace = Readonly<Record<string, CodeModeTool>>;
 type Catalog = Partial<Record<(typeof applicationModules)[number], ToolNamespace>>;
 
@@ -81,6 +74,24 @@ const boundedJson = Schema.Json.check(
 			"Code Mode values must fit within 64 KiB.",
 	),
 );
+const ToolReply = Schema.Union([
+	Schema.Struct({ status: Schema.Literal("returned"), value: boundedJson }),
+	Schema.Struct({ status: Schema.Literals(["interrupted", "failed"]), message: Schema.String }),
+]);
+type ToolReply = typeof ToolReply.Type;
+const Entry = Schema.Struct({
+	request: Schema.NonEmptyString,
+	replay: Schema.Literals(["safe", "unsafe"]),
+	reply: Schema.optionalKey(ToolReply),
+});
+type Entry = typeof Entry.Type;
+const Run = Schema.Struct({
+	source: Schema.String,
+	result: Schema.optionalKey(Schema.Struct({ value: boundedJson })),
+});
+type Run = typeof Run.Type;
+const decodeEntry = Schema.decodeUnknownOption(Schema.UndefinedOr(Entry));
+const decodeRun = Schema.decodeUnknownEffect(Schema.UndefinedOr(Run));
 
 function runPrefix(scope: string) {
 	return `code-mode:${encodeURIComponent(scope)}:`;
@@ -128,7 +139,9 @@ export function createCodeMode(
 		const context = yield* Effect.context<never>();
 		const key = `${runPrefix(options.scope ?? id)}${encodeURIComponent(id)}`;
 		const entries = `${key}:call:`;
-		const saved = storage.kv.get<Run>(key);
+		const saved = yield* decodeRun(storage.kv.get(key)).pipe(
+			Effect.mapError(() => new CodeModeError({ message: "Invalid Code Mode run checkpoint." })),
+		);
 		if (options.recovering && !saved) {
 			return yield* new CodeModeError({ message: "The Code Mode checkpoint is missing." });
 		}
@@ -177,7 +190,12 @@ export function createCodeMode(
 					);
 					const tools = toolsByModule.get(input.module);
 					const tool = tools && Object.hasOwn(tools, input.name) ? tools[input.name] : undefined;
-					const prior = storage.kv.get<Entry>(callId);
+					const stored = decodeEntry(storage.kv.get(callId));
+					if (Option.isNone(stored)) {
+						divergence = `Invalid Code Mode checkpoint for call ${index + 1}.`;
+						return failed(divergence);
+					}
+					const prior = stored.value;
 					if (prior && (prior.request !== request || prior.replay !== tool?.replay)) {
 						return rejectReplay(index);
 					}

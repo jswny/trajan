@@ -1,10 +1,6 @@
 import type { WorkerEntrypoint } from "cloudflare:workers";
 import type { Json } from "effect/Schema";
 
-export type ToolReply =
-	| { readonly status: "returned"; readonly value: Json }
-	| { readonly status: "interrupted" | "failed"; readonly message: string };
-
 const runner = `
 import { WorkerEntrypoint, withEnv } from "cloudflare:workers";
 import script from "./script.js";

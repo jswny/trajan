@@ -1,3 +1,4 @@
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { expect, test } from "vite-plus/test";
 
@@ -32,6 +33,33 @@ export default async function () {
 	await expect(stub.runCodeMode("settling", source)).resolves.toEqual({ value: "interrupted" });
 	expect((await stub.codeModeState()).receipts.settle).toHaveLength(1);
 	await expect(stub.runCodeMode("other", "export default () => 1")).resolves.toEqual({ value: 1 });
+});
+
+test("rejects malformed run and call checkpoints without invoking a tool", async () => {
+	const stub = openFixture();
+	const source = `
+import { settle } from "codemode:tools";
+export default async function () {
+  try { await settle(); } catch {}
+  return "completed";
+}`;
+	await runInDurableObject(stub, (_, { storage }) => {
+		storage.kv.put("code-mode:bad-run:bad-run", { source, result: {} });
+		const key = "code-mode:bad-call:bad-call";
+		storage.kv.put(key, { source });
+		storage.kv.put(`${key}:call:0`, {
+			request: JSON.stringify({ module: "codemode:tools", name: "settle", input: null }),
+			replay: "unsafe",
+			reply: { status: "returned" },
+		});
+	});
+	await expect(stub.runCodeMode("bad-run", source)).resolves.toEqual({
+		error: "Invalid Code Mode run checkpoint.",
+	});
+	await expect(stub.runCodeMode("bad-call", source)).resolves.toEqual({
+		error: "Invalid Code Mode checkpoint for call 1.",
+	});
+	expect((await stub.codeModeState()).receipts.settle).toBeUndefined();
 });
 
 const recoverCase = [

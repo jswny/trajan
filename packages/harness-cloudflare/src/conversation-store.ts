@@ -20,17 +20,30 @@ export type HistoryQuery = {
 	readonly limit?: number;
 };
 
-type SubmissionRow = {
-	seq: number;
-	run_id: string;
-	submission_id: string;
-	prompt: string;
-	state: "pending" | "running" | "stopping" | "completed" | "failed" | "cancelled";
-	context_through: number | null;
-	error: string | null;
-};
-
-type EntryRow = { seq: number; submission_id: string; message: string };
+const AdmissionRow = Schema.Struct({
+	run_id: Schema.NonEmptyString,
+	prompt: Schema.NonEmptyString,
+});
+const SubmissionRow = Schema.Struct({
+	...AdmissionRow.fields,
+	seq: Schema.Int.check(Schema.isGreaterThan(0)),
+	submission_id: Schema.NonEmptyString,
+	state: Schema.Literals(["pending", "running", "stopping", "completed", "failed", "cancelled"]),
+	context_through: Schema.NullOr(Schema.Natural),
+	error: Schema.NullOr(Schema.String),
+});
+const MessageRow = Schema.Struct({ message: Schema.String });
+const EntryRow = Schema.Struct({
+	...MessageRow.fields,
+	seq: SubmissionRow.fields.seq,
+	submission_id: SubmissionRow.fields.submission_id,
+});
+const decodeAdmission = Schema.decodeUnknownSync(Schema.UndefinedOr(AdmissionRow));
+const decodeSubmission = Schema.decodeUnknownSync(SubmissionRow);
+const decodeOptionalSubmission = Schema.decodeUnknownSync(Schema.UndefinedOr(SubmissionRow));
+const decodeMessage = Schema.decodeUnknownSync(MessageRow);
+const decodeEntry = Schema.decodeUnknownSync(EntryRow);
+const decodeCount = Schema.decodeUnknownSync(Schema.Struct({ count: Schema.Natural }));
 
 export class ConversationStore {
 	constructor(
@@ -65,12 +78,14 @@ export class ConversationStore {
 
 	admit(submission: typeof TurnSubmission.Type) {
 		return this.storage.transactionSync(() => {
-			const existing = this.storage.sql
-				.exec<Pick<SubmissionRow, "run_id" | "prompt">>(
-					"SELECT run_id, prompt FROM harness_submissions WHERE submission_id = ?",
-					submission.id,
-				)
-				.toArray()[0];
+			const existing = decodeAdmission(
+				this.storage.sql
+					.exec(
+						"SELECT run_id, prompt FROM harness_submissions WHERE submission_id = ?",
+						submission.id,
+					)
+					.toArray()[0],
+			);
 			if (existing) {
 				return existing.prompt === submission.prompt
 					? { runId: existing.run_id, accepted: false }
@@ -92,12 +107,14 @@ export class ConversationStore {
 		});
 	}
 
-	head(): SubmissionRow | undefined {
-		return this.storage.sql
-			.exec<SubmissionRow>(`
+	head() {
+		return decodeOptionalSubmission(
+			this.storage.sql
+				.exec(`
 			SELECT * FROM harness_submissions WHERE state IN ('pending', 'running', 'stopping') ORDER BY seq LIMIT 1
 		`)
-			.toArray()[0];
+				.toArray()[0],
+		);
 	}
 
 	start(runId: string) {
@@ -114,23 +131,25 @@ export class ConversationStore {
 			}
 
 			// The committed prefix remains the model's context across journal replay.
-			return this.storage.sql
-				.exec<SubmissionRow>(
-					`
+			return decodeSubmission(
+				this.storage.sql
+					.exec(
+						`
 				UPDATE harness_submissions SET state = 'running',
 					context_through = (SELECT COALESCE(MAX(seq), 0) FROM harness_entries)
 				WHERE run_id = ? RETURNING *
 			`,
-					runId,
-				)
-				.one();
+						runId,
+					)
+					.one(),
+			);
 		});
 	}
 
 	context(through: number) {
 		// Count whole exchanges before loading message bodies into the Worker.
 		return this.storage.sql
-			.exec<Pick<EntryRow, "message">>(
+			.exec(
 				`
 			WITH recent AS (
 				SELECT submission_seq, length(CAST(message AS BLOB)) AS bytes
@@ -151,7 +170,7 @@ export class ConversationStore {
 				contextByteLimit,
 			)
 			.toArray()
-			.map(({ message }) => Schema.decodeSync(contextJson)(message));
+			.map((row) => Schema.decodeSync(contextJson)(decodeMessage(row).message));
 	}
 
 	modelContext() {
@@ -257,11 +276,11 @@ export class ConversationStore {
 						state: head.state,
 					}
 				: null;
-		const queued = this.storage.sql
-			.exec<{ count: number }>(
-				"SELECT COUNT(*) AS count FROM harness_submissions WHERE state = 'pending'",
-			)
-			.one().count;
+		const { count: queued } = decodeCount(
+			this.storage.sql
+				.exec("SELECT COUNT(*) AS count FROM harness_submissions WHERE state = 'pending'")
+				.one(),
+		);
 		return {
 			active,
 			queued: queued - Number(active?.state === "pending"),
@@ -284,12 +303,9 @@ export class ConversationStore {
 		let transcript: string | null = null;
 		if (row?.state === "completed") {
 			const messages = this.storage.sql
-				.exec<Pick<EntryRow, "message">>(
-					"SELECT message FROM harness_entries WHERE submission_seq = ? ORDER BY seq",
-					row.seq,
-				)
+				.exec("SELECT message FROM harness_entries WHERE submission_seq = ? ORDER BY seq", row.seq)
 				.toArray()
-				.map(({ message }) => Schema.decodeSync(messageJson)(message));
+				.map((row) => Schema.decodeSync(messageJson)(decodeMessage(row).message));
 			transcript = Schema.encodeSync(transcriptJson)({ submissionId: row.submission_id, messages });
 		}
 		return { state: row?.state ?? "missing", error: row?.error ?? null, transcript };
@@ -297,7 +313,7 @@ export class ConversationStore {
 
 	history({ before, limit = 50 }: HistoryQuery) {
 		const rows = this.storage.sql
-			.exec<EntryRow>(
+			.exec(
 				`
 			SELECT entries.seq, submissions.submission_id, entries.message
 			FROM harness_entries AS entries JOIN harness_submissions AS submissions ON submissions.seq = entries.submission_seq
@@ -306,7 +322,8 @@ export class ConversationStore {
 				before ?? Number.MAX_SAFE_INTEGER,
 				limit + 1,
 			)
-			.toArray();
+			.toArray()
+			.map((row) => decodeEntry(row));
 		const entries = rows.slice(0, limit).reverse();
 		return {
 			entries: entries.map(({ seq, submission_id, message }) => ({
@@ -318,9 +335,11 @@ export class ConversationStore {
 		};
 	}
 
-	#find(runId: string): SubmissionRow | undefined {
-		return this.storage.sql
-			.exec<SubmissionRow>("SELECT * FROM harness_submissions WHERE run_id = ?", runId)
-			.toArray()[0];
+	#find(runId: string) {
+		return decodeOptionalSubmission(
+			this.storage.sql
+				.exec("SELECT * FROM harness_submissions WHERE run_id = ?", runId)
+				.toArray()[0],
+		);
 	}
 }
