@@ -2,16 +2,14 @@ import { ToolActivity, ToolCall, ToolResult, TurnMessage } from "@trajan/harness
 import { Schema } from "effect";
 
 export const ChatPath = "/api/chat";
+export const ChatHistoryPath = `${ChatPath}/history`;
+export const ChatStopPath = `${ChatPath}/stop`;
 export const BrowserViewPath = `${ChatPath}/browser-view`;
 export const BrowserViewRequest = Schema.Struct({ id: Schema.NonEmptyString });
 export function isChatPath(pathname: string) {
-	return [
-		ChatPath,
-		`${ChatPath}/live`,
-		`${ChatPath}/history`,
-		`${ChatPath}/stop`,
-		BrowserViewPath,
-	].includes(pathname);
+	return [ChatPath, `${ChatPath}/live`, ChatHistoryPath, ChatStopPath, BrowserViewPath].includes(
+		pathname,
+	);
 }
 export const BrowserViewResponse = Schema.Union([
 	Schema.Struct({ status: Schema.Literal("closed") }),
@@ -49,18 +47,19 @@ export const ChatPage = Schema.Struct({
 
 const RunId = Schema.NonEmptyString;
 export const ChatStop = Schema.Struct({ runId: RunId });
+export const ChatRejectedReceipt = Schema.Struct({
+	submissionId: Schema.optionalKey(Schema.String),
+	runId: Schema.Null,
+	accepted: Schema.Literal(false),
+	error: Schema.String,
+});
 export const ChatReceipt = Schema.Union([
 	Schema.Struct({
 		submissionId: Schema.NonEmptyString,
 		runId: RunId,
 		accepted: Schema.Boolean,
 	}),
-	Schema.Struct({
-		submissionId: Schema.optionalKey(Schema.String),
-		runId: Schema.Null,
-		accepted: Schema.Literal(false),
-		error: Schema.String,
-	}),
+	ChatRejectedReceipt,
 ]);
 export const ChatStopReceipt = Schema.Struct({ runId: RunId, stopped: Schema.Boolean });
 

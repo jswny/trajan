@@ -4,7 +4,15 @@ import { CloudflareHarness } from "@trajan/harness-cloudflare";
 import { WebSockets } from "agents/websockets";
 import { Effect, Schema } from "effect";
 import { TurnSchedules } from "../turn-schedules";
-import { ChatEvent, ChatHistoryQuery, ChatPath, ChatStop, updateToolPreview } from "./protocol";
+import {
+	ChatEvent,
+	ChatHistoryPath,
+	ChatHistoryQuery,
+	ChatPath,
+	ChatStop,
+	ChatStopPath,
+	updateToolPreview,
+} from "./protocol";
 import type {
 	BrowserWatch,
 	ChatPreview,
@@ -134,7 +142,7 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 		request: Request,
 	) {
 		const url = new URL(request.url);
-		if (url.pathname === `${ChatPath}/history` && request.method === "GET") {
+		if (url.pathname === ChatHistoryPath && request.method === "GET") {
 			const before = url.searchParams.get("before");
 			const query = decodeHistory(before === null ? {} : { before: Number(before) });
 			if (query._tag === "None") {
@@ -163,7 +171,7 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 					{ status: receipt.runId === null ? 400 : 202 },
 				);
 			}
-			case `${ChatPath}/stop`: {
+			case ChatStopPath: {
 				const input = decodeStop(body);
 				if (input._tag === "None") {
 					return Response.json({ error: "Invalid run ID." }, { status: 400 });

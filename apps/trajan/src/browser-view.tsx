@@ -1,33 +1,19 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { useAtom, useAtomRefresh, useAtomValue } from "@effect/atom-react";
 import { IconX } from "@pierre/icons/beta";
-import { Effect, Schema } from "effect";
+import { Effect } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
-import { BrowserViewPath, BrowserViewResponse } from "./chat/protocol";
+import { ChatHttp } from "./chat/http-client";
 import { browserWatchId } from "./use-chat-session";
 
 const openAtom = Atom.make(false);
-const loadView = Effect.fnUntraced(function* (id: string) {
-	const payload = yield* Effect.tryPromise(async (signal) => {
-		const response = await fetch(BrowserViewPath, {
-			method: "POST",
-			cache: "no-store",
-			signal,
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ id }),
-		});
-		if (!response.ok) {
-			throw new Error("Live view could not connect.");
-		}
-		return response.json();
-	});
-	return yield* Schema.decodeUnknownEffect(BrowserViewResponse)(payload);
-}, Effect.timeout("10 seconds"));
 const viewAtom = Atom.make((get) => {
 	const id = get(browserWatchId);
-	return get(openAtom) && id ? loadView(id) : Effect.succeed(null);
+	return get(openAtom) && id
+		? ChatHttp.use((http) => http.browserView({ id })).pipe(Effect.provide(ChatHttp.live))
+		: Effect.succeed(null);
 }).pipe(Atom.setIdleTTL(0));
 
 const desktopQuery = "(min-width: 64rem)";

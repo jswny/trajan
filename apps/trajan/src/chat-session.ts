@@ -1,14 +1,8 @@
 import { Context, Effect, Layer, Queue, Schedule, Schema, SubscriptionRef } from "effect";
 import { Socket } from "effect/socket";
-import {
-	ChatEvent,
-	ChatPage,
-	ChatPath,
-	ChatReceipt,
-	ChatStopReceipt,
-	updateToolPreview,
-} from "./chat/protocol";
-import type { ChatSnapshot } from "./chat/protocol";
+import { ChatHttp, ChatRequestError } from "./chat/http-client";
+import { ChatEvent, ChatPath, updateToolPreview } from "./chat/protocol";
+import type { ChatPage, ChatSnapshot } from "./chat/protocol";
 
 export type PromptDraft = { readonly text: string };
 type Submission = {
@@ -43,40 +37,7 @@ export type ChatCommand =
 	| { readonly type: "stop"; readonly runId: string }
 	| { readonly type: "load-earlier" };
 
-class ChatRequestError extends Schema.TaggedError<
-	ChatRequestError,
-	{ readonly brand: unique symbol }
->()("ChatRequestError", {
-	message: Schema.String,
-	cause: Schema.optionalKey(Schema.Defect()),
-}) {}
-
 const decodeFrame = Schema.decodeEffect(Schema.fromJsonString(ChatEvent));
-const decodeReceipt = Schema.decodeUnknownEffect(ChatReceipt);
-const decodePage = Schema.decodeUnknownEffect(ChatPage);
-const decodeStopReceipt = Schema.decodeUnknownEffect(ChatStopReceipt);
-
-function requestJson(path: string, options?: RequestInit) {
-	return Effect.tryPromise({
-		try: async (signal) => {
-			const response = await fetch(path, { ...options, signal, cache: "no-store" });
-			return response.text();
-		},
-		catch: (cause) =>
-			new ChatRequestError({ message: "Trajan did not answer the request.", cause }),
-	}).pipe(
-		Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Schema.Json))),
-		Effect.timeout("5 seconds"),
-	);
-}
-
-function post(path: string, input: Schema.Json) {
-	return requestJson(path, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(input),
-	});
-}
 
 // The server sends a bounded tail on reconnect. Keep older pages if continuity is known.
 export function mergeChatPage(
@@ -140,6 +101,8 @@ export function receiveChatEvent(state: ChatState, event: typeof ChatEvent.Type)
 }
 
 const openChatSession = Effect.fn("chat.session")(function* () {
+	const http = yield* ChatHttp;
+	const socket = yield* Socket.Socket;
 	const state = yield* SubscriptionRef.make(INITIAL_CHAT);
 	const scope = yield* Effect.scope;
 	const commands = yield* Queue.unbounded<ChatCommand>();
@@ -154,9 +117,6 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 			),
 		);
 	const connection = Effect.gen(function* () {
-		const url = new URL(`${ChatPath}/live`, window.location.href);
-		url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-		const socket = yield* Socket.makeWebSocket(url.href, { openTimeout: "5 seconds" });
 		const pull = yield* Socket.readerString(socket);
 		yield* pull.pipe(
 			Effect.timeout("5 seconds"),
@@ -170,7 +130,6 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 		);
 	}).pipe(
 		Effect.scoped,
-		Effect.provide(Socket.layerWebSocketConstructorGlobal),
 		Effect.ensuring(update({ status: "reconnecting" })),
 		Effect.catch(() => Effect.sleep("750 millis")),
 		Effect.forever,
@@ -198,8 +157,7 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 		if (!submission) {
 			return;
 		}
-		yield* post(ChatPath, { id: submission.id, prompt: submission.draft.text.trim() }).pipe(
-			Effect.flatMap(decodeReceipt),
+		yield* http.submit({ id: submission.id, prompt: submission.draft.text.trim() }).pipe(
 			Effect.filterOrFail(
 				(receipt) => receipt.submissionId === submission.id,
 				() => new ChatRequestError({ message: "The submit receipt did not match." }),
@@ -228,8 +186,7 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 		if (before === null) {
 			return;
 		}
-		yield* requestJson(`${ChatPath}/history?before=${before}`).pipe(
-			Effect.flatMap(decodePage),
+		yield* http.history({ before }).pipe(
 			Effect.matchEffect({
 				onFailure: () => update({ requestError: "Couldn’t load earlier messages." }),
 				onSuccess: (page) =>
@@ -259,8 +216,7 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 			return;
 		}
 		yield* update({ requestError: null });
-		yield* post(`${ChatPath}/stop`, { runId }).pipe(
-			Effect.flatMap(decodeStopReceipt),
+		yield* http.stop({ runId }).pipe(
 			Effect.filterOrFail(
 				(receipt) => receipt.runId === runId,
 				() => new ChatRequestError({ message: "The stop receipt did not match." }),
@@ -292,6 +248,15 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 	};
 });
 
+const chatSocket = Socket.layerWebSocket(
+	Effect.sync(() => {
+		const url = new URL(`${ChatPath}/live`, window.location.href);
+		url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+		return url.href;
+	}),
+	{ openTimeout: "5 seconds" },
+).pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal));
+
 export class ChatSession extends Context.Service<
 	ChatSession,
 	{
@@ -299,5 +264,6 @@ export class ChatSession extends Context.Service<
 		readonly dispatch: (command: ChatCommand) => void;
 	}
 >()("trajan/ChatSession") {
-	static readonly live = Layer.effect(ChatSession, openChatSession());
+	static readonly layer = Layer.effect(ChatSession, openChatSession());
+	static readonly live = this.layer.pipe(Layer.provide([ChatHttp.live, chatSocket]));
 }

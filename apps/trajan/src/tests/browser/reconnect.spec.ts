@@ -92,6 +92,33 @@ test("retries an uncorrelated receipt with the same operation ID and preserves a
 	await expect(page.getByRole("main").getByText("Remember milk", { exact: true })).toHaveCount(1);
 });
 
+test("keeps the draft when a correlated HTTP 400 receipt rejects the submission", async ({
+	page,
+}) => {
+	let requests = 0;
+	await page.route("**/api/chat", async (route) => {
+		const submission = decodeSubmission(route.request().postData());
+		requests++;
+		await route.fulfill({
+			status: 400,
+			json: {
+				submissionId: submission.id,
+				runId: null,
+				accepted: false,
+				error: "That submission ID already belongs to a different prompt.",
+			},
+		});
+	});
+	const composer = await openChat(page);
+	await composer.fill("Remember milk");
+	await composer.press("Enter");
+	await expect(page.getByRole("alert")).toHaveText(
+		"That submission ID already belongs to a different prompt.",
+	);
+	await expect(composer).toHaveValue("Remember milk");
+	expect(requests).toBe(1);
+});
+
 test("keeps browser memory bounded while waiting for a model reply", async ({ context, page }) => {
 	const composer = await openChat(page);
 	const devtools = await context.newCDPSession(page);
