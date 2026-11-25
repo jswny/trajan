@@ -58,15 +58,15 @@ body {
 }
 
 .chat-layout {
-	--chat-header-gap: 0.75rem;
-	--chat-header-height: 3.25rem;
-	--chat-transcript-top: calc(var(--chat-header-gap) + var(--chat-header-height) + 1rem);
+	--chat-edge-gap: 0.75rem;
+	--chat-control-height: 3.25rem;
+	--chat-transcript-top: calc(var(--chat-edge-gap) + var(--chat-control-height) + 1rem);
 	padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
 		env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
 }
 
 .chat-header {
-	top: calc(env(safe-area-inset-top, 0px) + var(--chat-header-gap));
+	top: calc(env(safe-area-inset-top, 0px) + var(--chat-edge-gap));
 	right: env(safe-area-inset-right, 0px);
 	left: env(safe-area-inset-left, 0px);
 }
@@ -86,8 +86,8 @@ body {
 		@apply inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg font-medium hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent;
 	}
 
-	.chat-header-surface {
-		@apply pointer-events-auto h-(--chat-header-height) rounded-full border border-line bg-surface/90 shadow-sm backdrop-blur-xl;
+	.chat-floating-surface {
+		@apply pointer-events-auto rounded-full border border-line bg-surface/90 shadow-sm backdrop-blur-xl;
 	}
 
 	.chat-badge {

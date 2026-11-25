@@ -370,7 +370,7 @@ test("changes the theme without moving the transcript on a short iPhone viewport
 	const settings = page.getByRole("button", { name: "Chat settings" });
 	const menu = page.getByRole("menu");
 	const dark = menu.getByRole("menuitemradio", { name: "Dark" });
-	const transcript = page.locator("main");
+	const transcript = page.locator(".chat-transcript");
 	const height = await transcript.evaluate((el) => el.clientHeight);
 	await settings.press("Enter");
 	await expect(menu.getByRole("menuitemradio", { name: "Auto" })).toBeChecked();
@@ -386,6 +386,64 @@ test("changes the theme without moving the transcript on a short iPhone viewport
 	await expect(dark).toBeChecked();
 });
 
+test("keeps the composer one row tall until the draft needs more space", async ({ page }) => {
+	await page.setViewportSize({ ...devices["iPhone 17 Pro"].viewport, height: 352 });
+	const composer = await openChat(page);
+	const settings = page.getByRole("button", { name: "Chat settings" });
+	const send = page.getByRole("button", { name: "Send message" });
+	const composerHeight = () =>
+		composer.evaluate((element) => element.parentElement?.getBoundingClientRect().height);
+	const controlHeight = await settings.evaluate(
+		(element) => element.getBoundingClientRect().height,
+	);
+	await expect.poll(composerHeight).toBe(controlHeight);
+	await composer.fill("Remember the first line");
+	await composer.press("Shift+Enter");
+	await composer.pressSequentially("and the second");
+	await expect(composer).toHaveValue("Remember the first line\nand the second");
+	await expect.poll(composerHeight).toBeGreaterThan(controlHeight);
+	await expect(send).toBeInViewport();
+
+	await composer.press("Enter");
+	await expect(page.getByRole("main")).toContainText("Remembering the first line");
+	await expect.poll(composerHeight).toBe(controlHeight);
+});
+
+test("keeps the latest reply above a growing composer when following the transcript", async ({
+	page,
+}) => {
+	const { viewport } = devices["iPhone 17 Pro"];
+	await page.setViewportSize(viewport);
+	const composer = await openChat(page);
+	const scroller = page.locator(".chat-transcript");
+	const latestReply = page.getByRole("main").getByText(/^Remembering a short example/);
+	const distanceFromBottom = () =>
+		scroller.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight);
+	const replyBottom = () =>
+		latestReply.evaluate((element) => element.getBoundingClientRect().bottom);
+	const composerTop = () =>
+		composer.evaluate((element) => element.parentElement?.getBoundingClientRect().top ?? 0);
+	const multilineDraft = "One line\nTwo lines\nThree lines\nFour lines\nFive lines\nSix lines";
+
+	await composer.fill(`Remember ${"a short example ".repeat(120).trim()}`);
+	await composer.press("Enter");
+	await expect(latestReply).toBeAttached();
+	await expect.poll(distanceFromBottom).toBeLessThanOrEqual(1);
+	await page.setViewportSize({ ...viewport, height: 352 });
+	await expect.poll(distanceFromBottom).toBeLessThanOrEqual(1);
+	await composer.fill(multilineDraft);
+	await expect.poll(distanceFromBottom).toBeLessThanOrEqual(1);
+	expect(await replyBottom()).toBeLessThan(await composerTop());
+
+	await composer.fill("");
+	await scroller.evaluate((element) => {
+		element.scrollTop = 48;
+	});
+	await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBe(48);
+	await composer.fill(multilineDraft);
+	expect(await scroller.evaluate((element) => element.scrollTop)).toBe(48);
+});
+
 test("wraps a long prompt and keeps a wide code block scrollable inside the transcript", async ({
 	page,
 }) => {
@@ -398,5 +456,7 @@ test("wraps a long prompt and keeps a wide code block scrollable inside the tran
 	const block = page.locator('[data-markdown="code-block"] pre');
 	await expect(block).toBeVisible();
 	await expect.poll(() => block.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
-	expect(await page.locator("main").evaluate((el) => el.scrollWidth - el.clientWidth)).toBe(0);
+	expect(
+		await page.locator(".chat-transcript").evaluate((el) => el.scrollWidth - el.clientWidth),
+	).toBe(0);
 });
