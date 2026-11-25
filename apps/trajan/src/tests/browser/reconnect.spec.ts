@@ -18,7 +18,7 @@ test.beforeEach(async ({ context, baseURL }) => {
 
 async function openChat(page: Page) {
 	await page.goto("/");
-	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
 	return page.getByRole("textbox", { name: "Message Trajan" });
 }
 
@@ -41,7 +41,7 @@ test("does not send while the initial snapshot is missing", async ({ page }) => 
 	await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
 	await expect.poll(() => deliver !== undefined).toBe(true);
 	deliver?.();
-	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
 	await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
 });
 
@@ -106,7 +106,7 @@ test("restores an interrupted stream into the chat without repeating the tool", 
 	await expect(transcript.getByText("Wrote", { exact: true })).toBeVisible();
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
-	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
 	await expect(transcript.getByText("Wrote", { exact: true })).toHaveCount(1);
 	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
 	await expect(transcript.getByText('Wrote "hello"', { exact: true })).toHaveCount(1);
@@ -161,7 +161,7 @@ test("shows live tool progress and the final answer after replaying a read-only 
 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
-	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Running/]);
 	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
 
@@ -180,7 +180,7 @@ test("restores compacted model context and completes exec after a restart", asyn
 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
-	await expect(page.getByText("Live", { exact: true })).toBeVisible();
+	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
 	await composer.fill("Recall the compacted reference and save it using exec.");
 	await composer.press("Enter");
 	await expect(transcript.getByText("Saved amber-heron-795.", { exact: true })).toBeVisible();
@@ -362,23 +362,28 @@ test("warns about a partial Code Mode outcome when a script fails after writing"
 	await expect(transcript.getByText('Wrote "writtenhello"', { exact: true })).toBeVisible();
 });
 
-test("keeps the transcript height and restores focus on a short iPhone viewport", async ({
+test("changes the theme without moving the transcript on a short iPhone viewport", async ({
 	page,
 }) => {
 	await page.setViewportSize({ ...devices["iPhone 17 Pro"].viewport, height: 352 });
 	await openChat(page);
-	const tools = page.getByRole("button", { name: "Tools", exact: true });
-	const dialog = page.getByRole("dialog", { name: "Tools" });
-	const close = dialog.getByRole("button", { name: "Close tools" });
+	const settings = page.getByRole("button", { name: "Chat settings" });
+	const menu = page.getByRole("menu");
+	const dark = menu.getByRole("menuitemradio", { name: "Dark" });
 	const transcript = page.locator("main");
 	const height = await transcript.evaluate((el) => el.clientHeight);
-	await tools.click();
-	await expect(dialog.getByText("exec", { exact: true })).toBeVisible();
+	await settings.press("Enter");
+	await expect(menu.getByRole("menuitemradio", { name: "Auto" })).toBeChecked();
 	expect(await transcript.evaluate((el) => el.clientHeight)).toBe(height);
-	await expect.poll(() => close.evaluate((el) => el.clientHeight)).toBeGreaterThanOrEqual(44);
-	await close.click();
-	await expect(dialog).toBeHidden();
-	await expect(tools).toBeFocused();
+	await expect.poll(() => dark.evaluate((el) => el.clientHeight)).toBeGreaterThanOrEqual(44);
+	await dark.press("Enter");
+	await expect(menu).toBeHidden();
+	await expect(settings).toBeFocused();
+	await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+
+	await page.reload();
+	await settings.click();
+	await expect(dark).toBeChecked();
 });
 
 test("wraps a long prompt and keeps a wide code block scrollable inside the transcript", async ({

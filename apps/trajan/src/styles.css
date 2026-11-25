@@ -58,8 +58,21 @@ body {
 }
 
 .chat-layout {
+	--chat-header-gap: 0.75rem;
+	--chat-header-height: 3.25rem;
+	--chat-transcript-top: calc(var(--chat-header-gap) + var(--chat-header-height) + 1rem);
 	padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
 		env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
+.chat-header {
+	top: calc(env(safe-area-inset-top, 0px) + var(--chat-header-gap));
+	right: env(safe-area-inset-right, 0px);
+	left: env(safe-area-inset-left, 0px);
+}
+
+.chat-transcript {
+	scroll-padding-top: calc(var(--chat-transcript-top) - 0.5rem);
 }
 
 @media (pointer: coarse) {
@@ -68,18 +81,13 @@ body {
 	}
 }
 
-.tools-dialog {
-	--tools-top-gap: max(1rem, env(safe-area-inset-top, 0px));
-	--tools-bottom-gap: max(1rem, env(safe-area-inset-bottom, 0px));
-	--tools-side-gap: max(1rem, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
-	top: var(--tools-top-gap);
-	max-height: calc(100dvh - var(--tools-top-gap) - var(--tools-bottom-gap));
-	max-width: calc(100% - var(--tools-side-gap) - var(--tools-side-gap));
-}
-
 @layer components {
 	.chat-button {
 		@apply inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg font-medium hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent;
+	}
+
+	.chat-header-surface {
+		@apply pointer-events-auto h-(--chat-header-height) rounded-full border border-line bg-surface/90 shadow-sm backdrop-blur-xl;
 	}
 
 	.chat-badge {

@@ -1,52 +1,65 @@
-import { Dialog } from "@base-ui/react/dialog";
+import { Menu } from "@base-ui/react/menu";
 import { useAtom } from "@effect/atom-react";
 import {
 	IconArrowShortUp,
 	IconArrowUpFill,
-	IconChevron,
+	IconCheck,
 	IconCircleCheck,
+	IconCircleEllipsis,
 	IconCircleX,
-	IconGear,
 	IconLoader,
 	IconSquircleFill,
-	IconX,
 } from "@pierre/icons/beta";
 import type { ToolActivity } from "@trajan/harness";
-import { Atom } from "effect/reactivity";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatMarkdown } from "./chat-markdown";
 import type { ChatEntry, ChatMessage, ChatPart } from "./chat-view";
-import type { ChatToolInfo } from "./chat/protocol";
 import { themePreference } from "./theme";
 import { useChatSession } from "./use-chat-session";
 import "./styles.css";
 
 /** How close to the bottom (px) still counts as "at the bottom". */
 const BOTTOM_THRESHOLD = 32;
-const toolsDialogOpenAtom = Atom.make<boolean>(false);
 
-function ThemeSwitcher() {
+function ChatSettingsMenu() {
 	const [mode, setMode] = useAtom(themePreference);
 
 	return (
-		<div className="relative">
-			<select
-				aria-label="Color theme"
-				className="h-11 w-21 cursor-pointer appearance-none rounded-md border border-line bg-control ps-3 pe-8 text-xs text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring"
-				value={mode}
-				onChange={(event) => setMode(event.currentTarget.value)}
+		<Menu.Root modal={false}>
+			<Menu.Trigger
+				aria-label="Chat settings"
+				className="chat-button chat-header-surface w-(--chat-header-height)"
 			>
-				<option value="auto">Auto</option>
-				<option value="light">Light</option>
-				<option value="dark">Dark</option>
-			</select>
-			<IconChevron
-				size={12}
-				aria-hidden="true"
-				className="pointer-events-none absolute end-2.5 top-1/2 -translate-y-1/2 text-muted"
-			/>
-		</div>
+				<IconCircleEllipsis size={24} aria-hidden="true" />
+			</Menu.Trigger>
+			<Menu.Portal>
+				<Menu.Positioner align="end" sideOffset={8} collisionPadding={12} className="z-20">
+					<Menu.Popup className="max-h-(--available-height) w-40 overflow-y-auto overscroll-contain rounded-xl border border-line bg-surface p-1 text-ink shadow-lg outline-none">
+						<Menu.RadioGroup value={mode} onValueChange={setMode}>
+							<Menu.GroupLabel className="px-3 pt-2 pb-1 text-xs font-medium text-muted">
+								Theme
+							</Menu.GroupLabel>
+							{Object.entries({ auto: "Auto", light: "Light", dark: "Dark" }).map(
+								([value, label]) => (
+									<Menu.RadioItem
+										key={value}
+										value={value}
+										closeOnClick
+										className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-lg px-3 text-sm outline-none data-highlighted:bg-hover"
+									>
+										{label}
+										<Menu.RadioItemIndicator className="text-accent">
+											<IconCheck aria-hidden="true" />
+										</Menu.RadioItemIndicator>
+									</Menu.RadioItem>
+								),
+							)}
+						</Menu.RadioGroup>
+					</Menu.Popup>
+				</Menu.Positioner>
+			</Menu.Portal>
+		</Menu.Root>
 	);
 }
 
@@ -256,49 +269,7 @@ function Message({ message, streaming = false }: { message: ChatMessage; streami
 	}
 }
 
-function ToolsDialog({
-	tools,
-	activeTools,
-}: {
-	tools: ReadonlyArray<typeof ChatToolInfo.Type>;
-	activeTools: ReadonlyArray<string>;
-}) {
-	return (
-		<Dialog.Portal>
-			<Dialog.Backdrop className="absolute inset-0 z-10 bg-black/40" />
-			<Dialog.Popup className="tools-dialog fixed left-1/2 z-20 flex w-96 -translate-x-1/2 flex-col overflow-hidden rounded-xl bg-surface shadow-lg ring ring-line">
-				<div className="flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-line px-4">
-					<Dialog.Title className="text-sm font-semibold">Tools</Dialog.Title>
-					<Dialog.Close className="chat-button size-11" aria-label="Close tools">
-						<IconX aria-hidden="true" />
-					</Dialog.Close>
-				</div>
-				<div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain p-3">
-					{tools.map((tool) => (
-						<div key={tool.name} className="rounded-lg bg-surface p-3 ring ring-line">
-							<div className="flex items-center gap-2">
-								{activeTools.includes(tool.name) ? (
-									<IconLoader
-										size={12}
-										aria-hidden="true"
-										className="text-accent motion-safe:animate-spin"
-									/>
-								) : (
-									<IconGear size={12} aria-hidden="true" className="text-muted" />
-								)}
-								<code className="text-xs font-semibold">{tool.name}</code>
-							</div>
-							<p className="mt-1 text-xs text-muted">{tool.description}</p>
-						</div>
-					))}
-				</div>
-			</Dialog.Popup>
-		</Dialog.Portal>
-	);
-}
-
 function App() {
-	const [toolsDialogOpen, setToolsDialogOpen] = useAtom(toolsDialogOpenAtom);
 	const endRef = useRef<HTMLDivElement>(null);
 	const scrollRef = useRef<HTMLElement>(null);
 	// Distance from the bottom to keep while earlier messages load above.
@@ -315,7 +286,6 @@ function App() {
 		live,
 		active,
 		activePrompt,
-		catalog,
 		queued,
 		requestError,
 		submission,
@@ -387,155 +357,153 @@ function App() {
 	const empty = synced && messages.length === 0 && !earlier && !running;
 	const connectionLabel = synced ? "Live" : status === "connecting" ? "Connecting" : "Reconnecting";
 	return (
-		<Dialog.Root open={toolsDialogOpen} onOpenChange={setToolsDialogOpen}>
-			<section
-				className="chat-layout flex h-dvh min-w-0 flex-col overflow-hidden bg-canvas text-ink"
-				aria-label="Chat"
-			>
-				<header className="shrink-0 border-b border-line bg-surface">
-					<div className="mx-auto flex min-h-15 max-w-3xl items-center justify-between gap-2 px-3 py-2 sm:px-5">
+		<section
+			className="chat-layout relative flex h-dvh min-w-0 flex-col overflow-hidden bg-canvas text-ink"
+			aria-label="Chat"
+		>
+			<header className="chat-header pointer-events-none absolute z-10">
+				<div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-5">
+					<div className="chat-header-surface flex items-center gap-2.5 px-4">
 						<h1 className="text-base font-semibold">Trajan</h1>
-						<div className="flex shrink-0 items-center gap-1 sm:gap-2">
-							<span className="chat-badge" data-tone={synced ? "success" : undefined}>
-								{connectionLabel}
-							</span>
-							<Dialog.Trigger className="chat-button size-11" aria-label="Tools">
-								<IconGear aria-hidden="true" />
-							</Dialog.Trigger>
-							<ThemeSwitcher />
-						</div>
+						<span role="status" className="chat-badge" data-tone={synced ? "success" : undefined}>
+							{connectionLabel}
+						</span>
 					</div>
-				</header>
+					<ChatSettingsMenu />
+				</div>
+			</header>
 
-				<main ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
-					<div className="mx-auto max-w-3xl space-y-5 px-5 py-6">
-						{empty ? (
-							<h2 className="py-10 text-center text-sm font-semibold sm:py-16">
-								What can I help with?
-							</h2>
-						) : null}
+			<main
+				ref={scrollRef}
+				onScroll={onScroll}
+				className="chat-transcript min-h-0 flex-1 overflow-y-auto"
+			>
+				<div className="mx-auto max-w-3xl space-y-5 px-5 pt-(--chat-transcript-top) pb-6">
+					{empty ? (
+						<h2 className="py-10 text-center text-sm font-semibold sm:py-16">
+							What can I help with?
+						</h2>
+					) : null}
 
-						{earlier ? (
-							<div className="flex justify-center">
-								<button
-									type="button"
-									className="chat-button min-h-11 px-3 text-xs"
-									disabled={loading || !synced}
-									aria-busy={loading}
-									onClick={showEarlier}
-								>
-									{loading ? (
-										<IconLoader size={12} aria-hidden="true" className="motion-safe:animate-spin" />
-									) : (
-										<IconArrowShortUp size={12} aria-hidden="true" />
-									)}
-									Load earlier messages
-								</button>
-							</div>
-						) : null}
-
-						{messages.map((message) => (
-							<Message key={message.id} message={message} />
-						))}
-						{activePrompt ? <Message message={activePrompt} /> : null}
-						{live ? <Message message={live} streaming /> : null}
-
-						{running && !live ? (
-							<div className="w-fit max-w-full space-y-2 rounded-xl bg-surface px-4 py-3 ring ring-line">
-								<div className="flex items-center gap-2 text-sm text-muted">
-									<IconLoader aria-hidden="true" className="motion-safe:animate-spin" />
-									{active?.state === "stopping"
-										? "Stopping"
-										: runningTools.length > 0
-											? `Running ${runningTools.join(", ")}`
-											: "Waiting for the model"}
-								</div>
-								{toolActivity.length > 0 ? <ToolActivityList activity={toolActivity} /> : null}
-							</div>
-						) : null}
-
-						{queued > 0 ? (
-							<p className="text-xs text-muted">{queued} queued behind this run</p>
-						) : null}
-
-						<div ref={endRef} />
-					</div>
-				</main>
-
-				<div className="shrink-0 border-t border-line bg-surface">
-					{submission?.status === "unconfirmed" ? (
-						<div className="mx-auto flex max-w-3xl items-center gap-3 px-5 pt-3">
-							<p role="status" className="flex-1 truncate text-sm text-muted">
-								Couldn’t confirm delivery of “{submission.draft.text}”.
-							</p>
+					{earlier ? (
+						<div className="flex justify-center">
 							<button
 								type="button"
-								className="chat-button min-h-11 bg-control px-3 text-xs"
-								disabled={!synced}
-								onClick={() => retrySubmit(submission.id)}
+								className="chat-button min-h-11 px-3 text-xs"
+								disabled={loading || !synced}
+								aria-busy={loading}
+								onClick={showEarlier}
 							>
-								Retry sending
+								{loading ? (
+									<IconLoader size={12} aria-hidden="true" className="motion-safe:animate-spin" />
+								) : (
+									<IconArrowShortUp size={12} aria-hidden="true" />
+								)}
+								Load earlier messages
 							</button>
 						</div>
 					) : null}
-					{submission?.status === "rejected" ? (
-						<p role="alert" className="mx-auto max-w-3xl px-5 pt-3 text-sm text-danger">
-							{submission.message}
-						</p>
-					) : null}
-					{requestError ? (
-						<p role="alert" className="mx-auto max-w-3xl px-5 pt-3 text-sm text-danger">
-							{requestError}
-						</p>
-					) : null}
-					<form
-						aria-busy={submitting}
-						onSubmit={(event) => {
-							event.preventDefault();
-							submit();
-						}}
-						className="mx-auto max-w-3xl px-5 py-3 sm:py-4"
-					>
-						<div className="flex items-end gap-3 rounded-xl border border-line bg-surface p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-focus-ring">
-							<textarea
-								value={prompt}
-								onChange={(event) => setPrompt(event.currentTarget.value)}
-								onKeyDown={(event) => {
-									if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-										event.preventDefault();
-										submit();
-									}
-								}}
-								placeholder={running ? "Add a follow-up" : "Message Trajan"}
-								aria-label="Message Trajan"
-								rows={2}
-								className="chat-composer min-w-0 flex-1 resize-none bg-transparent px-2 py-1 text-sm leading-6 outline-none placeholder:text-muted"
-							/>
-							{running ? (
-								<button
-									type="button"
-									aria-label="Stop"
-									disabled={!synced || active?.state === "stopping"}
-									className="chat-button mb-0.5 size-11 bg-control"
-									onClick={stop}
-								>
-									<IconSquircleFill size={12} aria-hidden="true" />
-								</button>
-							) : null}
-							<button
-								type="submit"
-								aria-label={running ? "Queue follow-up" : "Send message"}
-								disabled={!canSubmit}
-								className="chat-button send-button mb-0.5 size-11"
-							>
-								<IconArrowUpFill aria-hidden="true" />
-							</button>
+
+					{messages.map((message) => (
+						<Message key={message.id} message={message} />
+					))}
+					{activePrompt ? <Message message={activePrompt} /> : null}
+					{live ? <Message message={live} streaming /> : null}
+
+					{running && !live ? (
+						<div className="w-fit max-w-full space-y-2 rounded-xl bg-surface px-4 py-3 ring ring-line">
+							<div className="flex items-center gap-2 text-sm text-muted">
+								<IconLoader aria-hidden="true" className="motion-safe:animate-spin" />
+								{active?.state === "stopping"
+									? "Stopping"
+									: runningTools.length > 0
+										? `Running ${runningTools.join(", ")}`
+										: "Waiting for the model"}
+							</div>
+							{toolActivity.length > 0 ? <ToolActivityList activity={toolActivity} /> : null}
 						</div>
-					</form>
+					) : null}
+
+					{queued > 0 ? (
+						<p className="text-xs text-muted">{queued} queued behind this run</p>
+					) : null}
+
+					<div ref={endRef} />
 				</div>
-			</section>
-			<ToolsDialog tools={catalog} activeTools={runningTools} />
-		</Dialog.Root>
+			</main>
+
+			<div className="shrink-0 border-t border-line bg-surface">
+				{submission?.status === "unconfirmed" ? (
+					<div className="mx-auto flex max-w-3xl items-center gap-3 px-5 pt-3">
+						<p role="status" className="flex-1 truncate text-sm text-muted">
+							Couldn’t confirm delivery of “{submission.draft.text}”.
+						</p>
+						<button
+							type="button"
+							className="chat-button min-h-11 bg-control px-3 text-xs"
+							disabled={!synced}
+							onClick={() => retrySubmit(submission.id)}
+						>
+							Retry sending
+						</button>
+					</div>
+				) : null}
+				{submission?.status === "rejected" ? (
+					<p role="alert" className="mx-auto max-w-3xl px-5 pt-3 text-sm text-danger">
+						{submission.message}
+					</p>
+				) : null}
+				{requestError ? (
+					<p role="alert" className="mx-auto max-w-3xl px-5 pt-3 text-sm text-danger">
+						{requestError}
+					</p>
+				) : null}
+				<form
+					aria-busy={submitting}
+					onSubmit={(event) => {
+						event.preventDefault();
+						submit();
+					}}
+					className="mx-auto max-w-3xl px-5 py-3 sm:py-4"
+				>
+					<div className="flex items-end gap-3 rounded-xl border border-line bg-surface p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-focus-ring">
+						<textarea
+							value={prompt}
+							onChange={(event) => setPrompt(event.currentTarget.value)}
+							onKeyDown={(event) => {
+								if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+									event.preventDefault();
+									submit();
+								}
+							}}
+							placeholder={running ? "Add a follow-up" : "Message Trajan"}
+							aria-label="Message Trajan"
+							rows={2}
+							className="chat-composer min-w-0 flex-1 resize-none bg-transparent px-2 py-1 text-sm leading-6 outline-none placeholder:text-muted"
+						/>
+						{running ? (
+							<button
+								type="button"
+								aria-label="Stop"
+								disabled={!synced || active?.state === "stopping"}
+								className="chat-button mb-0.5 size-11 bg-control"
+								onClick={stop}
+							>
+								<IconSquircleFill size={12} aria-hidden="true" />
+							</button>
+						) : null}
+						<button
+							type="submit"
+							aria-label={running ? "Queue follow-up" : "Send message"}
+							disabled={!canSubmit}
+							className="chat-button send-button mb-0.5 size-11"
+						>
+							<IconArrowUpFill aria-hidden="true" />
+						</button>
+					</div>
+				</form>
+			</div>
+		</section>
 	);
 }
 
