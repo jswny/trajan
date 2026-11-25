@@ -286,6 +286,40 @@ export default async function () {
 	});
 });
 
+test("allows Git initialization with missing metadata and rejects symlinked paths", async () => {
+	const stub = openFixture();
+	await stub.seedGitPathLinks();
+	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));
+	const code = `
+import { init, status } from "codemode:git";
+export default async function () {
+  await init({ dir: "repo" });
+  await status({ dir: "repo" });
+  const errors = [];
+  for (const dir of ["linked-dir", "linked-metadata"]) {
+    try { await status({ dir }); }
+    catch (error) {
+      if (error.code !== "failed") throw error;
+      errors.push(error.message);
+    }
+  }
+  return errors;
+}`;
+	expect(decode(await stub.workspaceTool("exec", { code }))).toMatchObject({
+		status: "completed",
+		output: [
+			"Git directories cannot traverse a symbolic link.",
+			"Git directories cannot traverse a symbolic link.",
+		],
+		activity: [
+			{ name: "git.init", status: "completed" },
+			{ name: "git.status", status: "completed" },
+			{ name: "git.status", status: "failed" },
+			{ name: "git.status", status: "failed" },
+		],
+	});
+});
+
 test("restores native compaction across a reset and pairs the resumed exec with its result", async () => {
 	let stub = openFixture();
 	const first = await submit(stub, { id: "compact-first", prompt: compactSetupPrompt });

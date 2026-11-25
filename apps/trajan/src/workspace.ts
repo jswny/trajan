@@ -33,10 +33,13 @@ const depth = Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0)));
 function workspaceGit(workspace: Workspace) {
 	const git = workspace.git;
 
-	async function confinedDirectory(input: string | undefined, signal: AbortSignal) {
+	const confinedDirectory = Effect.fnUntraced(function* (
+		input: string | undefined,
+		signal: AbortSignal,
+	) {
 		const dir = resolve(root, input ?? ".");
 		if (dir !== root && !dir.startsWith(root + "/")) {
-			throw new Error("Git directory must be inside /workspace.");
+			return yield* new CodeModeError({ message: "Git directory must be inside /workspace." });
 		}
 		let path = root;
 		for (const segment of [
@@ -47,25 +50,30 @@ function workspaceGit(workspace: Workspace) {
 				.filter(Boolean),
 			".git",
 		]) {
-			signal.throwIfAborted();
+			if (signal.aborted) {
+				return yield* codeModeError(signal.reason);
+			}
 			if (segment) {
 				path += "/" + segment;
 			}
-			const info = await workspace.fs.lstat(path).catch((error: unknown) => {
-				if (Predicate.hasProperty(error, "code") && error.code === "ENOENT") {
-					return null;
-				}
-				throw error;
-			});
+			const info = yield* Effect.tryPromise(() => workspace.fs.lstat(path)).pipe(
+				Effect.catch(({ cause }) =>
+					Predicate.hasProperty(cause, "code") && cause.code === "ENOENT"
+						? Effect.succeed(null)
+						: Effect.fail(codeModeError(cause)),
+				),
+			);
 			if (!info) {
 				break;
 			}
 			if (info.isSymbolicLink) {
-				throw new Error("Git directories cannot traverse a symbolic link.");
+				return yield* new CodeModeError({
+					message: "Git directories cannot traverse a symbolic link.",
+				});
 			}
 		}
 		return dir;
-	}
+	});
 
 	function operation<A extends { readonly dir?: string }, B>(
 		replay: CodeModeTool["replay"],
@@ -75,20 +83,21 @@ function workspaceGit(workspace: Workspace) {
 		return {
 			replay,
 			schema,
-			run: Effect.fnUntraced(function* (
-				input: Schema.Json,
-				{ signal }: Parameters<CodeModeTool["run"]>[1],
-			) {
-				const args = yield* Schema.decodeUnknownEffect(schema)(input ?? {});
-				return yield* Effect.tryPromise({
-					try: async () => {
-						const dir = await confinedDirectory(args.dir, signal);
-						signal.throwIfAborted();
-						return (await call({ ...args, dir })) ?? null;
-					},
-					catch: codeModeError,
-				}).pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.Json)));
-			}, Effect.mapError(codeModeError)),
+			run: Effect.fnUntraced(
+				function* (input: Schema.Json, { signal }: Parameters<CodeModeTool["run"]>[1]) {
+					const args = yield* Schema.decodeUnknownEffect(schema)(input ?? {});
+					const dir = yield* confinedDirectory(args.dir, signal);
+					const value = yield* Effect.tryPromise({
+						try: () => {
+							signal.throwIfAborted();
+							return call({ ...args, dir });
+						},
+						catch: codeModeError,
+					});
+					return yield* Schema.decodeUnknownEffect(Schema.Json)(value ?? null);
+				},
+				Effect.catchTag("SchemaError", (error) => Effect.fail(codeModeError(error))),
+			),
 		} satisfies CodeModeTool & { readonly schema: Schema.Constraint };
 	}
 

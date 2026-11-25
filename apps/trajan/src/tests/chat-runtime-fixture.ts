@@ -550,6 +550,14 @@ export default async function () {
 		return { instance: this.#instance, ...this.#codeMode.state() };
 	}
 
+	async seedGitPathLinks() {
+		const { fs } = this.#workspace;
+		await fs.mkdir("/workspace/repo", { recursive: true });
+		await fs.mkdir("/workspace/linked-metadata", { recursive: true });
+		await fs.symlink("repo", "/workspace/linked-dir");
+		await fs.symlink("../repo/.git", "/workspace/linked-metadata/.git");
+	}
+
 	workspaceTool(name: string, input: Schema.Json, recovering = false): Promise<string> {
 		const runId = crypto.randomUUID();
 		const tools = createChatTools(
