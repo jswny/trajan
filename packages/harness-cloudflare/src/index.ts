@@ -127,6 +127,10 @@ export abstract class CloudflareHarness<
 	readonly lifecycle = Lifecycle.install(this).use(this.#tasks);
 	readonly #start = lifecycleEffect("start lifecycle", () => this.lifecycle.start());
 
+	#getTask(runId: string) {
+		return lifecycleEffect("get turn task", () => this.#tasks.handle(turnDefinition).get(runId));
+	}
+
 	onStart() {
 		this.#conversation.initialize();
 		this.onStateChange?.();
@@ -155,9 +159,7 @@ export abstract class CloudflareHarness<
 		}
 		const runId = head.run_id;
 		yield* Effect.annotateCurrentSpan("runId", runId);
-		const task = yield* lifecycleEffect("get turn task", () =>
-			this.#tasks.handle(turnDefinition).get(runId),
-		);
+		const task = yield* this.#getTask(runId);
 		if (head.state === "stopping") {
 			if (
 				task &&
@@ -300,29 +302,38 @@ export abstract class CloudflareHarness<
 		return Effect.runPromise(this.stopEffect(runId));
 	}
 
-	async turn(runId: string) {
-		await this.lifecycle.start();
-		const turn = this.#conversation.turn(runId);
-		if (turn.state !== "failed") {
-			return { ...turn, failure: null };
-		}
-		// Tasks already retains the error name. Keep the transcript database's format.
-		const task = await this.#tasks.handle(turnDefinition).get(runId);
-		const code =
-			task?.state === "failed"
-				? failureCode(task.error.name)
-				: task?.state === "cancelled"
-					? "cancelled"
-					: "execution";
-		return { ...turn, failure: { code, message: turn.error ?? "The turn failed." } };
+	turn(runId: string) {
+		return Effect.runPromise(
+			Effect.gen({ self: this }, function* () {
+				yield* this.#start;
+				const turn = yield* conversationEffect("read turn", () => this.#conversation.turn(runId));
+				if (turn.state !== "failed") {
+					return { ...turn, failure: null };
+				}
+				// Tasks already retains the error name. Keep the transcript database's format.
+				const task = yield* this.#getTask(runId);
+				const code =
+					task?.state === "failed"
+						? failureCode(task.error.name)
+						: task?.state === "cancelled"
+							? "cancelled"
+							: "execution";
+				return { ...turn, failure: { code, message: turn.error ?? "The turn failed." } };
+			}),
+		);
 	}
 
-	async history(query: HistoryQuery) {
-		await this.lifecycle.start();
-		return this.#conversation.history(query);
+	history(query: HistoryQuery) {
+		return Effect.runPromise(
+			this.#start.pipe(
+				Effect.andThen(conversationEffect("read history", () => this.#conversation.history(query))),
+			),
+		);
 	}
 
-	async taskState(runId: string) {
-		return (await this.#tasks.handle(turnDefinition).get(runId))?.state ?? "missing";
+	taskState(runId: string) {
+		return Effect.runPromise(
+			this.#getTask(runId).pipe(Effect.map((task) => task?.state ?? "missing")),
+		);
 	}
 }
