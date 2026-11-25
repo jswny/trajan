@@ -4,8 +4,14 @@ import { CloudflareHarness } from "@trajan/harness-cloudflare";
 import { WebSockets } from "agents/websockets";
 import { Schema } from "effect";
 import { TurnSchedules } from "../turn-schedules";
-import { ChatEvent, ChatHistoryQuery, ChatPath, ChatStop } from "./protocol";
-import type { BrowserWatch, ChatPreview, ChatSnapshot, ChatToolInfo } from "./protocol";
+import { ChatEvent, ChatHistoryQuery, ChatPath, ChatStop, updateToolPreview } from "./protocol";
+import type {
+	BrowserWatch,
+	ChatPreview,
+	ChatSnapshot,
+	ChatToolInfo,
+	ChatToolPreview,
+} from "./protocol";
 import { clearToolState } from "./tool-activity";
 
 const chatEventJson = Schema.encodeSync(Schema.fromJsonString(ChatEvent));
@@ -61,27 +67,36 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 	}
 
 	protected override onProgress(runId: string, event: TurnProgress) {
+		const draft = this.#draft?.runId === runId ? this.#draft : { runId, text: "", tools: [] };
 		switch (event.type) {
-			case "reset":
-			case "tool": {
-				const tool = event.type === "tool" ? event.name : null;
-				this.#draft = { runId, text: "", tool, activity: [] };
-				this.#broadcast({ type: "preview", ...this.#draft });
+			case "reset": {
+				this.#draft = { ...draft, text: "" };
+				this.#broadcast({ type: "reset", runId });
 				break;
 			}
-			case "tool-activity":
-				if (this.#draft?.runId === runId && this.#draft.tool !== null) {
-					this.#draft = { ...this.#draft, activity: event.activity };
-					this.#broadcast({ type: "preview", ...this.#draft });
+			case "tool":
+				this.#publishTool(draft, { call: event.call, activity: [] });
+				break;
+			case "tool-activity": {
+				const tool = draft.tools.find(({ call }) => call.id === event.callId);
+				if (tool && !tool.result) {
+					this.#publishTool(draft, { ...tool, activity: event.activity });
 				}
+				break;
+			}
+			case "tool-result":
+				this.#publishTool(draft, { call: event.call, activity: [], result: event.result });
 				break;
 			case "text-delta":
-				if (this.#draft?.runId === runId) {
-					this.#draft = { ...this.#draft, text: this.#draft.text + event.text };
-					this.#broadcast({ ...event, runId });
-				}
+				this.#draft = { ...draft, text: draft.text + event.text };
+				this.#broadcast({ ...event, runId });
 				break;
 		}
+	}
+
+	#publishTool(draft: typeof ChatPreview.Type, tool: typeof ChatToolPreview.Type) {
+		this.#draft = updateToolPreview(draft, tool);
+		this.#broadcast({ type: "tool", runId: draft.runId, tool });
 	}
 
 	#snapshot(): typeof ChatSnapshot.Type {

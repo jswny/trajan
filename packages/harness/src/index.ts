@@ -15,7 +15,7 @@ const Reply = Schema.Struct({
 	text: Schema.NonEmptyString,
 });
 
-const ToolCall = Schema.Struct({
+export const ToolCall = Schema.Struct({
 	role: Schema.Literal("tool-call"),
 	id: Schema.NonEmptyString,
 	name: Schema.NonEmptyString,
@@ -168,8 +168,9 @@ export type TurnModelEvent =
 export type TurnProgress =
 	| Extract<TurnModelEvent, { type: "text-delta" }>
 	| { type: "reset" }
-	| { type: "tool"; name: string }
-	| { type: "tool-activity"; activity: ReadonlyArray<typeof ToolActivity.Type> };
+	| { type: "tool"; call: typeof ToolCall.Type }
+	| { type: "tool-activity"; callId: string; activity: ReadonlyArray<typeof ToolActivity.Type> }
+	| { type: "tool-result"; call: typeof ToolCall.Type; result: typeof ToolResult.Type };
 
 export class TurnTools extends Context.Service<
 	TurnTools,
@@ -236,12 +237,15 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 
 		const { continuation: _continuation, ...call } = decision;
 		const result = yield* journal.checkpoint(`tool:${index}`, ToolResult, (attempt) =>
-			publish({ type: "tool", name: call.name }).pipe(
+			publish({ type: "tool", call }).pipe(
 				Effect.andThen(
-					tools.execute(call, attempt, (activity) => publish({ type: "tool-activity", activity })),
+					tools.execute(call, attempt, (activity) =>
+						publish({ type: "tool-activity", callId: call.id, activity }),
+					),
 				),
 			),
 		);
+		yield* publish({ type: "tool-result", call, result });
 		history.push(decision, { role: "tool", callId: call.id, result });
 	}
 });

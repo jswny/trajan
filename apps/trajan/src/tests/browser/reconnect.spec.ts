@@ -22,6 +22,10 @@ async function openChat(page: Page) {
 	return page.getByRole("textbox", { name: "Message Trajan" });
 }
 
+function toolCards(page: Page) {
+	return page.getByRole("main").locator(":scope > details");
+}
+
 test("does not send while the initial snapshot is missing", async ({ page }) => {
 	let deliver: (() => void) | undefined;
 	await page.routeWebSocket("**/api/chat/live", (client) => {
@@ -139,11 +143,13 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	await composer.fill("Interrupt after writing.");
 	await composer.press("Enter");
 	await expect(page.getByText("Running exec", { exact: true })).toBeVisible();
+	await toolCards(page).last().locator(":scope > summary").click();
 	const activity = page.getByRole("list", { name: "Recent tool calls" });
 	await expect(activity.getByRole("listitem").filter({ hasText: /write.*Succeeded/ })).toHaveCount(
 		1,
 	);
 	await page.reload();
+	await toolCards(page).last().locator(":scope > summary").click();
 	await expect(activity.getByRole("listitem").filter({ hasText: /write.*Succeeded/ })).toHaveCount(
 		1,
 	);
@@ -158,8 +164,6 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	const transcript = page.getByRole("main");
 	await expect(transcript.getByText('Wrote "once"', { exact: true })).toHaveCount(1);
-	await expect(activity).toBeHidden();
-	await transcript.getByText("Done", { exact: true }).click();
 	await expect(activity.getByRole("listitem").filter({ hasText: /write.*Succeeded/ })).toHaveCount(
 		1,
 	);
@@ -168,26 +172,70 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	await expect(transcript.getByText('Wrote "oncehello"', { exact: true })).toBeVisible();
 });
 
-test("shows live tool progress and the final answer after replaying a read-only exec", async ({
-	page,
-}) => {
+test("keeps the same tool card open through recovery, streaming, and commit", async ({ page }) => {
 	const composer = await openChat(page);
 	expect((await page.request.post(`${control}/pause-replay`)).status()).toBe(204);
 	await composer.fill("Replay two reads.");
 	await composer.press("Enter");
-	const calls = page.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
+	const card = toolCards(page).last();
+	const summary = card.locator(":scope > summary");
+	const calls = card.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
+	await summary.click();
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Running/]);
 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
 	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
+	await summary.click();
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Running/]);
+	const pending = calls.last();
+	await pending.locator("summary").click();
+	await expect(pending.getByText("Arguments", { exact: true })).toBeVisible();
+	await expect(pending.getByText("Result", { exact: true })).toHaveCount(0);
+	expect((await page.request.post(`${control}/pause`)).status()).toBe(204);
+	await expect(page.getByText("Responding", { exact: true })).toBeVisible();
+	await expect(summary).toContainText("Done");
+	await expect(pending.locator("pre").last()).toHaveText("second");
+	await expect(card).toHaveAttribute("open");
+	await expect(pending.locator("details")).toHaveAttribute("open");
 	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
 
 	const transcript = page.getByRole("main");
 	await expect(transcript.getByText('Read ["first","second"]', { exact: true })).toHaveCount(1);
-	await transcript.getByText("Done", { exact: true }).click();
+	await expect(toolCards(page)).toHaveCount(1);
+	await expect(card).toHaveAttribute("open");
+	await expect(pending.locator("details")).toHaveAttribute("open");
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Succeeded/]);
+});
+
+test("keeps completed exec cards visible while the model starts another tool", async ({ page }) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/pause-between-tools`)).status()).toBe(204);
+	await composer.fill("Append hello, then world.");
+	await composer.press("Enter");
+	const cards = toolCards(page);
+	const first = cards.first();
+	await expect(first.locator(":scope > summary")).toHaveText("execDone");
+	await expect(page.getByText("Waiting for the model", { exact: true })).toBeVisible();
+	await expect(cards).toHaveCount(1);
+	await first.locator(":scope > summary").click();
+	await expect(first.locator("pre").first()).toHaveText('"hello"');
+
+	expect((await page.request.post(`${control}/pause`)).status()).toBe(204);
+	await expect(page.getByText("Responding", { exact: true })).toBeVisible();
+	await expect(cards).toHaveCount(2);
+	await expect(first).toHaveAttribute("open");
+	await expect(cards.last().locator(":scope > summary")).toHaveText("execDone");
+	await cards.last().locator(":scope > summary").click();
+	await expect(cards.last().locator("pre").first()).toHaveText('"hello world"');
+
+	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
+	await expect(
+		page.getByRole("main").getByText('Wrote "hello world"', { exact: true }),
+	).toBeVisible();
+	await expect(cards).toHaveCount(2);
+	await expect(first).toHaveAttribute("open");
+	await expect(cards.last()).toHaveAttribute("open");
 });
 
 test("restores compacted model context and completes exec after a restart", async ({ page }) => {
@@ -212,6 +260,7 @@ test("replays time and randomness when reopening a file after a restart", async 
 	expect((await page.request.post(`${control}/pause-replay`)).status()).toBe(204);
 	await composer.fill("Recover a file named with time and randomness.");
 	await composer.press("Enter");
+	await toolCards(page).last().locator(":scope > summary").click();
 	const calls = page.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
 	await expect(calls).toHaveText([
 		/runtime\.now.*Succeeded/,
@@ -223,6 +272,7 @@ test("replays time and randomness when reopening a file after a restart", async 
 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
+	await toolCards(page).last().locator(":scope > summary").click();
 	await expect(calls.last()).toHaveText(/read_second.*Running/);
 	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
 
@@ -230,7 +280,6 @@ test("replays time and randomness when reopening a file after a restart", async 
 	await expect(transcript.getByText(/^Wrote "\/workspace\/\d+-[a-f0-9-]{36}\.txt"$/)).toHaveCount(
 		1,
 	);
-	await transcript.getByText("Done", { exact: true }).click();
 	await expect(calls.last()).toHaveText(/^read.*Succeeded/);
 });
 
@@ -241,6 +290,7 @@ test("replay shows the interrupted stock edit and finishes without editing the f
 	expect((await page.request.post(`${control}/pause-replay-edit`)).status()).toBe(204);
 	await composer.fill("Recover an interrupted edit.");
 	await composer.press("Enter");
+	await toolCards(page).last().locator(":scope > summary").click();
 	const calls = page.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
 	await expect(calls.last()).toHaveText(/edit.*Running/);
 

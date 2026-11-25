@@ -1,4 +1,4 @@
-import { ToolActivity, TurnMessage } from "@trajan/harness";
+import { ToolActivity, ToolCall, ToolResult, TurnMessage } from "@trajan/harness";
 import { Schema } from "effect";
 
 export const ChatPath = "/api/chat";
@@ -64,12 +64,33 @@ export const ChatReceipt = Schema.Union([
 ]);
 export const ChatStopReceipt = Schema.Struct({ runId: RunId, stopped: Schema.Boolean });
 
+export const ChatToolPreview = Schema.Struct({
+	call: ToolCall,
+	activity: Schema.Array(ToolActivity),
+	result: Schema.optionalKey(ToolResult),
+});
 export const ChatPreview = Schema.Struct({
 	runId: RunId,
 	text: Schema.String,
-	tool: Schema.NullOr(Schema.NonEmptyString),
-	activity: Schema.Array(ToolActivity),
+	tools: Schema.Array(ChatToolPreview),
 });
+
+export function updateToolPreview(
+	preview: typeof ChatPreview.Type,
+	tool: typeof ChatToolPreview.Type,
+): typeof ChatPreview.Type {
+	const existing = preview.tools.find(({ call }) => call.id === tool.call.id);
+	if (!existing) {
+		return { ...preview, text: "", tools: [...preview.tools, tool] };
+	}
+	if (
+		!tool.result &&
+		(existing.result || (tool.activity.length === 0 && existing.activity.length > 0))
+	) {
+		return preview;
+	}
+	return { ...preview, tools: preview.tools.map((entry) => (entry === existing ? tool : entry)) };
+}
 export const ChatToolInfo = Schema.Struct({ name: Schema.String, description: Schema.String });
 export const BrowserWatch = Schema.NullOr(
 	Schema.Struct({
@@ -96,7 +117,8 @@ export const ChatSnapshot = Schema.Struct({
 export const ChatEvent = Schema.Union([
 	ChatSnapshot,
 	Schema.Struct({ type: Schema.Literal("browser"), browserWatch: BrowserWatch }),
-	Schema.Struct({ type: Schema.Literal("preview"), ...ChatPreview.fields }),
+	Schema.Struct({ type: Schema.Literal("reset"), runId: RunId }),
+	Schema.Struct({ type: Schema.Literal("tool"), runId: RunId, tool: ChatToolPreview }),
 	Schema.Struct({
 		type: Schema.Literal("text-delta"),
 		runId: RunId,

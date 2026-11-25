@@ -3,7 +3,7 @@ import { Clock, Effect, Stream } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { ChatSession, INITIAL_CHAT } from "./chat-session";
 import type { ChatCommand, PromptDraft } from "./chat-session";
-import { chatMessages, chatText } from "./chat-view";
+import { chatMessages, chatText, chatTool } from "./chat-view";
 
 const draftAtom = Atom.make<PromptDraft>({ text: "" }).pipe(Atom.keepAlive);
 const sessionAtom = Atom.make(({ registry }) =>
@@ -28,6 +28,24 @@ const entriesAtom = Atom.make(
 		INITIAL_CHAT.page.entries,
 );
 const messagesAtom = Atom.make((get) => chatMessages(get(entriesAtom)));
+const activeTurnAtom = Atom.make(
+	(get) => AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.active ?? null,
+);
+const toolPreviewsAtom = Atom.make(
+	(get) => AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.preview?.tools,
+);
+const activeMessagesAtom = Atom.make((get) => {
+	const active = get(activeTurnAtom);
+	return active
+		? [
+				chatText(`user:${active.submissionId}`, "user", active.prompt),
+				...(get(toolPreviewsAtom) ?? []).map(({ call, result, activity }) =>
+					chatTool(active.submissionId, call.id, call, result, activity),
+				),
+			]
+		: [];
+});
+const timelineAtom = Atom.make((get) => [...get(messagesAtom), ...get(activeMessagesAtom)]);
 const browserWatchAtom = Atom.make(
 	(get) => AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.browserWatch ?? null,
 );
@@ -54,7 +72,7 @@ export function useChatSession() {
 	const session = AsyncResult.getOrElse(useAtomValue(sessionAtom), () => undefined);
 	const state = session?.state ?? INITIAL_CHAT;
 	const [draft, setDraft] = useAtom(draftAtom);
-	const messages = useAtomValue(messagesAtom);
+	const messages = useAtomValue(timelineAtom);
 	const submitting = state.submission?.status === "pending";
 	const canSubmit =
 		state.status === "open" &&
@@ -67,9 +85,6 @@ export function useChatSession() {
 		...state,
 		messages,
 		earlier: state.page.nextBefore !== null,
-		activePrompt: state.active
-			? chatText(state.active.submissionId, "user", state.active.prompt)
-			: null,
 		live: state.preview?.text
 			? chatText(state.preview.runId, "assistant", state.preview.text)
 			: null,

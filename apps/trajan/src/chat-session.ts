@@ -1,6 +1,13 @@
 import { Context, Effect, Layer, Queue, Schedule, Schema, SubscriptionRef } from "effect";
 import { Socket } from "effect/socket";
-import { ChatEvent, ChatPage, ChatPath, ChatReceipt, ChatStopReceipt } from "./chat/protocol";
+import {
+	ChatEvent,
+	ChatPage,
+	ChatPath,
+	ChatReceipt,
+	ChatStopReceipt,
+	updateToolPreview,
+} from "./chat/protocol";
 import type { ChatSnapshot } from "./chat/protocol";
 
 export type PromptDraft = { readonly text: string };
@@ -89,10 +96,40 @@ export function mergeChatPage(
 
 export function receiveChatEvent(state: ChatState, event: typeof ChatEvent.Type): ChatState {
 	switch (event.type) {
-		case "snapshot":
-			return { ...state, ...event, status: "open", page: mergeChatPage(state.page, event.page) };
-		case "preview":
-			return state.active?.runId === event.runId ? { ...state, preview: event } : state;
+		case "snapshot": {
+			const previous = state.preview?.runId === event.active?.runId ? state.preview : null;
+			const preview =
+				previous && event.preview
+					? {
+							...event.preview.tools.reduce(updateToolPreview, previous),
+							text: event.preview.text,
+						}
+					: (event.preview ?? (previous && { ...previous, text: "" }));
+			return {
+				...state,
+				...event,
+				status: "open",
+				page: mergeChatPage(state.page, event.page),
+				preview,
+			};
+		}
+		case "reset":
+		case "tool": {
+			if (state.active?.runId !== event.runId) {
+				return state;
+			}
+			const preview =
+				state.preview?.runId === event.runId
+					? state.preview
+					: { runId: event.runId, text: "", tools: [] };
+			return {
+				...state,
+				preview:
+					event.type === "reset"
+						? { ...preview, text: "" }
+						: updateToolPreview(preview, event.tool),
+			};
+		}
 		case "browser":
 			return { ...state, browserWatch: event.browserWatch };
 		case "text-delta":

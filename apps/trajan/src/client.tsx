@@ -68,14 +68,14 @@ const toolResultLabel = { completed: "Done", failed: "Failed", unknown: "Outcome
 
 function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => void }) {
 	const [open, setOpen] = useState(false);
-	const { input, name, result } = message;
+	const { input, name, result, activity } = message;
 	const text = result?.content
 		.filter((part) => part.type === "text")
 		.map((part) => part.text)
 		.join("\n");
 	const images = result?.content.filter((part) => part.type === "image") ?? [];
-	const activity = result?.activity ?? [];
 	const failed = result?.status === "failed" || result?.status === "unknown";
+	const step = !result && activity.at(-1);
 	return (
 		<details
 			className="group rounded-(--chat-surface-radius) border border-line bg-surface"
@@ -85,9 +85,12 @@ function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => 
 				className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-(--chat-surface-radius) px-3 py-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus-ring [&::-webkit-details-marker]:hidden"
 				onClick={onInspect}
 			>
-				<span className="min-w-0 flex-1 truncate text-xs font-semibold">{name}</span>
+				<span className="flex min-w-0 flex-1 items-center gap-2 text-xs">
+					<span className="shrink-0 font-semibold">{name}</span>
+					{step ? <span className="truncate text-muted">{step.name}</span> : null}
+				</span>
 				<span className="chat-badge" data-tone={failed ? "danger" : undefined}>
-					{result ? toolResultLabel[result.status] : "Called"}
+					{result ? toolResultLabel[result.status] : "Running"}
 				</span>
 				<IconChevron
 					size={12}
@@ -265,7 +268,6 @@ function App() {
 		loading,
 		live,
 		active,
-		activePrompt,
 		queued,
 		requestError,
 		submission,
@@ -278,7 +280,8 @@ function App() {
 		loadEarlier,
 	} = useChatSession();
 	const running = active !== null;
-	const toolActivity = preview?.activity ?? [];
+	const latestTool = preview?.tools.at(-1);
+	const currentTool = latestTool?.result ? undefined : latestTool;
 	const oldestId = messages[0]?.id;
 
 	// Keep the latest reply visible as the transcript, composer, or viewport resizes.
@@ -360,7 +363,8 @@ function App() {
 	const browsing =
 		synced &&
 		active?.state === "running" &&
-		toolActivity.some(
+		currentTool !== undefined &&
+		currentTool.activity.some(
 			({ name, status }) =>
 				status === "running" &&
 				(name === "browserNavigate" || name === "browserRead" || name === "browserScreenshot"),
@@ -371,8 +375,8 @@ function App() {
 			? "Stopping"
 			: live
 				? "Responding"
-				: preview?.tool
-					? `Running ${preview.tool}`
+				: currentTool
+					? `Running ${currentTool.call.name}`
 					: "Waiting for the model";
 
 	const submit = () => {
@@ -441,19 +445,12 @@ function App() {
 						{messages.map((message) => (
 							<Message key={message.id} message={message} onInspect={inspectTool} />
 						))}
-						{activePrompt ? <UserMessage message={activePrompt} /> : null}
 						{live ? (
 							<div className="min-w-0 space-y-3">
 								<ChatMarkdown className="text-sm leading-6" isAnimating>
 									{live.text}
 								</ChatMarkdown>
 								<span className="streaming-cursor" />
-							</div>
-						) : null}
-
-						{running && !live && toolActivity.length > 0 ? (
-							<div className="w-fit max-w-full rounded-(--chat-surface-radius) border border-line bg-surface px-4 py-3">
-								<ToolActivityList activity={toolActivity} onInspect={inspectTool} />
 							</div>
 						) : null}
 

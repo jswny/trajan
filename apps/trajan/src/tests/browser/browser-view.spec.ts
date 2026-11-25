@@ -40,8 +40,12 @@ test("opens the browser in a mobile sheet and docks it on wide screens", async (
 					preview: {
 						runId: browsingTurn.runId,
 						text: "",
-						tool: "exec",
-						activity: [{ id: "navigation", name: "browserNavigate", status: "running" }],
+						tools: [
+							{
+								call: { role: "tool-call", id: "exec", name: "exec", input: {} },
+								activity: [{ id: "navigation", name: "browserNavigate", status: "running" }],
+							},
+						],
 					},
 				} satisfies typeof ChatSnapshot.Type),
 			);
