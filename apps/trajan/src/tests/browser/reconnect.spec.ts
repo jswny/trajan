@@ -26,6 +26,29 @@ function toolCards(page: Page) {
 	return page.getByRole("main").locator(":scope > details");
 }
 
+test("loads a skill saved in chat after the Worker restarts", async ({ page }) => {
+	const composer = await openChat(page);
+	await composer.fill("Save the weekly brief skill.");
+	await composer.press("Enter");
+	const completed = toolCards(page).filter({ hasText: "Done" });
+	const replies = page
+		.getByRole("main")
+		.getByRole("paragraph")
+		.filter({ hasText: "Weekly template v1" });
+	await expect(completed).toHaveCount(1);
+	await expect(replies).toHaveCount(1);
+	await expect(replies.first()).toBeVisible();
+
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await page.reload();
+	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
+	await composer.fill("Use the weekly brief skill.");
+	await composer.press("Enter");
+	await expect(completed).toHaveCount(2);
+	await expect(replies).toHaveCount(2);
+	await expect(replies.last()).toBeVisible();
+});
+
 test("uses the submission prompt limit for the composer", async ({ page }) => {
 	const composer = await openChat(page);
 	const send = page.getByRole("button", { name: "Send message" });

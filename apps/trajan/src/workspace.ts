@@ -4,6 +4,13 @@ import { createGitClient } from "@cloudflare/computer/git";
 import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
 import { CodeModeError } from "@trajan/code-mode";
 import type { CodeModeTool } from "@trajan/code-mode";
+import {
+	DEFAULT_WORKSPACE_SKILLS_ROOT,
+	loadSkillCatalog,
+	renderSkillResource,
+	workspace as skillSource,
+} from "agents/skills";
+import type { SkillCatalog } from "agents/skills";
 import { Effect, Predicate, Schema } from "effect";
 
 export const WORKSPACE_PROMPT =
@@ -151,6 +158,66 @@ function workspaceGit(workspace: Workspace) {
 	};
 }
 
+const SkillName = Schema.Struct({ name: Schema.NonEmptyString });
+const SkillResourceRequest = Schema.Struct({ ...SkillName.fields, path: Schema.NonEmptyString });
+
+function workspaceSkills(workspace: Workspace) {
+	function operation<A>(
+		schema: Schema.Codec<A>,
+		read: (catalog: SkillCatalog, input: A) => Effect.Effect<Schema.Json, CodeModeError>,
+	): CodeModeTool {
+		return {
+			replay: "safe",
+			run: Effect.fnUntraced(
+				function* (raw, { signal }) {
+					const input = yield* Schema.decodeUnknownEffect(schema)(raw);
+					const catalog = yield* Effect.tryPromise({
+						try: () => {
+							signal.throwIfAborted();
+							return loadSkillCatalog([skillSource(workspace)]);
+						},
+						catch: codeModeError,
+					});
+					const failure = catalog.diagnostics.find(
+						(diagnostic) => diagnostic._tag === "SourceFailed",
+					);
+					if (failure) {
+						return yield* codeModeError(failure.error);
+					}
+					return yield* read(catalog, input);
+				},
+				Effect.catchTag("SchemaError", (error) => Effect.fail(codeModeError(error))),
+			),
+		};
+	}
+
+	return {
+		listSkills: operation(Schema.NullOr(Schema.Struct({})), (catalog) =>
+			Effect.succeed(
+				catalog.skills.map(({ skill: { name, description } }) => ({ name, description })),
+			),
+		),
+		activateSkill: operation(SkillName, (catalog, { name }) => {
+			const activated = catalog.activate(name);
+			return activated.ok
+				? Effect.succeed(activated.value)
+				: Effect.fail(codeModeError(activated.error));
+		}),
+		readSkillResource: operation(SkillResourceRequest, (catalog, input) =>
+			Effect.gen(function* () {
+				const read = yield* Effect.tryPromise({
+					try: () => catalog.readResource(input),
+					catch: codeModeError,
+				});
+				if (!read.ok) {
+					return yield* codeModeError(read.error);
+				}
+				return renderSkillResource(read.value);
+			}),
+		),
+	};
+}
+
 export function workspaceToolset(workspace: Workspace) {
 	const files = createPiTools({ workspace, root, exec: { backends: {} } });
 	const fileTools = Object.fromEntries(
@@ -179,12 +246,15 @@ export function workspaceToolset(workspace: Workspace) {
 		]),
 	);
 	const gitTools = workspaceGit(workspace);
+	const tools = Object.assign(fileTools, workspaceSkills(workspace));
 	const instructions = [
 		"Import named file tools from codemode:tools. Each takes an object and returns { text, isError, details? }. Check isError before using its result.",
 		...files.tools.map(
 			({ name, description, parameters }) =>
 				`${name}: ${description}\nArguments: ${JSON.stringify(parameters)}`,
 		),
+		"Skills are named exports from codemode:tools. Use listSkills() to find a relevant workflow, activateSkill({ name }) to load its instructions and file list, and readSkillResource({ name, path }) to read a bundled file by its skill-relative path.",
+		`Use the workspace file tools to create or update skills under ${DEFAULT_WORKSPACE_SKILLS_ROOT}/<name>/SKILL.md. Start the file with YAML frontmatter containing name (matching the folder) and description. Skill tools discover saved changes on the next call.`,
 		"Import named Git tools from codemode:git. The directory defaults to /workspace.",
 		...Object.entries(gitTools).map(
 			([name, { schema }]) =>
@@ -193,6 +263,9 @@ export function workspaceToolset(workspace: Workspace) {
 	].join("\n");
 	return {
 		instructions,
-		catalog: { "codemode:tools": fileTools, "codemode:git": gitTools },
+		catalog: {
+			"codemode:tools": tools,
+			"codemode:git": gitTools,
+		},
 	};
 }

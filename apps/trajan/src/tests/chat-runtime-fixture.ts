@@ -62,6 +62,32 @@ export default async function () {
 	};
 }
 
+export function skillExecInput(save: boolean) {
+	return {
+		code: `
+import { activateSkill, listSkills, readSkillResource, write } from "codemode:tools";
+export default async function () {
+  const name = "weekly-brief";
+  const path = "references/template.md";
+  const before = await listSkills();
+  ${
+		save
+			? `
+  const folder = "/workspace/.agents/skills/" + name;
+  const file = await write({ path: folder + "/SKILL.md", content: "---\\nname: weekly-brief\\ndescription: Prepare a weekly brief.\\n---\\nUse the weekly template." });
+  if (file.isError) throw new Error(file.text);
+  const template = await write({ path: folder + "/" + path, content: "Weekly template v1" });
+  if (template.isError) throw new Error(template.text);`
+			: ""
+	}
+  const skills = await listSkills();
+  const instructions = await activateSkill({ name });
+  const resource = await readSkillResource({ name, path });
+  return { before, skills, instructions, resource };
+}`,
+	};
+}
+
 function isMissing(error: unknown): boolean {
 	return Predicate.hasProperty(error, "code") && error.code === "ENOENT";
 }
@@ -214,6 +240,17 @@ export class ChatTestObject extends TrajanChatObject {
 		}
 		if (last?.role === "user" && last.text.startsWith("Remember ")) {
 			return { role: "assistant", text: `Remembering ${last.text.slice("Remember ".length)}` };
+		}
+		if (
+			last?.role === "user" &&
+			(last.text === "Save the weekly brief skill." || last.text === "Use the weekly brief skill.")
+		) {
+			return {
+				role: "tool-call",
+				id: "exec-skill",
+				name: "exec",
+				input: skillExecInput(last.text === "Save the weekly brief skill."),
+			};
 		}
 		if (last?.role === "user" && last.text === replayPrompt) {
 			return {

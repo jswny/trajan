@@ -6,7 +6,7 @@ import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../chat/protocol";
 import { readToolActivity, toolActivity } from "../chat/tool-activity";
 import { nextWeeklyRun } from "../turn-schedules";
-import { appendExecInput } from "./chat-runtime-fixture";
+import { appendExecInput, skillExecInput } from "./chat-runtime-fixture";
 import {
 	compactReference,
 	compactResumePrompt,
@@ -176,14 +176,17 @@ export default async function () {
 		],
 		output: {
 			names: [
+				"activateSkill",
 				"cancelSchedule",
 				"delete",
 				"edit",
 				"find",
 				"grep",
 				"listSchedules",
+				"listSkills",
 				"ls",
 				"read",
+				"readSkillResource",
 				"scheduleTurn",
 				"write",
 			],
@@ -202,6 +205,52 @@ export default async function () {
 	expect(await stub.workspaceTool("scheduleTurn", null)).toContain("Unknown tool");
 	expect(decode(await stub.workspaceTool("exec", { code }, true))).toMatchObject({
 		status: "unknown",
+	});
+});
+
+test("discovers workspace skills written in the same exec and loads them after a restart", async () => {
+	let stub = openFixture();
+	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));
+	const skills = [{ name: "weekly-brief", description: "Prepare a weekly brief." }];
+	const saved = {
+		skills,
+		instructions: expect.stringContaining("Use the weekly template."),
+		resource: expect.stringContaining("Weekly template v1"),
+	};
+
+	expect(decode(await stub.workspaceTool("exec", skillExecInput(true)))).toMatchObject({
+		status: "completed",
+		output: { before: [], ...saved },
+	});
+	const { instance } = await stub.state();
+	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
+	expect((await stub.state()).instance).not.toBe(instance);
+	expect(decode(await stub.workspaceTool("exec", skillExecInput(false)))).toMatchObject({
+		status: "completed",
+		output: { before: skills, ...saved },
+	});
+});
+
+test("reports missing skills and rejects resource paths outside a skill folder", async () => {
+	const stub = openFixture();
+	await stub.workspaceTool("exec", skillExecInput(true));
+	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));
+	const code = `
+import { activateSkill, readSkillResource } from "codemode:tools";
+export default async function () {
+  const errors = [];
+  try { await activateSkill({ name: "missing" }); } catch (error) { errors.push(error.code); }
+  try { await readSkillResource({ name: "weekly-brief", path: "../private.md" }); } catch (error) { errors.push(error.code); }
+  return errors;
+}`;
+	expect(decode(await stub.workspaceTool("exec", { code }))).toMatchObject({
+		status: "completed",
+		output: ["failed", "failed"],
+		activity: [
+			{ name: "activateSkill", status: "failed" },
+			{ name: "readSkillResource", status: "failed" },
+		],
 	});
 });
 
