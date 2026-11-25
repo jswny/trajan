@@ -5,7 +5,7 @@ import { WebSockets } from "agents/websockets";
 import { Schema } from "effect";
 import { TurnSchedules } from "../turn-schedules";
 import { ChatEvent, ChatHistoryQuery, ChatPath, ChatStop } from "./protocol";
-import type { ChatPreview, ChatSnapshot, ChatToolInfo } from "./protocol";
+import type { BrowserWatch, ChatPreview, ChatSnapshot, ChatToolInfo } from "./protocol";
 import { clearToolState } from "./tool-activity";
 
 const chatEventJson = Schema.encodeSync(Schema.fromJsonString(ChatEvent));
@@ -27,6 +27,13 @@ function sendChat(socket: WebSocket, data: string) {
 export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 	protected readonly toolCatalog: ReadonlyArray<typeof ChatToolInfo.Type> = [];
 	protected readonly schedules = new TurnSchedules((input) => this.submit(input));
+	protected get browserWatch(): typeof BrowserWatch.Type {
+		return null;
+	}
+
+	protected publishBrowserAvailability() {
+		this.#broadcast({ type: "browser", browserWatch: this.browserWatch });
+	}
 
 	#draft: typeof ChatPreview.Type | undefined;
 	readonly #sockets = new WebSockets({
@@ -87,6 +94,7 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 			queued,
 			preview: draft && draft.runId === active?.runId ? draft : null,
 			catalog: this.toolCatalog,
+			browserWatch: this.browserWatch,
 		};
 	}
 

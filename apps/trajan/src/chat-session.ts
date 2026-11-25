@@ -24,6 +24,7 @@ export const INITIAL_CHAT: ChatState = {
 	preview: null,
 	queued: 0,
 	catalog: [],
+	browserWatch: null,
 	submission: null,
 	loading: false,
 	requestError: null,
@@ -92,6 +93,8 @@ export function receiveChatEvent(state: ChatState, event: typeof ChatEvent.Type)
 			return { ...state, ...event, status: "open", page: mergeChatPage(state.page, event.page) };
 		case "preview":
 			return state.active?.runId === event.runId ? { ...state, preview: event } : state;
+		case "browser":
+			return { ...state, browserWatch: event.browserWatch };
 		case "text-delta":
 			return state.preview?.runId === event.runId
 				? { ...state, preview: { ...state.preview, text: state.preview.text + event.text } }

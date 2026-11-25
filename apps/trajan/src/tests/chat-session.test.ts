@@ -29,6 +29,7 @@ test("ignores stale deltas and replaces a discarded draft after a new snapshot",
 		page: { entries: [], nextBefore: null },
 		queued: 0,
 		catalog: [],
+		browserWatch: null,
 	};
 	const first = receiveChatEvent(INITIAL_CHAT, {
 		...base,

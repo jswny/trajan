@@ -1,5 +1,5 @@
 import { useAtom, useAtomValue } from "@effect/atom-react";
-import { Effect, Stream } from "effect";
+import { Clock, Effect, Stream } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { ChatSession, INITIAL_CHAT } from "./chat-session";
 import type { ChatCommand, PromptDraft } from "./chat-session";
@@ -28,6 +28,27 @@ const entriesAtom = Atom.make(
 		INITIAL_CHAT.page.entries,
 );
 const messagesAtom = Atom.make((get) => chatMessages(get(entriesAtom)));
+const browserWatchAtom = Atom.make(
+	(get) => AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.browserWatch ?? null,
+);
+const activeBrowserAtom = Atom.make((get) => {
+	const watch = get(browserWatchAtom);
+	return Stream.unwrap(
+		Effect.map(Clock.currentTimeMillis, (now) => {
+			if (!watch || watch.expiresAt <= now) {
+				return Stream.succeed(null);
+			}
+			return Stream.concat(
+				Stream.succeed(watch.id),
+				Stream.fromEffect(Effect.sleep(watch.expiresAt - now).pipe(Effect.as(null))),
+			);
+		}),
+	);
+});
+
+export const browserWatchId = Atom.make((get) =>
+	AsyncResult.getOrElse(get(activeBrowserAtom), () => null),
+);
 
 export function useChatSession() {
 	const session = AsyncResult.getOrElse(useAtomValue(sessionAtom), () => undefined);

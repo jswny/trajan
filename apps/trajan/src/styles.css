@@ -92,6 +92,11 @@ body {
 	scroll-padding-top: calc(var(--chat-transcript-top) - 0.5rem);
 }
 
+.browser-viewer {
+	padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+		env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
 @media (pointer: coarse) {
 	.chat-composer {
 		font-size: 1rem;

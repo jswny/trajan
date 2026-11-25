@@ -21,5 +21,6 @@ Keep this file focused on durable decisions that contributors cannot infer from 
 ## UI design
 
 - Keep the conversation primary. Use compact controls and let users reveal supporting details on demand.
+- Surface transient progress in the live UI. Keep conversation history focused on messages and outcomes worth revisiting.
 - Reuse shared visual tokens for color, shape, and spacing. Give elements with the same role a consistent treatment across states, and keep nested surfaces visually secondary.
 - Inspect the rendered change in the local app in a real browser at desktop and iPhone 17 Pro sizes. Use representative content and exercise the affected states. Check safe areas and on-screen keyboard behavior when the change affects layout or text input.

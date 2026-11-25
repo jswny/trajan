@@ -12,8 +12,10 @@ import {
 import type { ToolActivity } from "@trajan/harness";
 import { useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { BrowserViewer } from "./browser-view";
 import { ChatMarkdown, ToolCode } from "./chat-markdown";
 import type { ChatMessage, ChatText, ChatTool } from "./chat-view";
+import { CurrentActivityChip } from "./current-activity";
 import { themePreference } from "./theme";
 import { useChatSession } from "./use-chat-session";
 import "./styles.css";
@@ -208,7 +210,6 @@ function App() {
 		loadEarlier,
 	} = useChatSession();
 	const running = active !== null;
-	const runningTools = preview?.tool ? [preview.tool] : [];
 	const toolActivity = preview?.activity ?? [];
 	const oldestId = messages[0]?.id;
 
@@ -288,6 +289,23 @@ function App() {
 	};
 
 	const synced = status === "open";
+	const browsing =
+		synced &&
+		active?.state === "running" &&
+		toolActivity.some(
+			({ name, status }) =>
+				status === "running" &&
+				(name === "browserNavigate" || name === "browserRead" || name === "browserScreenshot"),
+		);
+	const turnStatus = !running
+		? null
+		: active?.state === "stopping"
+			? "Stopping"
+			: live
+				? "Responding"
+				: preview?.tool
+					? `Running ${preview.tool}`
+					: "Waiting for the model";
 
 	const submit = () => {
 		if (!canSubmit) {
@@ -301,7 +319,7 @@ function App() {
 	const connectionLabel = synced ? "Live" : status === "connecting" ? "Connecting" : "Reconnecting";
 	return (
 		<section
-			className="chat-layout relative flex h-dvh min-w-0 flex-col overflow-hidden bg-canvas text-ink"
+			className="chat-layout relative flex h-dvh min-w-0 flex-1 flex-col overflow-hidden bg-canvas text-ink"
 			aria-label="Chat"
 		>
 			<header className="chat-header pointer-events-none absolute z-10">
@@ -365,20 +383,9 @@ function App() {
 							</div>
 						) : null}
 
-						{running && !live ? (
-							<div className="w-fit max-w-full space-y-2 rounded-(--chat-surface-radius) border border-line bg-surface px-4 py-3">
-								<div className="flex items-center gap-2 text-sm text-muted">
-									<IconLoader
-										aria-hidden="true"
-										className="motion-safe:animate-spin motion-reduce:animate-pulse"
-									/>
-									{active?.state === "stopping"
-										? "Stopping"
-										: runningTools.length > 0
-											? `Running ${runningTools.join(", ")}`
-											: "Waiting for the model"}
-								</div>
-								{toolActivity.length > 0 ? <ToolActivityList activity={toolActivity} /> : null}
+						{running && !live && toolActivity.length > 0 ? (
+							<div className="w-fit max-w-full rounded-(--chat-surface-radius) border border-line bg-surface px-4 py-3">
+								<ToolActivityList activity={toolActivity} />
 							</div>
 						) : null}
 
@@ -414,6 +421,7 @@ function App() {
 									{requestError}
 								</p>
 							) : null}
+							<CurrentActivityChip turnStatus={turnStatus} browsing={browsing} connected={synced} />
 							<form
 								aria-busy={submitting}
 								onSubmit={(event) => {
@@ -474,4 +482,8 @@ const root = document.getElementById("root");
 if (!root) {
 	throw new Error("Missing #root element");
 }
-createRoot(root).render(<App />);
+createRoot(root).render(
+	<BrowserViewer>
+		<App />
+	</BrowserViewer>,
+);
