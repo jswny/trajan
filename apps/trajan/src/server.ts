@@ -114,58 +114,55 @@ export class Trajan extends TrajanChatObject {
 	);
 
 	onRequest(request: Request) {
-		if (new URL(request.url).pathname === BrowserViewPath) {
-			return this.#browserView(request);
-		}
-		return this.chatRequest(request);
+		return Effect.runPromise(
+			new URL(request.url).pathname === BrowserViewPath
+				? this.#browserView(request)
+				: this.chatRequest(request),
+		);
 	}
 
 	#browserView(request: Request) {
-		return Effect.runPromise(
-			Effect.gen({ self: this }, function* () {
-				const input = decodeBrowserViewRequest(yield* Effect.tryPromise(() => request.text()));
-				if (input._tag === "None") {
-					return new Response(null, { status: 400, headers: browserViewHeaders });
+		return Effect.gen({ self: this }, function* () {
+			const input = decodeBrowserViewRequest(yield* Effect.tryPromise(() => request.text()));
+			if (input._tag === "None") {
+				return new Response(null, { status: 400, headers: browserViewHeaders });
+			}
+			const watch = this.browserWatch;
+			if (watch?.id !== input.value.id) {
+				return Response.json({ status: "closed" }, { headers: browserViewHeaders });
+			}
+			const view = yield* Effect.tryPromise(() => this.#browser.liveView({ mode: "tab" }));
+			const target = view?.targets.find(
+				(tab) => tab.type === "page" && tab.pageUrl?.startsWith("https:"),
+			);
+			if (!view || !target) {
+				if (
+					this.browserWatch?.id === watch?.id &&
+					this.browserWatch?.expiresAt === watch?.expiresAt
+				) {
+					yield* this.#changeBrowserAvailability("closed");
 				}
-				const watch = this.browserWatch;
-				if (watch?.id !== input.value.id) {
-					return Response.json({ status: "closed" }, { headers: browserViewHeaders });
-				}
-				const view = yield* Effect.tryPromise(() => this.#browser.liveView({ mode: "tab" }));
-				const target = view?.targets.find(
-					(tab) => tab.type === "page" && tab.pageUrl?.startsWith("https:"),
-				);
-				if (!view || !target) {
-					if (
-						this.browserWatch?.id === watch?.id &&
-						this.browserWatch?.expiresAt === watch?.expiresAt
-					) {
-						yield* this.#changeBrowserAvailability("closed");
-					}
-					return Response.json({ status: "closed" }, { headers: browserViewHeaders });
-				}
-				const link = yield* Effect.tryPromise(() =>
-					this.env.BROWSER.getLiveView(view.sessionId, {
-						targetId: target.targetId,
-						mode: "tab",
-						expiresInMs: 60_000,
-						guardrails: { mode: "readonly" },
-					}),
-				);
-				if (link.options.guardrails?.mode !== "readonly") {
-					return new Response(null, { status: 502, headers: browserViewHeaders });
-				}
-				if (this.browserWatch?.id !== watch.id) {
-					return Response.json({ status: "closed" }, { headers: browserViewHeaders });
-				}
-				const payload = yield* decodeBrowserView({ status: "open", url: link.devtoolsFrontendUrl });
-				return Response.json(payload, { headers: browserViewHeaders });
-			}).pipe(
-				Effect.timeout("8 seconds"),
-				Effect.orElseSucceed(
-					() => new Response(null, { status: 502, headers: browserViewHeaders }),
-				),
-			),
+				return Response.json({ status: "closed" }, { headers: browserViewHeaders });
+			}
+			const link = yield* Effect.tryPromise(() =>
+				this.env.BROWSER.getLiveView(view.sessionId, {
+					targetId: target.targetId,
+					mode: "tab",
+					expiresInMs: 60_000,
+					guardrails: { mode: "readonly" },
+				}),
+			);
+			if (link.options.guardrails?.mode !== "readonly") {
+				return new Response(null, { status: 502, headers: browserViewHeaders });
+			}
+			if (this.browserWatch?.id !== watch.id) {
+				return Response.json({ status: "closed" }, { headers: browserViewHeaders });
+			}
+			const payload = yield* decodeBrowserView({ status: "open", url: link.devtoolsFrontendUrl });
+			return Response.json(payload, { headers: browserViewHeaders });
+		}).pipe(
+			Effect.timeout("8 seconds"),
+			Effect.orElseSucceed(() => new Response(null, { status: 502, headers: browserViewHeaders })),
 		);
 	}
 }

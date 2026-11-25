@@ -2,7 +2,7 @@ import { TurnSubmission } from "@trajan/harness";
 import type { TurnProgress } from "@trajan/harness";
 import { CloudflareHarness } from "@trajan/harness-cloudflare";
 import { WebSockets } from "agents/websockets";
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import { TurnSchedules } from "../turn-schedules";
 import { ChatEvent, ChatHistoryQuery, ChatPath, ChatStop, updateToolPreview } from "./protocol";
 import type {
@@ -32,7 +32,7 @@ function sendChat(socket: WebSocket, data: string) {
 
 export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 	protected readonly toolCatalog: ReadonlyArray<typeof ChatToolInfo.Type> = [];
-	protected readonly schedules = new TurnSchedules((input) => this.submit(input));
+	protected readonly schedules = new TurnSchedules((input) => this.submitEffect(input));
 	protected get browserWatch(): typeof BrowserWatch.Type {
 		return null;
 	}
@@ -129,7 +129,10 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 		}
 	}
 
-	protected async chatRequest(request: Request) {
+	protected readonly chatRequest = Effect.fn("chat.request")(function* (
+		this: TrajanChatObject,
+		request: Request,
+	) {
 		const url = new URL(request.url);
 		if (url.pathname === `${ChatPath}/history` && request.method === "GET") {
 			const before = url.searchParams.get("before");
@@ -137,12 +140,14 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 			if (query._tag === "None") {
 				return Response.json({ error: "Invalid history cursor." }, { status: 400 });
 			}
-			return Response.json(await this.page(query.value));
+			return Response.json(yield* this.readPage(query.value));
 		}
 		if (request.method !== "POST") {
 			return new Response(null, { status: 404 });
 		}
-		const body: unknown = await request.json().catch(() => null);
+		const body: unknown = yield* Effect.tryPromise(() => request.json()).pipe(
+			Effect.orElseSucceed(() => null),
+		);
 		switch (url.pathname) {
 			case ChatPath: {
 				const input = decodeSubmission(body);
@@ -152,7 +157,7 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 						{ status: 400 },
 					);
 				}
-				const receipt = await this.submit(input.value);
+				const receipt = yield* this.submitEffect(input.value);
 				return Response.json(
 					{ submissionId: input.value.id, ...receipt },
 					{ status: receipt.runId === null ? 400 : 202 },
@@ -163,10 +168,10 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 				if (input._tag === "None") {
 					return Response.json({ error: "Invalid run ID." }, { status: 400 });
 				}
-				return Response.json(await this.stop(input.value.runId));
+				return Response.json(yield* this.stopEffect(input.value.runId));
 			}
 			default:
 				return new Response(null, { status: 404 });
 		}
-	}
+	});
 }

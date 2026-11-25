@@ -494,7 +494,7 @@ export default async function () {
 	}
 
 	onRequest(request: Request) {
-		return this.chatRequest(request);
+		return Effect.runPromise(this.chatRequest(request));
 	}
 
 	#readWorkspaceText() {

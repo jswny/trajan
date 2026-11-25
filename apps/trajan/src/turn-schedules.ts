@@ -1,5 +1,5 @@
 import type { CodeModeTool } from "@trajan/code-mode";
-import type { TurnSubmission } from "@trajan/harness";
+import type { TurnIoError, TurnSubmission } from "@trajan/harness";
 import { LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJob, LifecycleJobContext } from "agents/lifecycle";
 import { Clock, DateTime, Effect, Option, Schema } from "effect";
@@ -74,7 +74,7 @@ export class TurnSchedules extends LifecycleCapability {
 	constructor(
 		private readonly submit: (
 			input: typeof TurnSubmission.Type,
-		) => Promise<{ runId: string | null; error?: string }>,
+		) => Effect.Effect<{ runId: string | null; error?: string }, TurnIoError>,
 	) {
 		super("turn-schedules");
 	}
@@ -165,12 +165,10 @@ export class TurnSchedules extends LifecycleCapability {
 		const plan = yield* Schema.decodeUnknownEffect(ScheduledTurn)(job.payload);
 		const date = DateTime.formatIso(DateTime.makeUnsafe(job.time));
 		// The queue keeps the same due time through retries of this occurrence.
-		const receipt = yield* Effect.tryPromise(() =>
-			this.submit({
-				id: `scheduled:${job.id}:${job.time}`,
-				prompt: `Scheduled task for ${date}\n\n${plan.prompt}`,
-			}),
-		);
+		const receipt = yield* this.submit({
+			id: `scheduled:${job.id}:${job.time}`,
+			prompt: `Scheduled task for ${date}\n\n${plan.prompt}`,
+		});
 		if (receipt.runId === null) {
 			return yield* codeModeError(receipt.error ?? "Scheduled turn was rejected.");
 		}

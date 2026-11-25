@@ -26,6 +26,14 @@ function conversationEffect<A>(operation: string, run: () => A) {
 	return Effect.try({ try: run, catch: (cause) => new TurnIoError({ operation, cause }) });
 }
 
+function lifecycleEffect<A>(operation: string, run: () => Promise<A>) {
+	return Effect.tryPromise({
+		try: run,
+		catch: (cause) =>
+			cause instanceof TurnIoError ? cause : new TurnIoError({ operation, cause }),
+	});
+}
+
 function failureCode(name: string) {
 	switch (name) {
 		case "TurnModelError":
@@ -117,6 +125,7 @@ export abstract class CloudflareHarness<
 		},
 	});
 	readonly lifecycle = Lifecycle.install(this).use(this.#tasks);
+	readonly #start = lifecycleEffect("start lifecycle", () => this.lifecycle.start());
 
 	onStart() {
 		this.#conversation.initialize();
@@ -128,7 +137,9 @@ export abstract class CloudflareHarness<
 
 	#wakeInbox = Effect.fnUntraced(function* (this: CloudflareHarness<Bindings>) {
 		const time = yield* Clock.currentTimeMillis;
-		yield* Effect.promise(() => this.lifecycle.jobs.push({ id: inboxJob, fn: inboxJob, time }));
+		yield* lifecycleEffect("wake inbox", () =>
+			this.lifecycle.jobs.push({ id: inboxJob, fn: inboxJob, time }),
+		);
 	});
 
 	onJob({ job }: LifecycleJobContext): Promise<LifecycleJobOutcome> | undefined {
@@ -144,7 +155,9 @@ export abstract class CloudflareHarness<
 		}
 		const runId = head.run_id;
 		yield* Effect.annotateCurrentSpan("runId", runId);
-		const task = yield* Effect.promise(() => this.#tasks.handle(turnDefinition).get(runId));
+		const task = yield* lifecycleEffect("get turn task", () =>
+			this.#tasks.handle(turnDefinition).get(runId),
+		);
 		if (head.state === "stopping") {
 			if (
 				task &&
@@ -152,7 +165,9 @@ export abstract class CloudflareHarness<
 				task.state !== "cancelled" &&
 				task.state !== "completed"
 			) {
-				yield* Effect.promise(() => this.#tasks.handle(turnDefinition).cancel(runId));
+				yield* lifecycleEffect("cancel turn task", () =>
+					this.#tasks.handle(turnDefinition).cancel(runId),
+				);
 				return { rescheduleAt: (yield* Clock.currentTimeMillis) + 250 };
 			}
 			yield* conversationEffect("cancel turn", () => this.#conversation.cancel(runId));
@@ -160,10 +175,10 @@ export abstract class CloudflareHarness<
 			return "yield" as const;
 		}
 		if (!task) {
-			yield* Effect.promise(async (signal) => {
-				await this.onTurnPhase?.("before-task", signal);
-				await this.#tasks.run(turnDefinition, { runId }, { runId });
-			});
+			yield* Effect.promise(async (signal) => this.onTurnPhase?.("before-task", signal));
+			yield* lifecycleEffect("start turn task", () =>
+				this.#tasks.run(turnDefinition, { runId }, { runId }),
+			);
 		} else if (
 			task.state === "failed" ||
 			task.state === "cancelled" ||
@@ -229,45 +244,60 @@ export abstract class CloudflareHarness<
 		return { ...this.#conversation.status(), page: this.#conversation.page({}) };
 	}
 
-	protected async page(query: HistoryQuery) {
-		await this.lifecycle.start();
-		return this.#conversation.page(query);
+	protected readPage(query: HistoryQuery) {
+		return this.#start.pipe(
+			Effect.andThen(conversationEffect("read history page", () => this.#conversation.page(query))),
+		);
 	}
 
-	submit(input: unknown) {
-		return Effect.runPromise(
-			Schema.decodeUnknownEffect(TurnSubmission)(input).pipe(
-				Effect.flatMap((submission) =>
-					Effect.promise(async () => {
-						await this.lifecycle.start();
-						return this.ctx.blockConcurrencyWhile(async () => {
-							// Arm the durable wake before committing the submission under the input gate.
-							await Effect.runPromise(this.#wakeInbox());
-							const receipt = this.#conversation.admit(submission);
-							if (receipt.accepted) {
-								this.onStateChange?.();
-							}
-							return receipt;
-						});
-					}),
-				),
-				Effect.catchTag("SchemaError", (error) =>
-					Effect.succeed({ accepted: false, runId: null, error: error.message }),
-				),
+	#withInbox = Effect.fnUntraced(function* <A>(
+		this: CloudflareHarness<Bindings>,
+		operation: string,
+		run: () => A,
+	) {
+		yield* this.#start;
+		const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
+		// Schedule the wake before changing the inbox, under the same input gate.
+		return yield* lifecycleEffect(operation, () =>
+			this.ctx.blockConcurrencyWhile(() =>
+				runPromise(this.#wakeInbox().pipe(Effect.andThen(conversationEffect(operation, run)))),
+			),
+		);
+	});
+
+	protected submitEffect(input: unknown) {
+		return Schema.decodeUnknownEffect(TurnSubmission)(input).pipe(
+			Effect.flatMap((submission) =>
+				this.#withInbox("admit turn", () => {
+					const receipt = this.#conversation.admit(submission);
+					if (receipt.accepted) {
+						this.onStateChange?.();
+					}
+					return receipt;
+				}),
+			),
+			Effect.catchTag("SchemaError", (error) =>
+				Effect.succeed({ accepted: false as const, runId: null, error: error.message }),
 			),
 		);
 	}
 
-	async stop(runId: string) {
-		await this.lifecycle.start();
-		return this.ctx.blockConcurrencyWhile(async () => {
-			await Effect.runPromise(this.#wakeInbox());
+	protected stopEffect(runId: string) {
+		return this.#withInbox("request turn stop", () => {
 			const stopped = this.#conversation.requestStop(runId);
 			if (stopped) {
 				this.onStateChange?.();
 			}
 			return { runId, stopped };
 		});
+	}
+
+	submit(input: unknown) {
+		return Effect.runPromise(this.submitEffect(input));
+	}
+
+	stop(runId: string) {
+		return Effect.runPromise(this.stopEffect(runId));
 	}
 
 	async turn(runId: string) {
