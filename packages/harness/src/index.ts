@@ -28,6 +28,16 @@ export const ToolActivity = Schema.Struct({
 	status: Schema.Literals(["running", "completed", "failed", "interrupted"]),
 });
 const toolActivityFields = { activity: Schema.optionalKey(Schema.Array(ToolActivity)) };
+export const ToolContent = Schema.Array(
+	Schema.Union([
+		Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
+		Schema.Struct({
+			type: Schema.Literal("image"),
+			mimeType: Schema.Literals(["image/jpeg", "image/png", "image/webp", "image/gif"]),
+			data: Schema.NonEmptyString,
+		}),
+	]),
+);
 export const ToolResult = Schema.Union([
 	Schema.Struct({
 		status: Schema.Literal("completed"),

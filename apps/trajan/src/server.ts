@@ -1,6 +1,8 @@
 import { TurnModel, TurnTools } from "@trajan/harness";
 import { openAiTurnModel } from "@trajan/model-openai";
+import { Browser, browserRun } from "agents/browser";
 import { Data, Effect, Layer } from "effect";
+import { browserToolset } from "./browser";
 import { openAiGatewayTransport } from "./chat/openai-gateway";
 import { ChatPath, isChatPath } from "./chat/protocol";
 import { TrajanChatObject } from "./chat/worker-host";
@@ -11,12 +13,32 @@ import { createTrajanWorkspace, WORKSPACE_PROMPT, workspaceToolset } from "./wor
 class ChatRouteError extends Data.TaggedError("ChatRouteError")<{ readonly cause: unknown }> {}
 
 export class Trajan extends TrajanChatObject {
+	readonly #browser = new Browser({
+		provider: browserRun(this.env.BROWSER, { keepAliveMs: 120_000 }),
+	});
 	readonly #tools = createChatTools(
 		this.env.LOADER,
 		this.ctx.storage,
 		this.schedules,
-		workspaceToolset(createTrajanWorkspace(this.ctx)),
+		this.#toolset(),
 	);
+
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		this.lifecycle.use(this.#browser);
+	}
+
+	#toolset() {
+		const workspace = workspaceToolset(createTrajanWorkspace(this.ctx));
+		const browser = browserToolset(this.#browser);
+		return {
+			catalog: {
+				...workspace.catalog,
+				"codemode:tools": { ...workspace.catalog["codemode:tools"], ...browser.tools },
+			},
+			instructions: `${workspace.instructions}\n${browser.instructions}`,
+		};
+	}
 
 	protected override readonly toolCatalog = [
 		{

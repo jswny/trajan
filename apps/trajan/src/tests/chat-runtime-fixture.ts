@@ -35,6 +35,7 @@ type PausePoint =
 	| "during-replay-git"
 	| "code-mode-read"
 	| "code-mode-edit"
+	| "code-mode-browser"
 	| "code-mode-branch";
 const workspaceFile = "/workspace/turn.txt";
 const replayPrompt = "Replay two reads.";

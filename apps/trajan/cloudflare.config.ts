@@ -24,6 +24,7 @@ export default defineConfig(({ mode }) => {
 			},
 			env: {
 				AI: bindings.ai({ dev: { remote: true } }),
+				BROWSER: bindings.browser({ dev: { remote: true } }),
 				LOADER: bindings.workerLoader(),
 				Trajan: bindings.durableObject({ worker: name, exportName: "Trajan" }),
 			},

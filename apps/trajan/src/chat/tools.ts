@@ -22,7 +22,7 @@ function executionError(cause: unknown) {
 function unknownOutcome(message: string): Extract<typeof ToolResult.Type, { status: "unknown" }> {
 	return {
 		status: "unknown",
-		message: `${message} The script may have changed the workspace. Inspect it before repeating the action.`,
+		message: `${message} The script may have changed state. Inspect it before repeating the action.`,
 	};
 }
 

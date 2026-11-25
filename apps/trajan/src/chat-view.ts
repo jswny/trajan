@@ -1,14 +1,9 @@
+import { ToolContent } from "@trajan/harness";
 import type { ToolActivity, ToolResult } from "@trajan/harness";
 import { Schema } from "effect";
 import type { ChatPage } from "./chat/protocol";
 
-const ContentParts = Schema.Array(
-	Schema.Union([
-		Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
-		Schema.Struct({ type: Schema.Literal("image"), mimeType: Schema.String, data: Schema.String }),
-	]),
-);
-const decodeContent = Schema.decodeUnknownOption(ContentParts);
+const decodeContent = Schema.decodeUnknownOption(ToolContent);
 
 export type ChatText = {
 	readonly id: string;
@@ -24,7 +19,7 @@ export type ChatTool = {
 	readonly result?: {
 		readonly status: (typeof ToolResult.Type)["status"];
 		readonly format: "json" | "text";
-		readonly content: typeof ContentParts.Type;
+		readonly content: typeof ToolContent.Type;
 		readonly activity: ReadonlyArray<typeof ToolActivity.Type>;
 	};
 };

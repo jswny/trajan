@@ -3,11 +3,12 @@ import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
 import { CodeModeError, createCodeMode } from "@trajan/code-mode";
 import type { CodeModeTool } from "@trajan/code-mode";
 import { Effect, Schema } from "effect";
+import { browserToolset } from "../browser";
 
 const dir = "/workspace";
 const path = `${dir}/code-mode.txt`;
 const branch = "code-mode-proof";
-type Point = "code-mode-read" | "code-mode-edit" | "code-mode-branch";
+type Point = "code-mode-read" | "code-mode-edit" | "code-mode-branch" | "code-mode-browser";
 const label = Schema.Struct({ label: Schema.String });
 const oldText = Schema.Struct({ oldText: Schema.String, newText: Schema.String });
 const toError = (cause: unknown) =>
@@ -45,9 +46,66 @@ export function createCodeModeFixture(
 		}
 		return text;
 	});
+	const browser = browserToolset({
+		session: () => ({
+			lock: () => Promise.resolve(),
+			close: () =>
+				Promise.resolve({
+					restarted: storage.kv.get<boolean>("fixture-browser-closed") ?? false,
+					newTabs: [],
+					tabClosed: false,
+					tabShared: false,
+					notices: [],
+				}),
+			send: ({ method, params }) => {
+				if (method === "Page.navigate" && typeof params?.url === "string") {
+					storage.kv.put("fixture-browser-url", params.url);
+					storage.kv.delete("fixture-browser-closed");
+					return Promise.resolve({});
+				}
+				if (method === "Runtime.evaluate") {
+					const url = storage.kv.get<string>("fixture-browser-url") ?? "about:blank";
+					return Promise.resolve({
+						result: { value: { url, title: "Fixture", text: "Page", links: [] } },
+					});
+				}
+				if (method === "Page.getLayoutMetrics") {
+					return Promise.resolve({
+						cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 640, clientHeight: 480 },
+					});
+				}
+				if (method === "Page.captureScreenshot") {
+					const data = storage.kv.delete("fixture-browser-oversized") ? "x".repeat(55_004) : "/9j/";
+					return Promise.resolve({ data });
+				}
+				return Promise.reject(new Error(`Unexpected fixture browser method: ${method}`));
+			},
+		}),
+		close: () => {
+			storage.kv.put("fixture-browser-closed", true);
+			return Promise.resolve(storage.kv.delete("fixture-browser-url"));
+		},
+	}).tools;
 
 	const tools = {
 		"codemode:tools": {
+			...browser,
+			browserNavigate: {
+				...browser.browserNavigate,
+				run: (input, context) =>
+					receipt("browserNavigate", context.callId).pipe(
+						Effect.andThen(browser.browserNavigate.run(input, context)),
+						Effect.tap(() => Effect.sync(() => storage.kv.put("fixture-browser-oversized", true))),
+						Effect.tap(() => io(() => pause("code-mode-browser", context.signal))),
+					),
+			},
+			browserRead: {
+				...browser.browserRead,
+				run: (input, context) =>
+					receipt("browserRead", context.callId).pipe(
+						Effect.andThen(browser.browserRead.run(input, context)),
+					),
+			},
 			read: {
 				replay: "safe",
 				run: Effect.fnUntraced(function* (input, { callId, signal }) {

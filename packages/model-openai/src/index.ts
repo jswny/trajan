@@ -1,4 +1,4 @@
-import { TurnModel, TurnModelError } from "@trajan/harness";
+import { ToolContent, TurnModel, TurnModelError } from "@trajan/harness";
 import type { TurnModelEvent } from "@trajan/harness";
 import { Effect, Schema, Stream } from "effect";
 import { decode as decodeSse } from "effect/encoding/Sse";
@@ -39,6 +39,7 @@ const UpstreamError = Schema.Struct({
 });
 const decodeUpstreamError = Schema.decodeUnknownOption(UpstreamError);
 const decodeErrorBody = Schema.decodeUnknownOption(Schema.fromJsonString(UpstreamError));
+const decodeToolContent = Schema.decodeUnknownOption(ToolContent);
 type History = Parameters<TurnModel["Service"]["stream"]>[0];
 type Tool = {
 	readonly name: string;
@@ -92,6 +93,25 @@ function transportError(cause: unknown) {
 	});
 }
 
+function toolOutput(result: Extract<History[number], { role: "tool" }>["result"]) {
+	if (result.status !== "completed") {
+		return JSON.stringify({ status: result.status, message: result.message });
+	}
+	const content = decodeToolContent(result.output);
+	if (content._tag !== "Some" || content.value.length === 0) {
+		return JSON.stringify(result.output);
+	}
+	return content.value.map((part): Schema.Json =>
+		part.type === "image"
+			? {
+					type: "input_image",
+					image_url: `data:${part.mimeType};base64,${part.data}`,
+					detail: "auto",
+				}
+			: { type: "input_text", text: part.text },
+	);
+}
+
 function compactWindow(items: ReadonlyArray<Item>) {
 	const pending = new Set<Schema.Json>();
 	let start = 0;
@@ -128,11 +148,7 @@ const buildInput = Effect.fnUntraced(function* (history: History, modelContext?:
 				items.push({
 					type: "function_call_output",
 					call_id: message.callId,
-					output: JSON.stringify(
-						message.result.status === "completed"
-							? message.result.output
-							: { status: message.result.status, message: message.result.message },
-					),
+					output: toolOutput(message.result),
 				});
 				items = compactWindow(items);
 				break;
