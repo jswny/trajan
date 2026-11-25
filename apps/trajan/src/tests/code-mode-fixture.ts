@@ -8,7 +8,12 @@ import { browserToolset } from "../browser";
 const dir = "/workspace";
 const path = `${dir}/code-mode.txt`;
 const branch = "code-mode-proof";
-type Point = "code-mode-read" | "code-mode-edit" | "code-mode-branch" | "code-mode-browser";
+type Point =
+	| "code-mode-read"
+	| "code-mode-edit"
+	| "code-mode-branch"
+	| "code-mode-browser"
+	| "code-mode-settle";
 const label = Schema.Struct({ label: Schema.String });
 const oldText = Schema.Struct({ oldText: Schema.String, newText: Schema.String });
 const toError = (cause: unknown) =>
@@ -90,6 +95,14 @@ export function createCodeModeFixture(
 	const tools = {
 		"codemode:tools": {
 			...browser,
+			settle: {
+				replay: "unsafe",
+				run: (_input, { callId }) =>
+					io(() => pause("code-mode-settle", new AbortController().signal)).pipe(
+						Effect.andThen(receipt("settle", callId)),
+						Effect.as(null),
+					),
+			},
 			browserNavigate: {
 				...browser.browserNavigate,
 				run: (input, context) =>

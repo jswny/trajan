@@ -1,5 +1,5 @@
 import { RpcTarget } from "cloudflare:workers";
-import { Clock, Data, Effect, Random, Schema } from "effect";
+import { Cause, Clock, Data, Effect, Exit, Fiber, Random, Schema } from "effect";
 import { loadGuest } from "./guest";
 import type { ToolReply } from "./guest";
 
@@ -117,6 +117,7 @@ export function createCodeMode(
 		Array.from(toolsByModule, ([name, tools]) => [name, Object.keys(tools)]),
 	);
 	const active = new Set<string>();
+	const mutations = new Set<AbortSignal>();
 
 	const run = Effect.fn("code-mode.run")(function* (
 		id: string,
@@ -137,11 +138,19 @@ export function createCodeMode(
 		if (saved?.result) {
 			return saved.result.value;
 		}
-		if (active.has(key)) {
-			return yield* new CodeModeError({ message: "This script is already running." });
-		}
-
-		active.add(key);
+		const scope = yield* Effect.scope;
+		yield* Effect.acquireRelease(
+			Effect.gen(function* () {
+				if (active.has(key)) {
+					return yield* new CodeModeError({ message: "This script is already running." });
+				}
+				if (Array.from(mutations).some((signal) => signal.aborted)) {
+					return yield* new CodeModeError({ message: "An interrupted tool is still settling." });
+				}
+				active.add(key);
+			}),
+			() => Effect.sync(() => active.delete(key)),
+		);
 		return yield* Effect.tryPromise({
 			try: async (signal) => {
 				let open = true;
@@ -213,10 +222,23 @@ export function createCodeMode(
 						if (prior?.replay !== "unsafe") {
 							yield* publish("running");
 						}
+						if (signal.aborted) {
+							return yield* Effect.interrupt;
+						}
+						const invoke = Effect.suspend(() => tool.run(input.input, { callId, signal }));
+						// A provider may finish an unsafe action after abort. Keep ownership until it settles.
+						const scopedInvoke =
+							tool.replay === "safe"
+								? invoke
+								: Effect.acquireUseRelease(
+										Effect.sync(() => mutations.add(signal)),
+										() => invoke,
+										() => Effect.sync(() => mutations.delete(signal)),
+									).pipe(Effect.uninterruptible);
 						const reply =
 							prior?.replay === "unsafe"
 								? interrupted
-								: yield* tool.run(input.input, { callId, signal }).pipe(
+								: yield* scopedInvoke.pipe(
 										Effect.flatMap(Schema.decodeEffect(boundedJson)),
 										Effect.match({
 											onSuccess: (value): ToolReply => ({ status: "returned", value }),
@@ -244,9 +266,19 @@ export function createCodeMode(
 						storage.kv.put(key, { source } satisfies Run);
 					}
 					const guest = loadGuest<HostTools>(loader, source, namespaces);
-					const host = new HostTools((raw) =>
-						Effect.runPromiseWith(context)(call(raw), { signal }),
-					);
+					const host = new HostTools(async (raw) => {
+						const exit = await Effect.runPromiseExitWith(context)(
+							Effect.forkIn(call(raw), scope).pipe(Effect.flatMap(Fiber.join)),
+							{ signal },
+						);
+						if (Exit.isSuccess(exit)) {
+							return exit.value;
+						}
+						if (signal.aborted) {
+							return interrupted;
+						}
+						throw Cause.squash(exit.cause);
+					});
 					const value = await guest.run(host);
 					signal.throwIfAborted();
 					if (divergence || storage.kv.get(`${entries}${next}`) !== undefined || inFlight) {
@@ -273,9 +305,8 @@ export function createCodeMode(
 					catch: ioError,
 				}),
 			),
-			Effect.ensuring(Effect.sync(() => active.delete(key))),
 		);
-	});
+	}, Effect.scoped);
 
 	return { run };
 }

@@ -10,7 +10,7 @@ import {
 	TurnTools,
 } from "@trajan/harness";
 import type { TurnModelEvent, TurnModelResponse } from "@trajan/harness";
-import { Effect, Layer, Option, Predicate, Schema, Stream } from "effect";
+import { Cause, Effect, Exit, Layer, Option, Predicate, Schema, Stream } from "effect";
 import { clearToolState } from "../chat/tool-activity";
 import { TrajanChatObject } from "../chat/worker-host";
 import { createChatTools } from "../chat/tools";
@@ -36,6 +36,7 @@ type PausePoint =
 	| "code-mode-read"
 	| "code-mode-edit"
 	| "code-mode-browser"
+	| "code-mode-settle"
 	| "code-mode-branch";
 const workspaceFile = "/workspace/turn.txt";
 const replayPrompt = "Replay two reads.";
@@ -524,15 +525,25 @@ export default async function () {
 		return this.#codeMode.seed();
 	}
 
-	runCodeMode(id: string, source: string) {
-		return Effect.runPromise(
+	readonly #codeModeAbort = new AbortController();
+
+	interruptCodeMode() {
+		this.#codeModeAbort.abort();
+	}
+
+	async runCodeMode(id: string, source: string, cancellable = false) {
+		const exit = await Effect.runPromiseExit(
 			this.#codeMode.run(id, source).pipe(
 				Effect.match({
 					onFailure: ({ message }) => ({ error: message }),
 					onSuccess: (value) => ({ value }),
 				}),
 			),
+			cancellable ? { signal: this.#codeModeAbort.signal } : undefined,
 		);
+		return Exit.isSuccess(exit)
+			? exit.value
+			: { error: codeModeError(Cause.squash(exit.cause)).message };
 	}
 
 	codeModeState() {

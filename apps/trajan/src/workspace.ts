@@ -154,7 +154,7 @@ export function workspaceToolset(workspace: Workspace) {
 					const result = yield* Effect.tryPromise({
 						try: () => {
 							signal.throwIfAborted();
-							return files.execute({ id: callId, name, arguments: input });
+							return files.execute({ id: callId, name, arguments: input }, { abortSignal: signal });
 						},
 						catch: codeModeError,
 					});

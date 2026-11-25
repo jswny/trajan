@@ -5,6 +5,35 @@ function openFixture() {
 	return env.CHAT_TEST.getByName(crypto.randomUUID());
 }
 
+test("holds Code Mode ownership until an interrupted mutation settles", async () => {
+	const stub = openFixture();
+	const source = `
+import { settle } from "codemode:tools";
+export default async function () {
+  try { await settle(); }
+  catch (error) { return error.code; }
+  return "completed";
+}`;
+	await stub.pause("code-mode-settle");
+	const pending = stub.runCodeMode("settling", source, true);
+	try {
+		await expect.poll(() => stub.codeModeState()).toMatchObject({ pausedAt: "code-mode-settle" });
+		await stub.interruptCodeMode();
+		await expect(stub.runCodeMode("settling", source)).resolves.toEqual({
+			error: "This script is already running.",
+		});
+		await expect(stub.runCodeMode("other", "export default () => 1")).resolves.toEqual({
+			error: "An interrupted tool is still settling.",
+		});
+	} finally {
+		await stub.release();
+		await expect(pending).resolves.toMatchObject({ error: expect.stringMatching(/interrupt/i) });
+	}
+	await expect(stub.runCodeMode("settling", source)).resolves.toEqual({ value: "interrupted" });
+	expect((await stub.codeModeState()).receipts.settle).toHaveLength(1);
+	await expect(stub.runCodeMode("other", "export default () => 1")).resolves.toEqual({ value: 1 });
+});
+
 const recoverCase = [
 	{
 		name: "an interrupted edit",
