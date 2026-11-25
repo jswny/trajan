@@ -394,25 +394,24 @@ function App() {
 			className="chat-layout relative flex h-dvh min-w-0 flex-1 flex-col overflow-hidden bg-canvas text-ink"
 			aria-label="Chat"
 		>
-			<header className="chat-header pointer-events-none absolute z-10">
-				<div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-5">
-					<div className="chat-floating-surface flex h-(--chat-control-height) items-center gap-2.5 px-4">
-						<h1 className="text-base font-semibold">Trajan</h1>
-						<span role="status" className="chat-badge" data-tone={synced ? "success" : undefined}>
-							{connectionLabel}
-						</span>
-					</div>
-					<ChatSettingsMenu />
-				</div>
-			</header>
-
 			<div
 				ref={scrollRef}
 				onScroll={onScroll}
 				className="chat-transcript min-h-0 flex-1 overflow-y-auto"
 			>
+				<header className="pointer-events-none sticky top-0 z-10 h-0">
+					<div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-(--chat-column-gutter) pt-(--chat-edge-gap)">
+						<div className="chat-floating-surface flex h-(--chat-control-height) items-center gap-2.5 px-3">
+							<h1 className="text-base font-semibold">Trajan</h1>
+							<span role="status" className="chat-badge" data-tone={synced ? "success" : undefined}>
+								{connectionLabel}
+							</span>
+						</div>
+						<ChatSettingsMenu />
+					</div>
+				</header>
 				<div ref={contentRef} className="flex min-h-full flex-col">
-					<main className="mx-auto w-full max-w-3xl grow space-y-5 px-5 pt-(--chat-transcript-top) pb-6">
+					<main className="mx-auto w-full max-w-3xl grow space-y-5 px-(--chat-column-gutter) pt-(--chat-transcript-top) pb-6">
 						{empty ? (
 							<h2 className="py-10 text-center text-sm font-semibold sm:py-16">
 								What can I help with?
@@ -459,8 +458,8 @@ function App() {
 						) : null}
 					</main>
 
-					<footer className="pointer-events-none sticky bottom-0 z-10">
-						<div className="mx-auto max-w-3xl space-y-2 px-5 py-(--chat-edge-gap)">
+					<footer className="chat-footer pointer-events-none sticky bottom-0 z-10">
+						<div className="mx-auto max-w-3xl space-y-2 px-(--chat-column-gutter) py-(--chat-edge-gap)">
 							{submission?.status === "unconfirmed" ? (
 								<div className="chat-floating-surface flex items-center gap-3 px-4 py-2">
 									<p role="status" className="min-w-0 flex-1 truncate text-sm text-muted">

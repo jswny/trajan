@@ -63,18 +63,17 @@ body {
 
 .chat-layout {
 	--chat-edge-gap: 0.75rem;
+	--chat-column-gutter: 1.25rem;
 	--chat-transcript-top: calc(var(--chat-edge-gap) + var(--chat-control-height) + 1rem);
 	padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
 		env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
 }
 
-.chat-layout::before {
+.chat-layout::before,
+.chat-footer::before {
 	position: absolute;
-	inset: 0 0 auto;
-	z-index: 5;
-	height: calc(env(safe-area-inset-top, 0px) + var(--chat-transcript-top));
 	background: linear-gradient(
-		to bottom,
+		var(--chat-fade-direction, to bottom),
 		var(--pierre-canvas),
 		color-mix(in srgb, var(--pierre-canvas) 88%, transparent) 56%,
 		transparent
@@ -83,10 +82,16 @@ body {
 	content: "";
 }
 
-.chat-header {
-	top: calc(env(safe-area-inset-top, 0px) + var(--chat-edge-gap));
-	right: env(safe-area-inset-right, 0px);
-	left: env(safe-area-inset-left, 0px);
+.chat-layout::before {
+	inset: 0 0 auto;
+	z-index: 5;
+	height: calc(env(safe-area-inset-top, 0px) + var(--chat-transcript-top));
+}
+
+.chat-footer::before {
+	--chat-fade-direction: to top;
+	inset: -1rem 0 0;
+	z-index: -1;
 }
 
 .chat-transcript {
