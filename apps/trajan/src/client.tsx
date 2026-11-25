@@ -339,7 +339,11 @@ function App() {
 									onClick={showEarlier}
 								>
 									{loading ? (
-										<IconLoader size={12} aria-hidden="true" className="motion-safe:animate-spin" />
+										<IconLoader
+											size={12}
+											aria-hidden="true"
+											className="motion-safe:animate-spin motion-reduce:animate-pulse"
+										/>
 									) : (
 										<IconArrowShortUp size={12} aria-hidden="true" />
 									)}
@@ -364,7 +368,10 @@ function App() {
 						{running && !live ? (
 							<div className="w-fit max-w-full space-y-2 rounded-(--chat-surface-radius) border border-line bg-surface px-4 py-3">
 								<div className="flex items-center gap-2 text-sm text-muted">
-									<IconLoader aria-hidden="true" className="motion-safe:animate-spin" />
+									<IconLoader
+										aria-hidden="true"
+										className="motion-safe:animate-spin motion-reduce:animate-pulse"
+									/>
 									{active?.state === "stopping"
 										? "Stopping"
 										: runningTools.length > 0

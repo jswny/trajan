@@ -189,7 +189,7 @@ body {
 	margin-top: 0;
 }
 
-@keyframes pulse {
+@keyframes chat-cursor-pulse {
 	from {
 		opacity: 0.25;
 	}
@@ -205,5 +205,5 @@ body {
 	margin-left: 0.15rem;
 	vertical-align: text-bottom;
 	background: var(--pierre-accent);
-	animation: pulse 0.8s step-start infinite;
+	animation: chat-cursor-pulse 0.8s step-start infinite;
 }

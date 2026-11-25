@@ -115,6 +115,25 @@ test("restores an interrupted stream into the chat without repeating the tool", 
 	await expect(transcript.getByText('Wrote "hello"', { exact: true })).toHaveCount(1);
 });
 
+test("shows animated progress with either motion preference", async ({ page }) => {
+	await page.emulateMedia({ reducedMotion: "reduce" });
+	const composer = await openChat(page);
+	await composer.fill("Interrupt after writing.");
+	await composer.press("Enter");
+	const spinner = page.getByText("Running exec", { exact: true }).locator("svg");
+	await expect(spinner).toHaveCSS("animation-name", "pulse");
+	await expect(spinner).toHaveCSS("transform", "none");
+	await expect
+		.poll(() => spinner.evaluate((element) => Number(getComputedStyle(element).opacity)))
+		.toBeLessThan(0.95);
+
+	await page.emulateMedia({ reducedMotion: "no-preference" });
+	await expect(spinner).toHaveCSS("animation-name", "spin");
+	await expect(spinner).not.toHaveCSS("transform", "none");
+	await page.getByRole("button", { name: "Stop", exact: true }).click();
+	await expect(spinner).toBeHidden();
+});
+
 test("recovers a running exec without repeating its write", async ({ page }) => {
 	const composer = await openChat(page);
 	await composer.fill("Interrupt after writing.");
