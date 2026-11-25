@@ -1,10 +1,10 @@
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/harness";
+import { ToolResult, TurnMessage, TurnTranscript, toolPreviewBytes } from "@trajan/harness";
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../chat/protocol";
-import { readToolActivity } from "../chat/tool-activity";
+import { readToolActivity, toolActivity } from "../chat/tool-activity";
 import { nextWeeklyRun } from "../turn-schedules";
 import { appendExecInput } from "./chat-runtime-fixture";
 import {
@@ -24,6 +24,26 @@ const toolCall = {
 const completedTool = { status: "completed", output: "hello" };
 const unknownMessage = expect.stringContaining("Inspect it before repeating the action.");
 const unknownTool = { status: "unknown", message: unknownMessage };
+
+test("bounds tool previews without splitting multibyte text and summarizes image data", () => {
+	const input = `a${"📝".repeat(toolPreviewBytes)}`;
+	const preview = toolActivity({
+		id: "capture",
+		name: "capture",
+		input,
+		status: "completed",
+		reply: {
+			status: "returned",
+			value: [{ type: "image", mimeType: "image/jpeg", data: "private-image-payload" }],
+		},
+	});
+	expect(preview.input).toEqual({
+		format: "text",
+		truncated: true,
+		text: `a${"📝".repeat(Math.floor((toolPreviewBytes - 1) / 4))}`,
+	});
+	expect(preview.output).toEqual({ format: "text", truncated: false, text: "Image (image/jpeg)" });
+});
 
 function openFixture() {
 	return env.CHAT_TEST.getByName(crypto.randomUUID());
@@ -452,7 +472,17 @@ test("resumes an in-flight script without repeating its completed write", async 
 							status: "completed",
 							output: "once",
 							activity: expect.arrayContaining([
-								{ id: expect.any(String), name: "write", status: "completed" },
+								expect.objectContaining({
+									id: expect.any(String),
+									name: "write",
+									status: "completed",
+									input: expect.objectContaining({
+										text: expect.stringContaining('"content": "once"'),
+									}),
+									output: expect.objectContaining({
+										text: expect.stringContaining('"isError": false'),
+									}),
+								}),
 							]),
 						},
 					},

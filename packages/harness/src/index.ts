@@ -22,10 +22,18 @@ const ToolCall = Schema.Struct({
 	input: Schema.Json,
 });
 
+export const toolPreviewBytes = 3 * 1024;
+export const ToolActivityPreview = Schema.Struct({
+	format: Schema.Literals(["json", "text"]),
+	text: Schema.String.check(Schema.isMaxLength(toolPreviewBytes)),
+	truncated: Schema.Boolean,
+});
 export const ToolActivity = Schema.Struct({
 	id: Schema.NonEmptyString,
 	name: Schema.NonEmptyString,
 	status: Schema.Literals(["running", "completed", "failed", "interrupted"]),
+	input: Schema.optionalKey(ToolActivityPreview),
+	output: Schema.optionalKey(ToolActivityPreview),
 });
 const toolActivityFields = { activity: Schema.optionalKey(Schema.Array(ToolActivity)) };
 export const ToolContent = Schema.Array(

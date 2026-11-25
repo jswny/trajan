@@ -20,6 +20,8 @@ export interface CodeModeActivity {
 	readonly id: string;
 	readonly name: string;
 	readonly status: "running" | "completed" | "failed" | "interrupted";
+	readonly input: Schema.Json;
+	readonly reply?: ToolReply;
 }
 
 interface RunOptions {
@@ -177,8 +179,14 @@ export function createCodeMode(
 						input.module === "codemode:tools"
 							? input.name
 							: `${input.module.slice("codemode:".length)}.${input.name}`;
-					const publish = (status: CodeModeActivity["status"]) =>
-						options.onActivity?.({ id: callId, name, status }) ?? Effect.void;
+					const publish = (status: CodeModeActivity["status"], reply?: ToolReply) =>
+						options.onActivity?.({
+							id: callId,
+							name,
+							status,
+							input: input.input,
+							...(reply && { reply }),
+						}) ?? Effect.void;
 					const publishReply = (reply: ToolReply) =>
 						publish(
 							reply.status === "returned"
@@ -186,6 +194,7 @@ export function createCodeMode(
 									? "failed"
 									: "completed"
 								: reply.status,
+							reply,
 						);
 					next++;
 					if (prior?.reply) {

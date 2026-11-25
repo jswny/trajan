@@ -9,7 +9,7 @@ import {
 	IconLoader,
 	IconSquircleFill,
 } from "@pierre/icons/beta";
-import type { ToolActivity } from "@trajan/harness";
+import type { ToolActivity, ToolActivityPreview } from "@trajan/harness";
 import { useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserViewer } from "./browser-view";
@@ -96,7 +96,9 @@ function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => 
 				/>
 			</summary>
 			<div className="space-y-3 border-t border-line px-3 py-3">
-				{activity.length > 0 ? <ToolActivityList activity={activity} /> : null}
+				{open && activity.length > 0 ? (
+					<ToolActivityList activity={activity} onInspect={onInspect} />
+				) : null}
 				{text ? (
 					<div>
 						<p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
@@ -133,15 +135,81 @@ const toolActivityLabel = {
 	interrupted: "Interrupted",
 };
 
-function ToolActivityList({ activity }: { activity: ReadonlyArray<typeof ToolActivity.Type> }) {
+function ToolActivityDetail({
+	label,
+	preview,
+}: {
+	label: string;
+	preview: typeof ToolActivityPreview.Type;
+}) {
 	return (
-		<ul role="list" aria-label="Recent tool calls" className="max-h-36 space-y-1 overflow-y-auto">
-			{activity.map(({ id, name, status }) => (
-				<li key={id} className="flex min-w-0 items-center gap-3 text-xs">
-					<span className="min-w-0 flex-1 truncate font-medium">{name}</span>
-					<span className="chat-badge" data-tone={status === "failed" ? "danger" : undefined}>
-						{toolActivityLabel[status]}
-					</span>
+		<div>
+			<p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">{label}</p>
+			<ToolCode text={preview.text || '""'} highlight={preview.format === "json"} />
+			{preview.truncated ? <p className="mt-1 text-xs text-muted">Preview truncated</p> : null}
+		</div>
+	);
+}
+
+const toolRow = "flex min-h-11 min-w-0 items-center gap-2 px-2.5 py-1.5 text-xs";
+
+function ToolActivityRow({
+	entry,
+	onInspect,
+}: {
+	entry: typeof ToolActivity.Type;
+	onInspect: () => void;
+}) {
+	const [open, setOpen] = useState(false);
+	const { name, status, input, output } = entry;
+	const heading = (
+		<>
+			<span className="min-w-0 flex-1 truncate font-medium">{name}</span>
+			<span className="chat-badge" data-tone={status === "failed" ? "danger" : undefined}>
+				{toolActivityLabel[status]}
+			</span>
+		</>
+	);
+	return input || output ? (
+		<details
+			className="group/call rounded-(--chat-inset-radius) border border-transparent open:border-line"
+			onToggle={(event) => setOpen(event.currentTarget.open)}
+		>
+			<summary
+				className={`${toolRow} cursor-pointer list-none rounded-(--chat-inset-radius) hover:bg-hover focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus-ring [&::-webkit-details-marker]:hidden`}
+				onClick={onInspect}
+			>
+				{heading}
+				<IconChevron
+					size={12}
+					aria-hidden="true"
+					className="shrink-0 text-muted group-open/call:rotate-180"
+				/>
+			</summary>
+			{open ? (
+				<div className="space-y-3 px-2.5 pb-2.5">
+					{input ? <ToolActivityDetail label="Arguments" preview={input} /> : null}
+					{output ? <ToolActivityDetail label="Result" preview={output} /> : null}
+				</div>
+			) : null}
+		</details>
+	) : (
+		<div className={toolRow}>{heading}</div>
+	);
+}
+
+function ToolActivityList({
+	activity,
+	onInspect,
+}: {
+	activity: ReadonlyArray<typeof ToolActivity.Type>;
+	onInspect: () => void;
+}) {
+	return (
+		<ul role="list" aria-label="Recent tool calls" className="space-y-1">
+			{activity.map((entry) => (
+				<li key={entry.id} className="min-w-0">
+					<ToolActivityRow entry={entry} onInspect={onInspect} />
 				</li>
 			))}
 		</ul>
@@ -385,7 +453,7 @@ function App() {
 
 						{running && !live && toolActivity.length > 0 ? (
 							<div className="w-fit max-w-full rounded-(--chat-surface-radius) border border-line bg-surface px-4 py-3">
-								<ToolActivityList activity={toolActivity} />
+								<ToolActivityList activity={toolActivity} onInspect={inspectTool} />
 							</div>
 						) : null}
 

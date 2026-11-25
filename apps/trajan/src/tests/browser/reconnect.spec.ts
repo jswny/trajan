@@ -251,7 +251,11 @@ test("replay shows the interrupted stock edit and finishes without editing the f
 		transcript.getByText(/Recovered .*"edit":"interrupted".*"text":"seed!"/),
 	).toHaveCount(1);
 	await transcript.getByText("Done", { exact: true }).click();
-	await expect(calls.filter({ hasText: /edit.*Interrupted/ })).toBeVisible();
+	const interrupted = calls.filter({ hasText: /edit.*Interrupted/ });
+	await expect(interrupted).toBeVisible();
+	await interrupted.locator("summary").press("Enter");
+	await expect(interrupted.locator("pre")).toContainText('"newText": "seed!"');
+	await expect(interrupted.getByText("Result", { exact: true })).toHaveCount(0);
 	await expect(calls.last()).toHaveText(/read.*Succeeded/);
 });
 
@@ -362,8 +366,18 @@ test("keeps separate outcomes for concurrent calls to the same tool", async ({ p
 	const calls = transcript.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
 	await expect(calls).toHaveCount(3);
 	await expect(calls.filter({ hasText: /write.*Succeeded/ })).toBeVisible();
-	await expect(calls.filter({ hasText: /read.*Succeeded/ })).toBeVisible();
-	await expect(calls.filter({ hasText: /read.*Failed/ })).toBeVisible();
+	const found = calls.filter({ hasText: /read.*Succeeded/ });
+	const missing = calls.filter({ hasText: /read.*Failed/ });
+	await expect(found.locator("pre")).toHaveCount(0);
+	await expect(missing.locator("pre")).toHaveCount(0);
+	await found.locator("summary").click();
+	await expect(found.locator("pre").nth(0)).toContainText("/workspace/module.txt");
+	await expect(found.locator("pre").nth(1)).toContainText('"text": "hello"');
+	await expect(missing.locator("pre")).toHaveCount(0);
+	await missing.locator("summary").click();
+	await expect(missing.locator("pre").nth(0)).toContainText("/workspace/missing.txt");
+	await expect(missing.locator("pre").nth(1)).toContainText('"isError": true');
+	await expect(found.locator("pre")).toHaveCount(2);
 });
 
 test("warns about a partial Code Mode outcome when a script fails after writing", async ({
@@ -373,12 +387,12 @@ test("warns about a partial Code Mode outcome when a script fails after writing"
 	await composer.fill("Fail Code Mode after a write.");
 	await composer.press("Enter");
 	const transcript = page.getByRole("main");
-	const card = transcript.locator("details");
-	await expect(card.locator("summary")).toHaveText("execOutcome unknown");
+	const card = transcript.locator(":scope > details");
+	await expect(card.locator(":scope > summary")).toHaveText("execOutcome unknown");
 	await expect(
 		transcript.getByText(/Inspect it before repeating the action/).filter({ visible: true }),
 	).toBeVisible();
-	await card.locator("summary").click();
+	await card.locator(":scope > summary").click();
 	await expect(card.getByText(/Inspect it before repeating the action/)).toBeVisible();
 	await composer.fill("hello");
 	await composer.press("Enter");
@@ -494,8 +508,8 @@ test("opens one tool row without scrolling its summary away", async ({ page }) =
 	await composer.fill("Run a workspace module.");
 	await composer.press("Enter");
 	await expect(transcript.getByText(/Wrote .*42/)).toBeVisible();
-	const card = transcript.locator("details");
-	const summary = card.locator("summary");
+	const card = transcript.locator(":scope > details");
+	const summary = card.locator(":scope > summary");
 	await expect(card).toHaveCount(1);
 	await expect(summary).toHaveText("execDone");
 	await expect(summary).toBeInViewport();

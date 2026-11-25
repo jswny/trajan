@@ -6,7 +6,12 @@ import { Tool } from "effect/ai";
 import { scheduleInstructions } from "../turn-schedules";
 import type { TurnSchedules } from "../turn-schedules";
 import { codeModeError } from "../workspace";
-import { RECENT_TOOL_CALLS, readToolActivity, writeToolActivity } from "./tool-activity";
+import {
+	RECENT_TOOL_CALLS,
+	readToolActivity,
+	toolActivity,
+	writeToolActivity,
+} from "./tool-activity";
 
 const Code = Schema.Struct({ code: Schema.NonEmptyString });
 const Exec = Tool.make("exec", { parameters: Code, success: Schema.Json });
@@ -67,7 +72,7 @@ export function createChatTools(
 					onActivity: (entry) =>
 						Effect.tryPromise({
 							try: () => {
-								recent = [...recent.filter(({ id }) => id !== entry.id), entry].slice(
+								recent = [...recent.filter(({ id }) => id !== entry.id), toolActivity(entry)].slice(
 									-RECENT_TOOL_CALLS,
 								);
 								writeToolActivity(storage, runId, { executionId, activity: recent });
