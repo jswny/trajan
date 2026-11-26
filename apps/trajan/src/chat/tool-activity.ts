@@ -1,8 +1,14 @@
 import { clearCodeModeRun } from "@trajan/code-mode";
 import type { CodeModeActivity } from "@trajan/code-mode";
-import { FileChange, ToolActivity, ToolContent, toolPreviewBytes } from "@trajan/harness";
+import {
+	FileChange,
+	FilePreview,
+	ToolActivity,
+	ToolContent,
+	toolPreviewBytes,
+} from "@trajan/harness";
 import type { ToolActivityPreview } from "@trajan/harness";
-import { Schema } from "effect";
+import { Option, Schema } from "effect";
 
 export const RECENT_TOOL_CALLS = 8;
 
@@ -13,17 +19,7 @@ const ExecutionActivity = Schema.Struct({
 const decodeActivity = Schema.decodeUnknownSync(Schema.UndefinedOr(ExecutionActivity));
 const decodeContent = Schema.decodeUnknownOption(ToolContent);
 const decodeFileChange = Schema.decodeUnknownOption(FileChange);
-const decodeFileRead = Schema.decodeUnknownOption(
-	Schema.Struct({
-		isError: Schema.Literal(false),
-		details: Schema.Struct({
-			path: Schema.NonEmptyString,
-			content: Schema.String,
-			truncated: Schema.Boolean,
-		}),
-	}),
-);
-const decodePath = Schema.decodeUnknownOption(Schema.Struct({ path: Schema.NonEmptyString }));
+const decodeFilePreview = Schema.decodeUnknownOption(FilePreview);
 const encoder = new TextEncoder();
 
 function limitPreview(text: string) {
@@ -43,34 +39,16 @@ function preview(value: Schema.Json): typeof ToolActivityPreview.Type {
 		: { format: "json", ...limitPreview(JSON.stringify(value, null, 2)) };
 }
 
-function filePreview(
+export function filePreview(
 	path: string,
 	content: string,
 	truncated = false,
-): typeof ToolActivityPreview.Type {
+): typeof FilePreview.Type {
 	const bounded = limitPreview(content);
 	return { format: "file", path, text: bounded.text, truncated: truncated || bounded.truncated };
 }
 
-function previewOutput(name: string, input: Schema.Json, value: Schema.Json) {
-	if (name === "read") {
-		const read = decodeFileRead(value);
-		if (read._tag === "Some") {
-			const { path, content, truncated } = read.value.details;
-			return filePreview(path, content, truncated);
-		}
-	}
-	if (name === "readSkillResource" && typeof value === "string") {
-		const path = decodePath(input);
-		// The SDK's model-facing envelope carries text resources and base64 resources.
-		const text =
-			/^<skill_resource [^\n]* encoding="text"(?: [^\n]*)?>\n([\s\S]*)\n<\/skill_resource>$/.exec(
-				value,
-			);
-		if (path._tag === "Some" && text?.[1] !== undefined) {
-			return filePreview(path.value.path, text[1]);
-		}
-	}
+function previewOutput(value: Schema.Json) {
 	const content = decodeContent(value);
 	return content._tag === "Some" && content.value.length > 0
 		? preview(
@@ -89,12 +67,15 @@ export function toolActivity({
 	reply,
 	details,
 }: CodeModeActivity): typeof ToolActivity.Type {
+	const file =
+		status === "completed" ? Option.getOrUndefined(decodeFilePreview(details)) : undefined;
 	const output =
-		reply?.status === "returned"
-			? previewOutput(name, input, reply.value)
+		file ??
+		(reply?.status === "returned"
+			? previewOutput(reply.value)
 			: reply?.status === "failed"
 				? preview(reply.message)
-				: undefined;
+				: undefined);
 	const change = status === "completed" ? decodeFileChange(details) : undefined;
 	return {
 		id,

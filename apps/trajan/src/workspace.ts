@@ -11,6 +11,7 @@ import {
 } from "agents/skills";
 import type { SkillCatalog } from "agents/skills";
 import { Effect, Predicate, Schema, Semaphore } from "effect";
+import { filePreview } from "./chat/tool-activity";
 import { workspaceFileTools } from "./workspace-file-changes";
 import type { FileMutationReceipt } from "./workspace-file-changes";
 
@@ -20,6 +21,13 @@ export const WORKSPACE_PROMPT =
 const root = "/workspace";
 const replaySafeFiles = new Set(["read", "ls", "find", "grep"]);
 const isFileToolError = Schema.is(Schema.Struct({ isError: Schema.Literal(true) }));
+const decodeFileRead = Schema.decodeUnknownOption(
+	Schema.Struct({
+		path: Schema.NonEmptyString,
+		content: Schema.String,
+		truncated: Schema.Boolean,
+	}),
+);
 
 export function codeModeError(cause: unknown) {
 	return new CodeModeError({ message: cause instanceof Error ? cause.message : String(cause) });
@@ -169,12 +177,16 @@ const SkillResourceRequest = Schema.Struct({ ...SkillName.fields, path: Schema.N
 function workspaceSkills(workspace: Workspace) {
 	function operation<A>(
 		schema: Schema.Codec<A>,
-		read: (catalog: SkillCatalog, input: A) => Effect.Effect<Schema.Json, CodeModeError>,
+		read: (
+			catalog: SkillCatalog,
+			input: A,
+			recordDetails: Parameters<CodeModeTool["run"]>[1]["recordDetails"],
+		) => Effect.Effect<Schema.Json, CodeModeError>,
 	): CodeModeTool {
 		return {
 			replay: "safe",
 			run: Effect.fnUntraced(
-				function* (raw, { signal }) {
+				function* (raw, { signal, recordDetails }) {
 					const input = yield* Schema.decodeUnknownEffect(schema)(raw);
 					const catalog = yield* Effect.tryPromise({
 						try: () => {
@@ -189,7 +201,7 @@ function workspaceSkills(workspace: Workspace) {
 					if (failure) {
 						return yield* codeModeError(failure.error);
 					}
-					return yield* read(catalog, input);
+					return yield* read(catalog, input, recordDetails);
 				},
 				Effect.catchTag("SchemaError", (error) => Effect.fail(codeModeError(error))),
 			),
@@ -208,7 +220,7 @@ function workspaceSkills(workspace: Workspace) {
 				? Effect.succeed(activated.value)
 				: Effect.fail(codeModeError(activated.error));
 		}),
-		readSkillResource: operation(SkillResourceRequest, (catalog, input) =>
+		readSkillResource: operation(SkillResourceRequest, (catalog, input, recordDetails) =>
 			Effect.gen(function* () {
 				const read = yield* Effect.tryPromise({
 					try: () => catalog.readResource(input),
@@ -216,6 +228,10 @@ function workspaceSkills(workspace: Workspace) {
 				});
 				if (!read.ok) {
 					return yield* codeModeError(read.error);
+				}
+				const { resource } = read.value;
+				if (resource.encoding === "text") {
+					recordDetails(filePreview(resource.path, resource.content));
 				}
 				return renderSkillResource(read.value);
 			}),
@@ -263,6 +279,13 @@ export function workspaceToolset(workspace: Workspace) {
 					const details = yield* Schema.decodeUnknownEffect(Schema.Json)(result.details).pipe(
 						Effect.orElseSucceed(() => null),
 					);
+					if (name === "read" && !result.isError) {
+						const file = decodeFileRead(details);
+						if (file._tag === "Some") {
+							const { path, content, truncated } = file.value;
+							recordDetails(filePreview(path, content, truncated));
+						}
+					}
 					return { text, isError: result.isError, ...(details !== null && { details }) };
 				}),
 			} satisfies CodeModeTool,

@@ -37,13 +37,14 @@ const toolPreviewFields = {
 	text: Schema.String.check(Schema.isMaxLength(toolPreviewBytes)),
 	truncated: Schema.Boolean,
 };
+export const FilePreview = Schema.Struct({
+	format: Schema.Literal("file"),
+	path: Schema.NonEmptyString,
+	...toolPreviewFields,
+});
 export const ToolActivityPreview = Schema.Union([
 	Schema.Struct({ format: Schema.Literals(["json", "text"]), ...toolPreviewFields }),
-	Schema.Struct({
-		format: Schema.Literal("file"),
-		path: Schema.NonEmptyString,
-		...toolPreviewFields,
-	}),
+	FilePreview,
 ]);
 export const ToolActivity = Schema.Struct({
 	id: Schema.NonEmptyString,

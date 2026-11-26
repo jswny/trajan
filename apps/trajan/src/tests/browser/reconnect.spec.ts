@@ -48,7 +48,7 @@ test("loads a skill saved in chat after the Worker restarts", async ({ page }) =
 	await expect(replies).toHaveCount(2);
 	await expect(replies.last()).toBeVisible();
 
-	const card = completed.last();
+	const card = completed.first();
 	await card.locator(":scope > summary").click();
 	for (const { name, path, source, token } of [
 		{

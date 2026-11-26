@@ -164,7 +164,7 @@ export default async function () {
   const written = await tools.write({ path, content: "milk" });
   const read = await tools.read({ path });
   return { names: Object.keys(tools).sort(), invalid: invalid.isError, outside: outside.isError,
-    absent: absent.isError, written: written.isError, text: read.text };
+    absent: absent.isError, written: written.isError, read };
 }`;
 	expect(decode(await stub.workspaceTool("exec", { code }))).toMatchObject({
 		status: "completed",
@@ -173,7 +173,11 @@ export default async function () {
 			{ name: "write", status: "failed" },
 			{ name: "read", status: "failed" },
 			{ name: "write", status: "completed" },
-			{ name: "read", status: "completed" },
+			{
+				name: "read",
+				status: "completed",
+				output: { format: "file", path: "/workspace/notes.txt", text: "milk", truncated: false },
+			},
 		],
 		output: {
 			names: [
@@ -195,7 +199,18 @@ export default async function () {
 			outside: true,
 			absent: true,
 			written: false,
-			text: expect.stringContaining("milk"),
+			read: {
+				text: "milk",
+				isError: false,
+				details: {
+					path: "/workspace/notes.txt",
+					content: "milk",
+					startLine: 1,
+					endLine: 1,
+					totalLines: 1,
+					truncated: false,
+				},
+			},
 		},
 	});
 	expect(decode(await stub.workspaceTool("write", { path: "/workspace/notes.txt" }))).toMatchObject(
@@ -213,10 +228,15 @@ test("discovers workspace skills written in the same exec and loads them after a
 	let stub = openFixture();
 	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));
 	const skills = [{ name: "weekly-brief", description: "Prepare a weekly brief." }];
+	const template = "# Weekly template v1\n\n- **Highlight**\n- Next up";
 	const saved = {
 		skills,
 		instructions: expect.stringContaining("Use the weekly template."),
-		resource: expect.stringContaining("Weekly template v1"),
+		resource: [
+			'<skill_resource name="weekly-brief" path="references/template.md" kind="reference" encoding="text" mimeType="text/markdown">',
+			template,
+			"</skill_resource>",
+		].join("\n"),
 	};
 	const filePreviews = [
 		expect.objectContaining({
@@ -224,7 +244,7 @@ test("discovers workspace skills written in the same exec and loads them after a
 			output: {
 				format: "file",
 				path: "references/template.md",
-				text: "# Weekly template v1\n\n- **Highlight**\n- Next up",
+				text: template,
 				truncated: false,
 			},
 		}),

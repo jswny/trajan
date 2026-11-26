@@ -6,6 +6,7 @@ Keep this file focused on durable decisions that contributors cannot infer from 
 - Extract reusable capabilities with interfaces that can be tested independently. Have platform adapters depend on the platform-neutral core. Keep product policy and composition in the deployable app.
 - Use Effect for app-owned asynchronous workflows and Effect atoms for shared UI state. Compose workflows before running them at integration boundaries. Use plain functions for pure transformations and let the renderer schedule DOM work.
 - Give the model one tool surface through Code Mode. Expose only `exec` to the model. Route script effects through registered tools with an explicit replay policy.
+- Keep tool replies focused on what the caller needs. Record structured UI details alongside the tool outcome so previews can be restored after recovery.
 - Use Pi Durable as a design reference for turn execution and recovery. Keep the chat rebuildable from durable state after a reconnect.
 - Check with the user before making any change that requires a migration or backward-compatibility support.
 - Scope subscriptions, timers, and in-flight work to their owning session, connection, or request. Gate actions on application readiness as well as transport connectivity.
