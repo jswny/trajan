@@ -124,7 +124,6 @@ export class ChatTestObject extends TrajanChatObject {
 		this.env.LOADER,
 		(point, signal) => this.#pauseAt(point, signal),
 	);
-	protected override readonly toolCatalog = [this.#effectTools.declaration];
 	override readSettledTools(runId: string) {
 		return this.#effectTools.readSettledTools(runId);
 	}

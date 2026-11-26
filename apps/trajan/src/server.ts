@@ -93,12 +93,6 @@ export class Trajan extends TrajanChatObject {
 		});
 	}
 
-	protected override readonly toolCatalog = [
-		{
-			name: this.#tools.declaration.name,
-			description: this.#tools.declaration.description,
-		},
-	];
 	protected override readSettledTools(runId: string) {
 		return this.#tools.readSettledTools(runId);
 	}

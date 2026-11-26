@@ -65,7 +65,7 @@ function ChatSettingsMenu() {
 
 function UserMessage({ message }: { message: ChatText }) {
 	return (
-		<div className="flex justify-end">
+		<div data-chat-entry className="flex justify-end">
 			<div className="min-w-0 max-w-[85%] whitespace-pre-wrap wrap-anywhere rounded-(--chat-surface-radius) bg-ink px-4 py-2.5 text-sm leading-relaxed text-canvas">
 				{message.text}
 			</div>
@@ -78,19 +78,26 @@ function Message({ message, onInspect }: { message: ChatMessage; onInspect: () =
 		case "user":
 			return <UserMessage message={message} />;
 		case "assistant":
-			return <ChatMarkdown className="min-w-0 text-sm leading-6">{message.text}</ChatMarkdown>;
+			return (
+				<div data-chat-entry>
+					<ChatMarkdown className="min-w-0 text-sm leading-6">{message.text}</ChatMarkdown>
+				</div>
+			);
 		case "tool":
 			return <ToolCard message={message} onInspect={onInspect} />;
 		case "notice":
 			return message.status === "failed" ? (
 				<div
+					data-chat-entry
 					role="alert"
 					className="rounded-(--chat-surface-radius) bg-danger/10 px-4 py-3 text-sm text-danger"
 				>
 					{message.text}
 				</div>
 			) : (
-				<p className="text-sm text-muted">{message.text}</p>
+				<p data-chat-entry className="text-sm text-muted">
+					{message.text}
+				</p>
 			);
 	}
 }
@@ -99,8 +106,7 @@ function App() {
 	const contentRef = useRef<HTMLDivElement>(null);
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const inspectionFrame = useRef<number | null>(null);
-	// Distance from the bottom to keep while earlier messages load above.
-	const keepFromBottom = useRef<number | null>(null);
+	const historyAnchor = useRef<{ element: Element; offset: number } | null>(null);
 	// Whether the reader is at the bottom: new messages scroll into view only
 	// then, not while they read earlier ones.
 	const following = useRef(true);
@@ -137,7 +143,7 @@ function App() {
 			return;
 		}
 		const observer = new ResizeObserver(() => {
-			if (following.current && keepFromBottom.current === null) {
+			if (following.current && historyAnchor.current === null) {
 				scroller.scrollTop = scroller.scrollHeight;
 				lastScrollTop.current = scroller.scrollTop;
 			}
@@ -185,21 +191,31 @@ function App() {
 		lastScrollTop.current = scroller.scrollTop;
 	};
 
-	// Earlier messages loaded above: keep what was on screen in place.
+	// Keep the visible entry fixed when prepending history, even as live text grows below it.
 	useLayoutEffect(() => {
 		const scroller = scrollRef.current;
-		if (scroller !== null && keepFromBottom.current !== null) {
-			scroller.scrollTop = scroller.scrollHeight - keepFromBottom.current;
-		}
+		const anchor = historyAnchor.current;
 		if (!loading) {
-			keepFromBottom.current = null;
+			historyAnchor.current = null;
+			if (scroller && anchor?.element.isConnected) {
+				const offset = anchor.element.getBoundingClientRect().top;
+				scroller.scrollTop += offset - anchor.offset;
+				lastScrollTop.current = scroller.scrollTop;
+			}
 		}
 	}, [oldestId, loading]);
 
 	const showEarlier = () => {
 		const scroller = scrollRef.current;
-		if (scroller !== null) {
-			keepFromBottom.current = scroller.scrollHeight - scroller.scrollTop;
+		if (scroller) {
+			const top = scroller.getBoundingClientRect().top;
+			const entry = Array.from(scroller.querySelectorAll("[data-chat-entry]")).find(
+				(element) => element.getBoundingClientRect().bottom > top,
+			);
+			if (entry) {
+				following.current = false;
+				historyAnchor.current = { element: entry, offset: entry.getBoundingClientRect().top };
+			}
 		}
 		loadEarlier();
 	};

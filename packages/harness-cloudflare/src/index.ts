@@ -166,7 +166,10 @@ export abstract class CloudflareHarness<
 
 	protected onTurnPhase?(phase: "before-task" | "after-commit", signal: AbortSignal): Promise<void>;
 	protected onProgress?(runId: string, event: TurnProgress): void;
-	protected onStateChange?(settledRunId?: string): void;
+	protected onStateChange?(update: {
+		readonly settledRunId?: string;
+		readonly historyChanged: boolean;
+	}): void;
 
 	/** Archives outcomes and clears run state in the transaction that settles the turn. */
 	protected settleRunState?(
@@ -200,9 +203,11 @@ export abstract class CloudflareHarness<
 		return lifecycleEffect("get turn task", () => this.#tasks.handle(turnDefinition).get(runId));
 	}
 
-	#notifyState(runId?: string) {
+	#notifyState(settledRunId?: string, historyChanged = settledRunId !== undefined) {
 		return publishUpdate("conversation state", () =>
-			Effect.sync(() => this.onStateChange?.(runId)),
+			Effect.sync(() =>
+				this.onStateChange?.({ historyChanged, ...(settledRunId && { settledRunId }) }),
+			),
 		);
 	}
 
@@ -322,8 +327,12 @@ export abstract class CloudflareHarness<
 		yield* this.#inbox.wake();
 	});
 
+	protected runState() {
+		return this.#conversation.status();
+	}
+
 	protected snapshot() {
-		return { ...this.#conversation.status(), page: this.#conversation.page({}) };
+		return { ...this.runState(), page: this.#conversation.page({}) };
 	}
 
 	protected readPage(query: HistoryQuery) {
@@ -364,7 +373,7 @@ export abstract class CloudflareHarness<
 		return conversationEffect("record missed submission", () =>
 			this.#conversation.recordUnadmittedSubmission(submission, text),
 		).pipe(
-			Effect.tap((recorded) => (recorded ? this.#notifyState() : Effect.void)),
+			Effect.tap((recorded) => (recorded ? this.#notifyState(undefined, true) : Effect.void)),
 			Effect.asVoid,
 		);
 	}

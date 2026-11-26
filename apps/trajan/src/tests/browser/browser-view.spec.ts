@@ -32,7 +32,6 @@ test("opens the browser in a mobile sheet and docks it on wide screens", async (
 			type: "snapshot",
 			page: { entries: history, nextBefore: null },
 			queued: 0,
-			catalog: [],
 			active: null,
 			preview: null,
 			browserWatch: null,

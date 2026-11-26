@@ -90,16 +90,14 @@ export function updateToolPreview(
 	}
 	return { ...preview, tools: preview.tools.map((entry) => (entry === existing ? tool : entry)) };
 }
-export const ChatToolInfo = Schema.Struct({ name: Schema.String, description: Schema.String });
 export const BrowserWatch = Schema.NullOr(
 	Schema.Struct({
 		id: Schema.NonEmptyString,
 		expiresAt: Schema.Int,
 	}),
 );
-export const ChatSnapshot = Schema.Struct({
-	type: Schema.Literal("snapshot"),
-	page: ChatPage,
+export const ChatRunState = Schema.Struct({
+	type: Schema.Literal("run-state"),
 	active: Schema.NullOr(
 		Schema.Struct({
 			runId: RunId,
@@ -108,13 +106,18 @@ export const ChatSnapshot = Schema.Struct({
 			state: Schema.Literals(["pending", "running", "stopping"]),
 		}),
 	),
-	preview: Schema.NullOr(ChatPreview),
 	queued: Schema.Natural,
-	catalog: Schema.Array(ChatToolInfo),
+});
+export const ChatSnapshot = Schema.Struct({
+	...ChatRunState.fields,
+	type: Schema.Literal("snapshot"),
+	page: ChatPage,
+	preview: Schema.NullOr(ChatPreview),
 	browserWatch: BrowserWatch,
 });
 export const ChatEvent = Schema.Union([
 	ChatSnapshot,
+	ChatRunState,
 	Schema.Struct({ type: Schema.Literal("browser"), browserWatch: BrowserWatch }),
 	Schema.Struct({ type: Schema.Literal("reset"), runId: RunId }),
 	Schema.Struct({ type: Schema.Literal("tool"), runId: RunId, tool: ChatToolPreview }),

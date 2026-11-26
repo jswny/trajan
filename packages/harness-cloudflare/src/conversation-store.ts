@@ -7,6 +7,7 @@ import {
 import type { RuntimeOutcome, TurnCompletion, TurnSubmission } from "@trajan/harness";
 import { Option, Schema } from "effect";
 
+const historyByteLimit = 1024 * 1024;
 const contextTurnLimit = 16;
 const contextByteLimit = 32_000;
 const messageJson = Schema.fromJsonString(TurnMessage);
@@ -41,6 +42,7 @@ const EntryRow = Schema.Struct({
 	seq: SubmissionRow.fields.seq,
 	submission_id: SubmissionRow.fields.submission_id,
 	role: Schema.NonEmptyString,
+	bytes: Schema.Natural,
 });
 const decodeAdmission = Schema.decodeUnknownSync(Schema.UndefinedOr(AdmissionRow));
 const decodeSubmission = Schema.decodeUnknownSync(SubmissionRow);
@@ -441,17 +443,32 @@ export class ConversationStore {
 		const rows = this.storage.sql
 			.exec(
 				`
-			SELECT entries.seq, submissions.submission_id, entries.message, entries.role
-			FROM harness_entries AS entries JOIN harness_submissions AS submissions ON submissions.seq = entries.submission_seq
-			WHERE entries.seq < ? ORDER BY entries.seq DESC LIMIT ?
+			WITH recent AS (
+				SELECT seq, length(CAST(message AS BLOB)) AS message_bytes
+				FROM harness_entries WHERE seq < ? ORDER BY seq DESC LIMIT ?
+			), sized AS (
+				SELECT seq, row_number() OVER (ORDER BY seq DESC) AS position,
+					sum(message_bytes) OVER (ORDER BY seq DESC) AS bytes
+				FROM recent
+			)
+			SELECT entries.seq, submissions.submission_id, entries.message, entries.role, sized.bytes
+			FROM sized JOIN harness_entries AS entries USING (seq)
+			JOIN harness_submissions AS submissions ON submissions.seq = entries.submission_seq
+			WHERE sized.position <= MAX(1, COALESCE(
+				(SELECT MAX(position) FROM sized WHERE bytes <= ?), 0
+			)) + 2
+			ORDER BY entries.seq DESC
 		`,
 				before ?? Number.MAX_SAFE_INTEGER,
 				limit + 2,
+				historyByteLimit,
 			)
 			.toArray()
 			.map((row) => decodeEntry(row));
-		// A call and its result form one chat card, so include its call at the page edge.
-		const pageSize = splitsToolCall(rows[limit - 1], rows[limit]) ? limit + 1 : limit;
+		const overflow = rows.findIndex(({ bytes }) => bytes > historyByteLimit);
+		const boundary = overflow < 0 ? limit : Math.min(limit, Math.max(1, overflow));
+		// Keep the pair together even if its script takes the page slightly over budget.
+		const pageSize = splitsToolCall(rows[boundary - 1], rows[boundary]) ? boundary + 1 : boundary;
 		const entries = rows.slice(0, pageSize).reverse();
 		return {
 			entries: entries.map(({ seq, submission_id, message }) => ({

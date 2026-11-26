@@ -19,6 +19,7 @@ export function ToolCard({ message, onInspect }: { message: ChatTool; onInspect:
 	const step = !result && activity.at(-1);
 	return (
 		<details
+			data-chat-entry
 			className="chat-tool-card group w-fit max-w-full border border-line bg-surface open:w-full"
 			onToggle={(event) => setOpen(event.currentTarget.open)}
 		>

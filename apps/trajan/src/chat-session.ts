@@ -30,7 +30,6 @@ export const INITIAL_CHAT: ChatState = {
 	active: null,
 	preview: null,
 	queued: 0,
-	catalog: [],
 	browserWatch: null,
 	submission: null,
 	historyRequest: null,
@@ -62,8 +61,25 @@ export function mergeChatPage(
 		: current;
 }
 
+function receiveRunState(
+	state: ChatState,
+	{ active, queued }: Pick<ChatState, "active" | "queued">,
+): ChatState {
+	return {
+		...state,
+		active,
+		queued,
+		preview: state.preview?.runId === active?.runId ? state.preview : null,
+		stopRequest:
+			state.stopRequest?.runId === active?.runId && active?.state !== "stopping"
+				? state.stopRequest
+				: null,
+	};
+}
 export function receiveChatEvent(state: ChatState, event: typeof ChatEvent.Type): ChatState {
 	switch (event.type) {
+		case "run-state":
+			return receiveRunState(state, event);
 		case "snapshot": {
 			const previous = state.preview?.runId === event.active?.runId ? state.preview : null;
 			const preview =
@@ -75,17 +91,13 @@ export function receiveChatEvent(state: ChatState, event: typeof ChatEvent.Type)
 					: (event.preview ?? (previous && { ...previous, text: "" }));
 			const page = mergeChatPage(state.page, event.page);
 			return {
-				...state,
-				...event,
+				...receiveRunState(state, event),
+				browserWatch: event.browserWatch,
 				status: "open",
 				page,
 				preview,
 				historyRequest:
 					state.historyRequest?.before === page.nextBefore ? state.historyRequest : null,
-				stopRequest:
-					state.stopRequest?.runId === event.active?.runId && event.active?.state !== "stopping"
-						? state.stopRequest
-						: null,
 			};
 		}
 		case "reset":
@@ -159,19 +171,22 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 		decodeFrame(frame).pipe(
 			Effect.flatMap((event) =>
 				SubscriptionRef.update(state, (current) => receiveChatEvent(current, event)).pipe(
-					Effect.andThen(event.type === "snapshot" ? reconcileDelivery : Effect.void),
+					Effect.andThen(
+						event.type === "snapshot" || event.type === "run-state"
+							? reconcileDelivery
+							: Effect.void,
+					),
 				),
 			),
 		);
 	const connection = Effect.gen(function* () {
 		const pull = yield* Socket.readerString(socket);
-		yield* pull.pipe(
-			Effect.timeout("5 seconds"),
-			Effect.flatMap(Effect.forEach(receive, { discard: true })),
-		);
-		if ((yield* SubscriptionRef.get(state)).status !== "open") {
-			return yield* new ChatRequestError({ message: "The chat socket did not send a snapshot." });
-		}
+		const read = pull.pipe(Effect.flatMap(Effect.forEach(receive, { discard: true })));
+		yield* Effect.gen(function* () {
+			while ((yield* SubscriptionRef.get(state)).status !== "open") {
+				yield* read;
+			}
+		}).pipe(Effect.timeout("5 seconds"));
 		if (recoveryId !== undefined) {
 			const id = recoveryId;
 			recoveryId = undefined;

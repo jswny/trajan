@@ -31,12 +31,27 @@ test("uses the server's earlier cursor after a reconnect gap", () => {
 	expect(mergeChatPage(cached, latest)).toBe(latest);
 });
 
+test("a run-state update preserves history and cannot make an unsynced session ready", () => {
+	const page = { entries: entries(1, 2), nextBefore: null };
+	const next = receiveChatEvent(
+		{ ...INITIAL_CHAT, page },
+		{
+			type: "run-state",
+			active: { runId: "run", submissionId: "submit", state: "running", prompt: "Hello" },
+			queued: 1,
+		},
+	);
+	expect(next.status).toBe("connecting");
+	expect(next.active?.runId).toBe("run");
+	expect(next.queued).toBe(1);
+	expect(next.page).toBe(page);
+});
+
 test("ignores stale deltas and replaces a discarded draft after a new snapshot", () => {
 	const base = {
 		type: "snapshot" as const,
 		page: { entries: [], nextBefore: null },
 		queued: 0,
-		catalog: [],
 		browserWatch: null,
 	};
 	const first = receiveChatEvent(INITIAL_CHAT, {
@@ -60,7 +75,6 @@ const snapshot = Schema.encodeSync(Schema.fromJsonString(ChatSnapshot))({
 	active: null,
 	preview: null,
 	queued: 0,
-	catalog: [],
 	browserWatch: null,
 	type: "snapshot",
 });

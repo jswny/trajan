@@ -13,13 +13,7 @@ import {
 	ChatStopPath,
 	updateToolPreview,
 } from "./protocol";
-import type {
-	BrowserWatch,
-	ChatPreview,
-	ChatSnapshot,
-	ChatToolInfo,
-	ChatToolPreview,
-} from "./protocol";
+import type { BrowserWatch, ChatPreview, ChatSnapshot, ChatToolPreview } from "./protocol";
 import { clearToolState, RECENT_TOOL_CALLS } from "./tool-activity";
 
 const chatEventJson = Schema.encodeSync(Schema.fromJsonString(ChatEvent));
@@ -39,7 +33,6 @@ function sendChat(socket: WebSocket, data: string) {
 }
 
 export abstract class TrajanChatObject extends CloudflareHarness<Env> {
-	protected readonly toolCatalog: ReadonlyArray<typeof ChatToolInfo.Type> = [];
 	protected readonly schedules = new TurnSchedules(
 		(input) => this.submitEffect(input),
 		(input, text) => this.recordUnadmittedSubmission(input, text),
@@ -74,11 +67,21 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 		return tools;
 	}
 
-	protected override onStateChange(settledRunId?: string) {
+	protected override onStateChange({
+		settledRunId,
+		historyChanged,
+	}: {
+		readonly settledRunId?: string;
+		readonly historyChanged: boolean;
+	}) {
 		if (settledRunId !== undefined && this.#draft?.runId === settledRunId) {
 			this.#draft = undefined;
 		}
-		this.#broadcastSnapshot();
+		if (historyChanged) {
+			this.#broadcastSnapshot();
+		} else if (this.ctx.getWebSockets(chatTag).length > 0) {
+			this.#broadcast({ type: "run-state", ...this.runState() });
+		}
 	}
 
 	protected override onProgress(runId: string, event: TurnProgress) {
@@ -130,7 +133,6 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 			active,
 			queued,
 			preview: draft && draft.runId === active?.runId ? draft : null,
-			catalog: this.toolCatalog,
 			browserWatch: this.browserWatch,
 		};
 	}
@@ -158,7 +160,11 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 		const url = new URL(request.url);
 		if (url.pathname === ChatHistoryPath && request.method === "GET") {
 			const before = url.searchParams.get("before");
-			const query = decodeHistory(before === null ? {} : { before: Number(before) });
+			const limit = url.searchParams.get("limit");
+			const query = decodeHistory({
+				...(before !== null && { before: Number(before) }),
+				...(limit !== null && { limit: Number(limit) }),
+			});
 			if (query._tag === "None") {
 				return Response.json({ error: "Invalid history cursor." }, { status: 400 });
 			}

@@ -819,6 +819,31 @@ test("keeps an exec script and its result on the same history page", async () =>
 	expect(earlier.nextBefore).toBeNull();
 });
 
+test("bounds history by encoded bytes while keeping a cursor to older rows", async () => {
+	const stub = openFixture();
+	const { runId } = await submit(stub);
+	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "completed" });
+	await runInDurableObject(stub, (_, { storage }) => {
+		const large = Schema.encodeSync(messageJson)({ role: "assistant", text: "é".repeat(300_000) });
+		for (let index = 0; index < 3; index++) {
+			storage.sql.exec(
+				"INSERT INTO harness_entries (submission_seq, role, message) SELECT seq, 'assistant', ? FROM harness_submissions WHERE run_id = ?",
+				large,
+				runId,
+			);
+		}
+	});
+
+	const page = await stub.history({});
+	expect(page.entries).toHaveLength(1);
+	if (page.nextBefore === null) {
+		throw new Error("Expected an earlier history cursor");
+	}
+	const next = await stub.history({ before: page.nextBefore });
+	expect(next.entries).toHaveLength(1);
+	expect(next.entries[0].id).toBeLessThan(page.entries[0].id);
+});
+
 test.each([
 	{
 		name: "reattaches to the completed tool after a restart before its checkpoint",
