@@ -419,6 +419,40 @@ export default async function () {
 	});
 });
 
+test("Git status sees committed index changes across calls and checkout restores the worktree", async () => {
+	const stub = openFixture();
+	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));
+	const code = `
+import { init, add, commit, branch, checkout, status } from "codemode:git";
+import { read, write } from "codemode:tools";
+export default async function () {
+  const author = { name: "Trajan fixture", email: "fixture@example.invalid" };
+  const path = "/workspace/index-proof.txt";
+  await init();
+  await write({ path, content: "first" });
+  const before = await status();
+  await add({ paths: ["index-proof.txt"] });
+  const staged = await status();
+  await commit({ author, message: "First" });
+  await branch({ name: "original" });
+  await write({ path, content: "second" });
+  await add({ paths: ["index-proof.txt"] });
+  await commit({ author, message: "Second" });
+  await checkout({ ref: "original" });
+  const checkedOut = await read({ path });
+  return { before, staged, text: checkedOut.text, after: await status() };
+}`;
+	expect(decode(await stub.workspaceTool("exec", { code }))).toMatchObject({
+		status: "completed",
+		output: {
+			before: [{ path: "index-proof.txt", index: " ", worktree: "?" }],
+			staged: [{ path: "index-proof.txt", index: "A" }],
+			text: "first",
+			after: [],
+		},
+	});
+});
+
 test("restores native compaction across a reset and pairs the resumed exec with its result", async () => {
 	let stub = openFixture();
 	const first = await submit(stub, { id: "compact-first", prompt: compactSetupPrompt });
@@ -869,48 +903,42 @@ test("rolls back an atomic write that returns a failure after touching the file"
 	expect((await stub.state()).text).toBe("");
 });
 
-test("Git replay reports interrupted branch creation and continues with a status check", async () => {
-	let stub = openFixture();
-	await stub.pause("during-replay-git");
-	const { runId } = await submit(stub, {
-		id: "git-replay",
-		prompt: "Recover interrupted Git branch creation.",
-	});
-	await expect.poll(() => stub.state()).toMatchObject({ pausedAt: "during-replay-git" });
-	const { instance } = await stub.state();
-	const branchAttempts = () =>
-		runInDurableObject(stub, (_, { storage }) => storage.kv.get("git-branch-attempts"));
-	expect(await branchAttempts()).toBe(1);
-
-	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
-	stub = env.CHAT_TEST.get(stub.id);
-	await runDurableObjectAlarm(stub);
-	expect((await stub.state()).instance).not.toBe(instance);
-	await expect
-		.poll(() => readTurn(stub, runId))
-		.toMatchObject({
-			state: "completed",
-			result: {
-				messages: [
-					{ role: "user" },
-					{ role: "tool-call", name: "exec" },
-					{
-						role: "tool",
-						result: {
-							status: "completed",
-							output: { interrupted: true, checkedStatus: true, branchExists: true },
-							activity: expect.arrayContaining([
-								expect.objectContaining({ name: "git.branch", status: "interrupted" }),
-								expect.objectContaining({ name: "git.status", status: "completed" }),
-							]),
-						},
-					},
-					{ role: "assistant", text: expect.stringMatching(/^Recovered /) },
-				],
-			},
+test.each([
+	{ when: "before", prompt: "Recover interrupted Git branch creation." },
+	{ when: "after", prompt: "Recover committed Git branch creation." },
+])(
+	"recovers Git branch creation after a restart $when its checkpoint",
+	async ({ when, prompt }) => {
+		let stub = openFixture();
+		const { instance } = await stub.state();
+		if (when === "before") {
+			await stub.pause("during-replay-git");
+		}
+		const { runId } = await submit(stub, { id: "git-replay", prompt });
+		const branchAttempts = () =>
+			runInDurableObject(stub, (_, { storage }) => storage.kv.get("git-branch-attempts"));
+		if (when === "after") {
+			await expect.poll(() => stub.state()).toMatchObject({ pausedAt: "waiting-for-restart" });
+			await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+		}
+		stub = await waitForRestart(stub, instance);
+		expect(await branchAttempts()).toBe(when === "before" ? undefined : 1);
+		await runDurableObjectAlarm(stub);
+		await expect.poll(() => readTurn(stub, runId)).toMatchObject({ state: "completed" });
+		const message = (await readTurn(stub, runId)).result?.messages.find(
+			(entry) => entry.role === "tool",
+		);
+		expect(message?.result).toMatchObject({
+			status: "completed",
+			output: { checkedStatus: true, branchExists: true },
+			activity: expect.arrayContaining([
+				expect.objectContaining({ name: "git.branch", status: "completed" }),
+				expect.objectContaining({ name: "git.status", status: "completed" }),
+			]),
 		});
-	expect(await branchAttempts()).toBe(1);
-});
+		expect(await branchAttempts()).toBe(1);
+	},
+);
 
 test("a restart between tool calls reuses the first result and still executes the second call", async () => {
 	const input = { id: "multi-tool", prompt: "Append hello, then world." };

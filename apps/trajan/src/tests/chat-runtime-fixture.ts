@@ -49,6 +49,7 @@ const editReplayPrompt = "Recover an interrupted edit.";
 const editReplayCall = "exec-replay-edit";
 const deleteReplayPrompt = "Recover an interrupted delete.";
 const gitReplayPrompt = "Recover interrupted Git branch creation.";
+const gitCommittedPrompt = "Recover committed Git branch creation.";
 const gitReplayCall = "exec-replay-git";
 const scheduledPrompt = "Check the workspace on schedule.";
 const diffPrompt = "Show file diffs.";
@@ -126,20 +127,6 @@ export class ChatTestObject extends TrajanChatObject {
 		const files = catalog["codemode:tools"];
 		const git = catalog["codemode:git"];
 		const storage = this.ctx.storage;
-		const pauseAfter = (tool: CodeModeTool, point: PausePoint): CodeModeTool => ({
-			...tool,
-			run: (input, context) =>
-				tool.run(input, context).pipe(
-					Effect.tap((value) =>
-						tool.isError?.(value)
-							? Effect.void
-							: Effect.tryPromise({
-									try: () => this.#pauseAt(point, context.signal),
-									catch: codeModeError,
-								}),
-					),
-				),
-		});
 		const read = (name: "first" | "second"): CodeModeTool => ({
 			replay: "safe",
 			run: Effect.fnUntraced(function* (
@@ -159,7 +146,6 @@ export class ChatTestObject extends TrajanChatObject {
 				return name;
 			}).bind(this),
 		});
-		const branch = pauseAfter(git.branch, "during-replay-git");
 		const faultBeforeCommit = (tool: CodeModeTool, point: PausePoint): CodeModeTool => ({
 			...tool,
 			run: (input, context) =>
@@ -176,6 +162,7 @@ export class ChatTestObject extends TrajanChatObject {
 					}),
 				),
 		});
+		const branch = faultBeforeCommit(git.branch, "during-replay-git");
 		return createChatTools(this.env.LOADER, storage, this.schedules, {
 			instructions,
 			catalog: {
@@ -408,29 +395,27 @@ export default async function () {
 				},
 			};
 		}
-		if (last?.role === "user" && last.text === gitReplayPrompt) {
+		if (
+			last?.role === "user" &&
+			(last.text === gitReplayPrompt || last.text === gitCommittedPrompt)
+		) {
 			return {
 				role: "tool-call",
 				id: gitReplayCall,
 				name: "exec",
 				input: {
 					code: `import { init, add, commit, branch, branches, status } from "codemode:git";
-import { write } from "codemode:tools";
+import { write, wait_for_restart } from "codemode:tools";
 export default async function () {
   await write({ path: "/workspace/seed.txt", content: "seed" });
   await init();
   await add({ paths: ["seed.txt"] });
   await commit({ message: "Seed replay fixture", author: { name: "Trajan fixture", email: "fixture@example.invalid" } });
-  let interrupted = false;
-  try {
-    await branch({ name: "replay-proof" });
-  } catch (error) {
-    if (error.code !== "interrupted") throw error;
-    interrupted = true;
-  }
+  await branch({ name: "replay-proof" });
+  ${last.text === gitCommittedPrompt ? "await wait_for_restart();" : ""}
   const checkedStatus = Array.isArray(await status());
   const branchExists = (await branches()).includes("replay-proof");
-  return { interrupted, checkedStatus, branchExists };
+  return { checkedStatus, branchExists };
 }`,
 				},
 			};
@@ -733,6 +718,7 @@ export default async function () {
 			point === "during-replay-write" ||
 			point === "during-replay-edit" ||
 			point === "during-replay-delete" ||
+			point === "during-replay-git" ||
 			point === "reject-atomic-write"
 		) {
 			this.#atomicFault = point;

@@ -1,6 +1,7 @@
 import { resolve } from "node:path/posix";
 import { Workspace } from "@cloudflare/computer";
 import { createGitClient } from "@cloudflare/computer/git";
+import type { GitClient } from "@cloudflare/computer/git";
 import { CodeModeError } from "@trajan/code-mode";
 import type { CodeModeTool } from "@trajan/code-mode";
 import {
@@ -19,6 +20,7 @@ export const WORKSPACE_PROMPT =
 	"You are Trajan, a concise and capable assistant. You have a durable workspace at /workspace. Use exec to compose tools when they can answer the request, and explain their results plainly.";
 
 const root = "/workspace";
+const createWorkspaceGitClient = createGitClient();
 const replaySafeFiles = new Set(["read", "ls", "find", "grep"]);
 const atomicFiles = new Set(["write", "edit", "delete"]);
 const isFileToolError = Schema.is(Schema.Struct({ isError: Schema.Literal(true) }));
@@ -35,7 +37,7 @@ export function codeModeError(cause: unknown) {
 }
 
 export function createTrajanWorkspace(ctx: DurableObjectState) {
-	const workspace = new Workspace({ storage: ctx.storage, git: createGitClient() });
+	const workspace = new Workspace({ storage: ctx.storage, git: createWorkspaceGitClient });
 	void ctx.blockConcurrencyWhile(() =>
 		Effect.runPromise(Effect.tryPromise(() => workspace.fs.mkdir(root, { recursive: true }))),
 	);
@@ -48,8 +50,6 @@ const ref = Schema.optionalKey(Schema.NonEmptyString);
 const depth = Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0)));
 
 function workspaceGit(workspace: Workspace, mutations: Semaphore.Semaphore) {
-	const git = workspace.git;
-
 	const confinedDirectory = Effect.fnUntraced(function* (
 		input: string | undefined,
 		signal: AbortSignal,
@@ -93,10 +93,10 @@ function workspaceGit(workspace: Workspace, mutations: Semaphore.Semaphore) {
 	});
 
 	function operation<A extends { readonly dir?: string }, B>(
-		replay: "safe" | "unsafe",
+		replay: CodeModeTool["replay"],
 		schema: Schema.Codec<A>,
-		call: (options: A) => Promise<B>,
-	) {
+		call: (git: GitClient, options: A) => Promise<B>,
+	): CodeModeTool & { readonly schema: Schema.Codec<A> } {
 		const invoke = Effect.fnUntraced(
 			function* (input: Schema.Json, { signal }: Parameters<CodeModeTool["run"]>[1]) {
 				const args = yield* Schema.decodeUnknownEffect(schema)(input ?? {});
@@ -104,7 +104,8 @@ function workspaceGit(workspace: Workspace, mutations: Semaphore.Semaphore) {
 				const value = yield* Effect.tryPromise({
 					try: () => {
 						signal.throwIfAborted();
-						return call({ ...args, dir });
+						// The client's index cache survives SQLite rollbacks and can miss index creation.
+						return call(createWorkspaceGitClient({ ws: workspace }), { ...args, dir });
 					},
 					catch: codeModeError,
 				});
@@ -112,62 +113,65 @@ function workspaceGit(workspace: Workspace, mutations: Semaphore.Semaphore) {
 			},
 			Effect.catchTag("SchemaError", (error) => Effect.fail(codeModeError(error))),
 		);
+		if (replay === "atomic") {
+			return { replay, schema, mutationLock: mutations, run: invoke };
+		}
 		return {
 			replay,
 			schema,
-			run: (input, context) => {
-				const effect = invoke(input, context);
-				return replay === "unsafe" ? mutations.withPermit(effect) : effect;
-			},
-		} satisfies CodeModeTool & { readonly schema: Schema.Constraint };
+			// Status and diff may refresh index metadata. Hold the lock until Git settles.
+			run: (input, context) => mutations.withPermit(Effect.uninterruptible(invoke(input, context))),
+		};
 	}
 
 	return {
-		status: operation("safe", Schema.Struct(directory), (args) => git.status(args)),
+		status: operation("safe", Schema.Struct(directory), (git, args) => git.status(args)),
 		diff: operation(
 			"safe",
 			Schema.Struct({ ...directory, ref, to: ref, paths: Schema.optionalKey(pathList) }),
-			(args) => git.diff(args),
+			(git, args) => git.diff(args),
 		),
-		log: operation("safe", Schema.Struct({ ...directory, ref, depth }), (args) => git.log(args)),
-		branches: operation("safe", Schema.Struct(directory), (args) => git.branchList(args)),
-		init: operation("unsafe", Schema.Struct(directory), (args) => git.init(args)),
+		log: operation("safe", Schema.Struct({ ...directory, ref, depth }), (git, args) =>
+			git.log(args),
+		),
+		branches: operation("safe", Schema.Struct(directory), (git, args) => git.branchList(args)),
+		init: operation("atomic", Schema.Struct(directory), (git, args) => git.init(args)),
 		clone: operation(
 			"unsafe",
 			Schema.Struct({ ...directory, url: Schema.NonEmptyString, ref, depth }),
-			(args) => git.clone(args),
+			(git, args) => git.clone(args),
 		),
-		add: operation("unsafe", Schema.Struct({ ...directory, paths: pathList }), (args) =>
+		add: operation("atomic", Schema.Struct({ ...directory, paths: pathList }), (git, args) =>
 			git.add(args),
 		),
 		commit: operation(
-			"unsafe",
+			"atomic",
 			Schema.Struct({
 				...directory,
 				message: Schema.NonEmptyString,
 				author: Schema.Struct({ name: Schema.NonEmptyString, email: Schema.NonEmptyString }),
 			}),
-			(args) => git.commit(args),
+			(git, args) => git.commit(args),
 		),
 		branch: operation(
-			"unsafe",
+			"atomic",
 			Schema.Struct({ ...directory, name: Schema.NonEmptyString, startPoint: ref }),
-			(args) => git.branch(args),
+			(git, args) => git.branch(args),
 		),
 		checkout: operation(
-			"unsafe",
+			"atomic",
 			Schema.Struct({ ...directory, ref: Schema.NonEmptyString }),
-			(args) => git.checkout(args),
+			(git, args) => git.checkout(args),
 		),
 		fetch: operation(
 			"unsafe",
 			Schema.Struct({ ...directory, remote: ref, ref, remoteRef: ref, depth }),
-			(args) => git.fetch(args),
+			(git, args) => git.fetch(args),
 		),
 		push: operation(
 			"unsafe",
 			Schema.Struct({ ...directory, remote: ref, ref, remoteRef: ref }),
-			(args) => git.push(args),
+			(git, args) => git.push(args),
 		),
 	};
 }

@@ -447,28 +447,17 @@ test("restores the write and edit diffs after a restart and follows the chat the
 	).toBeLessThanOrEqual(1);
 });
 
-test("replay shows the interrupted Git call and a successful status check", async ({ page }) => {
+test("replay completes Git branch creation after a reset before commit", async ({ page }) => {
 	const composer = await openChat(page);
 	expect((await page.request.post(`${control}/pause-replay-git`)).status()).toBe(204);
 	await composer.fill("Recover interrupted Git branch creation.");
 	await composer.press("Enter");
-	const decodeState = Schema.decodeUnknownSync(
-		Schema.Struct({ pausedAt: Schema.optionalKey(Schema.String) }),
-	);
-	await expect
-		.poll(async () => {
-			const response = await page.request.post(`${control}/state`);
-			return decodeState(await response.json()).pausedAt;
-		})
-		.toBe("during-replay-git");
-
-	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
-	await page.reload();
 	const transcript = page.getByRole("main");
 	await expect(transcript.getByText(/^Recovered .*"branchExists":true/)).toHaveCount(1);
 	await transcript.getByText("Done", { exact: true }).click();
 	const calls = transcript.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
-	await expect(calls.filter({ hasText: /git\.branch.*Interrupted/ })).toHaveCount(1);
+	const branch = calls.filter({ has: page.getByText("git.branch", { exact: true }) });
+	await expect(branch).toHaveText(/Succeeded/);
 	await expect(calls.filter({ hasText: /git\.status.*Succeeded/ })).toBeVisible();
 });
 
