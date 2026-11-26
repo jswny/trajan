@@ -1,7 +1,8 @@
 import { openAiTurnModel } from "@trajan/model-openai";
 import type { OpenAiResponsesTransport } from "@trajan/model-openai";
-import { Effect, Exit, Stream } from "effect";
+import { Deferred, Effect, Exit, Fiber, Stream } from "effect";
 import type { Schema } from "effect";
+import { TestClock } from "effect/testing";
 import { expect, test } from "vite-plus/test";
 import { openAiGatewayTransport } from "../chat/openai-gateway";
 
@@ -83,7 +84,11 @@ test("keeps the gateway request alive through streaming and aborts it on interru
 							start(body) {
 								body.enqueue(
 									new TextEncoder().encode(
-										encodeEvent({ type: "response.output_text.delta", delta: "Hello" }),
+										encodeEvent({
+											type: "response.output_text.delta",
+											item_id: "message",
+											delta: "Hello",
+										}),
 									),
 								);
 							},
@@ -112,7 +117,7 @@ test("keeps the gateway request alive through streaming and aborts it on interru
 test("ignores unused SSE events and decodes deltas before the completed response", async () => {
 	const result = await collectEvents(
 		{ type: "response.future_event", payload: { arbitrary: true } },
-		{ type: "response.output_text.delta", delta: "Hello" },
+		{ type: "response.output_text.delta", item_id: "message", delta: "Hello" },
 		{
 			type: "response.completed",
 			response: {
@@ -129,9 +134,72 @@ test("ignores unused SSE events and decodes deltas before the completed response
 	});
 });
 
+test("streams only final answer text when a response includes commentary", async () => {
+	const commentary = {
+		type: "message",
+		id: "progress",
+		phase: "commentary",
+		content: [],
+	};
+	expect(
+		await collectEvents(
+			{ type: "response.output_item.added", item: commentary },
+			{ type: "response.output_text.delta", item_id: "progress", delta: "Checking." },
+			{ type: "response.output_text.delta", item_id: "answer", delta: "Done." },
+			{
+				type: "response.completed",
+				response: {
+					output: [
+						{ ...commentary, content: [{ type: "output_text", text: "Checking." }] },
+						{
+							type: "message",
+							phase: "final_answer",
+							content: [{ type: "output_text", text: "Done." }],
+						},
+					],
+				},
+			},
+		),
+	).toMatchObject({
+		_tag: "Success",
+		success: [
+			{ type: "text-delta", text: "Done." },
+			{ type: "response", response: { role: "assistant", text: "Done." } },
+		],
+	});
+});
+
+test.each([
+	{ phase: "headers", wait: "30 seconds", detail: "response headers" },
+	{ phase: "body", wait: "90 seconds", detail: "stopped sending events" },
+] as const)("aborts an OpenAI request stalled in $phase", ({ phase, wait, detail }) =>
+	Effect.runPromise(
+		Effect.gen(function* () {
+			const started = yield* Deferred.make<AbortSignal>();
+			const stream = fixtureStream((_, signal) =>
+				Deferred.succeed(started, signal).pipe(
+					Effect.andThen(
+						phase === "headers"
+							? Effect.never
+							: Effect.sync(() => eventResponse(new ReadableStream({ start() {} }))),
+					),
+				),
+			);
+			const fiber = yield* stream.pipe(Stream.runDrain, Effect.result, Effect.forkScoped);
+			const signal = yield* Deferred.await(started);
+			yield* TestClock.adjust(wait);
+			expect(yield* Fiber.join(fiber)).toMatchObject({
+				_tag: "Failure",
+				failure: { _tag: "TurnModelError", message: expect.stringContaining(detail) },
+			});
+			expect(signal.aborted).toBe(true);
+		}).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+	),
+);
+
 const failures: ReadonlyArray<{ event: Schema.JsonObject; message: string }> = [
 	{
-		event: { type: "response.output_text.delta", delta: 42 },
+		event: { type: "response.output_text.delta", item_id: "message", delta: 42 },
 		message: "OpenAI returned an invalid response.output_text.delta event.",
 	},
 	{

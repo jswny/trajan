@@ -47,7 +47,7 @@ function assistant(text: string, phase = "final_answer") {
 
 function sseResponse(output: ReadonlyArray<Schema.JsonObject>, delta?: string) {
 	const events = [
-		...(delta ? [{ type: "response.output_text.delta", delta }] : []),
+		...(delta ? [{ type: "response.output_text.delta", item_id: "message", delta }] : []),
 		{ type: "response.completed", response: { output } },
 	];
 	return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), {

@@ -23,6 +23,7 @@ const isOutputText = Schema.is(OutputText);
 const isOutputMessage = Schema.is(
 	Schema.Struct({
 		type: Schema.Literal("message"),
+		id: Schema.optionalKey(Schema.NonEmptyString),
 		phase: Schema.optionalKey(Schema.NullOr(Schema.String)),
 		content: Items,
 	}),
@@ -37,8 +38,13 @@ const UpstreamError = Schema.Struct({
 	error: Schema.optionalKey(Schema.NullOr(Schema.Struct({ message: Schema.String }))),
 	incomplete_details: Schema.optionalKey(Schema.NullOr(Schema.Struct({ reason: Schema.String }))),
 });
+const AddedItemEvent = Schema.Struct({
+	type: Schema.Literal("response.output_item.added"),
+	item: Item,
+});
 const TextDeltaEvent = Schema.Struct({
 	type: Schema.Literal("response.output_text.delta"),
+	item_id: Schema.NonEmptyString,
 	delta: Schema.String,
 });
 const CompletedEvent = Schema.Struct({
@@ -234,14 +240,22 @@ const completedResponse = Effect.fnUntraced(function* (
 
 const readEvent = Effect.fnUntraced(function* (
 	event: Item,
+	commentary: Set<string>,
 	input: ReadonlyArray<Item>,
 	tool: Tool,
 	allowTools: boolean,
 ): Effect.fn.Return<TurnModelEvent | undefined, TurnModelError | Schema.SchemaError> {
 	switch (event.type) {
+		case "response.output_item.added": {
+			const { item } = yield* Schema.decodeUnknownEffect(AddedItemEvent)(event);
+			if (isOutputMessage(item) && item.phase === "commentary" && item.id !== undefined) {
+				commentary.add(item.id);
+			}
+			return;
+		}
 		case "response.output_text.delta": {
-			const { delta } = yield* Schema.decodeUnknownEffect(TextDeltaEvent)(event);
-			return { type: "text-delta", text: delta };
+			const { item_id, delta } = yield* Schema.decodeUnknownEffect(TextDeltaEvent)(event);
+			return commentary.has(item_id) ? undefined : { type: "text-delta", text: delta };
 		}
 		case "response.completed": {
 			const {
@@ -278,9 +292,20 @@ export function openAiTurnModel(request: OpenAiResponsesTransport, options: Open
 			Effect.sync(() => new AbortController()),
 			(activeRequest) => Effect.sync(() => activeRequest.abort()),
 		);
-		const response = yield* request(requestBody(options, input, allowTools), controller.signal);
+		const response = yield* request(
+			requestBody(options, input, allowTools),
+			controller.signal,
+		).pipe(
+			Effect.timeoutOrElse({
+				duration: "30 seconds",
+				orElse: () => Effect.fail(modelError("Timed out waiting for OpenAI response headers.")),
+			}),
+		);
 		if (!response.ok) {
-			const body = yield* Effect.tryPromise({ try: () => response.text(), catch: transportError });
+			const body = yield* Effect.tryPromise({
+				try: () => response.text(),
+				catch: transportError,
+			}).pipe(Effect.timeoutOrElse({ duration: "5 seconds", orElse: () => Effect.succeed("") }));
 			const decoded = decodeErrorBody(body);
 			const detail = decoded._tag === "Some" ? decoded.value.error?.message : undefined;
 			return yield* modelError(
@@ -292,13 +317,18 @@ export function openAiTurnModel(request: OpenAiResponsesTransport, options: Open
 			return yield* modelError("Expected an OpenAI Responses event stream.");
 		}
 
+		const commentary = new Set<string>();
 		return Stream.fromReadableStream({ evaluate: () => body, onError: transportError }).pipe(
 			Stream.decodeText(),
 			Stream.pipeThroughChannel(decodeSse()),
+			Stream.timeoutOrElse({
+				duration: "90 seconds",
+				orElse: () => Stream.fail(modelError("The OpenAI response stream stopped sending events.")),
+			}),
 			Stream.filter((event) => event.data !== "[DONE]"),
 			Stream.mapEffect(({ data }) => Schema.decodeEffect(Event)(data)),
 			Stream.mapEffect((event) =>
-				readEvent(event, input, tool, allowTools).pipe(
+				readEvent(event, commentary, input, tool, allowTools).pipe(
 					Effect.mapError((error) =>
 						Schema.isSchemaError(error)
 							? modelError(`OpenAI returned an invalid ${event.type} event.`)
