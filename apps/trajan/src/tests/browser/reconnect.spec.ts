@@ -47,6 +47,36 @@ test("loads a skill saved in chat after the Worker restarts", async ({ page }) =
 	await expect(completed).toHaveCount(2);
 	await expect(replies).toHaveCount(2);
 	await expect(replies.last()).toBeVisible();
+
+	const card = completed.last();
+	await card.locator(":scope > summary").click();
+	for (const { name, path, source, token } of [
+		{
+			name: "readSkillResource",
+			path: "references/template.md",
+			source: "# Weekly template v1\n\n- **Highlight**\n- Next up",
+			token: "Weekly template v1",
+		},
+		{
+			name: "read",
+			path: "/workspace/weekly-brief.ts",
+			source: "export function brief(topic: string) {\n  return { title: topic, ready: true };\n}",
+			token: "export",
+		},
+	]) {
+		const row = card.getByRole("listitem").filter({
+			has: page.getByText(name, { exact: true }),
+		});
+		await row.locator("summary").click();
+		await expect(row.getByText(path, { exact: true })).toBeVisible();
+		const code = row.locator("pre code").last();
+		await expect(code).toHaveText(source, { useInnerText: true });
+		expect(await code.textContent()).toBe(source);
+		await expect(code.locator("span[style]").filter({ hasText: token }).first()).toBeVisible();
+	}
+	expect(
+		await page.locator(".chat-transcript").evaluate((el) => el.scrollWidth - el.clientWidth),
+	).toBeLessThanOrEqual(1);
 });
 
 test("uses the submission prompt limit for the composer", async ({ page }) => {
@@ -483,7 +513,7 @@ test("keeps separate outcomes for concurrent calls to the same tool", async ({ p
 	await expect(missing.locator("pre")).toHaveCount(0);
 	await found.locator("summary").click();
 	await expect(found.locator("pre").nth(0)).toContainText("/workspace/module.txt");
-	await expect(found.locator("pre").nth(1)).toContainText('"text": "hello"');
+	await expect(found.locator("pre").nth(1)).toHaveText("hello");
 	await expect(missing.locator("pre")).toHaveCount(0);
 	await missing.locator("summary").click();
 	await expect(missing.locator("pre").nth(0)).toContainText("/workspace/missing.txt");

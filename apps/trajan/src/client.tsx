@@ -107,7 +107,10 @@ function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => 
 						<p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
 							Result
 						</p>
-						<ToolCode text={text} highlight={open && result?.format === "json"} />
+						<ToolCode
+							text={text}
+							language={open && result?.format === "json" ? "json" : undefined}
+						/>
 					</div>
 				) : null}
 				{images.map((image, index) => (
@@ -123,7 +126,7 @@ function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => 
 						<p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
 							Arguments
 						</p>
-						<ToolCode text={JSON.stringify(input, null, 2)} highlight={open} />
+						<ToolCode text={JSON.stringify(input, null, 2)} language={open ? "json" : undefined} />
 					</div>
 				) : null}
 			</div>
@@ -138,6 +141,15 @@ const toolActivityLabel = {
 	interrupted: "Interrupted",
 };
 
+function fileLanguage(path: string) {
+	const name = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
+	if (name === "dockerfile" || name === "makefile") {
+		return name;
+	}
+	const dot = name.lastIndexOf(".");
+	return dot > 0 ? name.slice(dot + 1) : undefined;
+}
+
 function ToolActivityDetail({
 	label,
 	preview,
@@ -145,10 +157,20 @@ function ToolActivityDetail({
 	label: string;
 	preview: typeof ToolActivityPreview.Type;
 }) {
+	const path = preview.format === "file" ? preview.path : undefined;
 	return (
 		<div>
 			<p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">{label}</p>
-			<ToolCode text={preview.text || '""'} highlight={preview.format === "json"} />
+			{path ? <p className="mb-1 font-mono text-xs wrap-anywhere text-muted">{path}</p> : null}
+			{path && preview.text === "" ? (
+				<p className="text-xs text-muted">Empty file</p>
+			) : (
+				<ToolCode
+					text={preview.text || '""'}
+					language={path ? fileLanguage(path) : preview.format === "json" ? "json" : undefined}
+					preserveLines={path !== undefined}
+				/>
+			)}
 			{preview.truncated ? <p className="mt-1 text-xs text-muted">Preview truncated</p> : null}
 		</div>
 	);

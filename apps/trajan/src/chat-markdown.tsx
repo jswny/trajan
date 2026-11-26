@@ -39,11 +39,24 @@ export function ChatMarkdown({ children, ...props }: ChatMarkdownProps) {
 	);
 }
 
-export function ToolCode({ text, highlight }: { text: string; highlight: boolean }) {
-	const highlighting = useSyntaxHighlighting(highlight);
-	const lines = useMemo(() => highlighting?.highlightJson(text), [highlighting, text]);
+export function ToolCode({
+	text,
+	language,
+	preserveLines = false,
+}: {
+	text: string;
+	language?: string;
+	preserveLines?: boolean;
+}) {
+	const highlighting = useSyntaxHighlighting(Boolean(language));
+	const lines = useMemo(
+		() => (language ? highlighting?.highlight(text, language) : undefined),
+		[highlighting, language, text],
+	);
 	return (
-		<pre className="max-h-40 overflow-auto rounded-(--chat-inset-radius) bg-canvas p-2.5 text-xs leading-5 whitespace-pre-wrap wrap-anywhere">
+		<pre
+			className={`max-h-40 overflow-auto rounded-(--chat-inset-radius) bg-canvas p-2.5 text-xs leading-5 ${preserveLines ? "whitespace-pre" : "whitespace-pre-wrap wrap-anywhere"}`}
+		>
 			<code>
 				{lines?.map((line, index) => (
 					<Fragment key={index}>

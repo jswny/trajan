@@ -217,10 +217,31 @@ test("discovers workspace skills written in the same exec and loads them after a
 		instructions: expect.stringContaining("Use the weekly template."),
 		resource: expect.stringContaining("Weekly template v1"),
 	};
+	const filePreviews = [
+		expect.objectContaining({
+			name: "readSkillResource",
+			output: {
+				format: "file",
+				path: "references/template.md",
+				text: "# Weekly template v1\n\n- **Highlight**\n- Next up",
+				truncated: false,
+			},
+		}),
+		expect.objectContaining({
+			name: "read",
+			output: {
+				format: "file",
+				path: "/workspace/weekly-brief.ts",
+				text: "export function brief(topic: string) {\n  return { title: topic, ready: true };\n}",
+				truncated: false,
+			},
+		}),
+	];
 
 	expect(decode(await stub.workspaceTool("exec", skillExecInput(true)))).toMatchObject({
 		status: "completed",
 		output: { before: [], ...saved },
+		activity: expect.arrayContaining(filePreviews),
 	});
 	const { instance } = await stub.state();
 	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
@@ -229,6 +250,7 @@ test("discovers workspace skills written in the same exec and loads them after a
 	expect(decode(await stub.workspaceTool("exec", skillExecInput(false)))).toMatchObject({
 		status: "completed",
 		output: { before: skills, ...saved },
+		activity: expect.arrayContaining(filePreviews),
 	});
 });
 

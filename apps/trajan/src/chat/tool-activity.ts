@@ -12,15 +12,23 @@ const ExecutionActivity = Schema.Struct({
 });
 const decodeActivity = Schema.decodeUnknownSync(Schema.UndefinedOr(ExecutionActivity));
 const decodeContent = Schema.decodeUnknownOption(ToolContent);
+const decodeFileRead = Schema.decodeUnknownOption(
+	Schema.Struct({
+		isError: Schema.Literal(false),
+		details: Schema.Struct({
+			path: Schema.NonEmptyString,
+			content: Schema.String,
+			truncated: Schema.Boolean,
+		}),
+	}),
+);
+const decodePath = Schema.decodeUnknownOption(Schema.Struct({ path: Schema.NonEmptyString }));
 const encoder = new TextEncoder();
 
-function preview(value: Schema.Json): typeof ToolActivityPreview.Type {
-	const format = typeof value === "string" ? "text" : "json";
-	const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+function limitPreview(text: string) {
 	const bytes = encoder.encode(text);
 	const truncated = bytes.length > toolPreviewBytes;
 	return {
-		format,
 		text: truncated
 			? new TextDecoder().decode(bytes.subarray(0, toolPreviewBytes), { stream: true })
 			: text,
@@ -28,7 +36,40 @@ function preview(value: Schema.Json): typeof ToolActivityPreview.Type {
 	};
 }
 
-function previewOutput(value: Schema.Json) {
+function preview(value: Schema.Json): typeof ToolActivityPreview.Type {
+	return typeof value === "string"
+		? { format: "text", ...limitPreview(value) }
+		: { format: "json", ...limitPreview(JSON.stringify(value, null, 2)) };
+}
+
+function filePreview(
+	path: string,
+	content: string,
+	truncated = false,
+): typeof ToolActivityPreview.Type {
+	const bounded = limitPreview(content);
+	return { format: "file", path, text: bounded.text, truncated: truncated || bounded.truncated };
+}
+
+function previewOutput(name: string, input: Schema.Json, value: Schema.Json) {
+	if (name === "read") {
+		const read = decodeFileRead(value);
+		if (read._tag === "Some") {
+			const { path, content, truncated } = read.value.details;
+			return filePreview(path, content, truncated);
+		}
+	}
+	if (name === "readSkillResource" && typeof value === "string") {
+		const path = decodePath(input);
+		// The SDK's model-facing envelope carries text resources and base64 resources.
+		const text =
+			/^<skill_resource [^\n]* encoding="text"(?: [^\n]*)?>\n([\s\S]*)\n<\/skill_resource>$/.exec(
+				value,
+			);
+		if (path._tag === "Some" && text?.[1] !== undefined) {
+			return filePreview(path.value.path, text[1]);
+		}
+	}
 	const content = decodeContent(value);
 	return content._tag === "Some" && content.value.length > 0
 		? preview(
@@ -48,7 +89,7 @@ export function toolActivity({
 }: CodeModeActivity): typeof ToolActivity.Type {
 	const output =
 		reply?.status === "returned"
-			? previewOutput(reply.value)
+			? previewOutput(name, input, reply.value)
 			: reply?.status === "failed"
 				? preview(reply.message)
 				: undefined;

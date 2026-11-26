@@ -1,4 +1,4 @@
-import { codeToTokens } from "@pierre/highlights";
+import { codeToTokens, isSupportedLanguage } from "@pierre/highlights";
 import pierreDark from "@pierre/highlights/themes/pierre-dark";
 import pierreLight from "@pierre/highlights/themes/pierre-light";
 import { createHighlightsPlugin } from "@pierre/words/highlights";
@@ -10,7 +10,9 @@ const themeOptions = {
 
 export const syntaxHighlights = {
 	markdownPlugins: { code: createHighlightsPlugin(themeOptions) },
-	highlightJson(text: string) {
-		return codeToTokens(text, { ...themeOptions, lang: "json" }).tokens;
+	highlight(text: string, language: string) {
+		return isSupportedLanguage(language)
+			? codeToTokens(text, { ...themeOptions, lang: language }).tokens
+			: undefined;
 	},
 };

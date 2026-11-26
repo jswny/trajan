@@ -27,11 +27,18 @@ export const ToolCall = Schema.Struct({
 });
 
 export const toolPreviewBytes = 3 * 1024;
-export const ToolActivityPreview = Schema.Struct({
-	format: Schema.Literals(["json", "text"]),
+const toolPreviewFields = {
 	text: Schema.String.check(Schema.isMaxLength(toolPreviewBytes)),
 	truncated: Schema.Boolean,
-});
+};
+export const ToolActivityPreview = Schema.Union([
+	Schema.Struct({ format: Schema.Literals(["json", "text"]), ...toolPreviewFields }),
+	Schema.Struct({
+		format: Schema.Literal("file"),
+		path: Schema.NonEmptyString,
+		...toolPreviewFields,
+	}),
+]);
 export const ToolActivity = Schema.Struct({
 	id: Schema.NonEmptyString,
 	name: Schema.NonEmptyString,

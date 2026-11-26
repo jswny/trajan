@@ -65,10 +65,11 @@ export default async function () {
 export function skillExecInput(save: boolean) {
 	return {
 		code: `
-import { activateSkill, listSkills, readSkillResource, write } from "codemode:tools";
+import { activateSkill, listSkills, read, readSkillResource, write } from "codemode:tools";
 export default async function () {
   const name = "weekly-brief";
   const path = "references/template.md";
+  const sourcePath = "/workspace/weekly-brief.ts";
   const before = await listSkills();
   ${
 		save
@@ -76,13 +77,17 @@ export default async function () {
   const folder = "/workspace/.agents/skills/" + name;
   const file = await write({ path: folder + "/SKILL.md", content: "---\\nname: weekly-brief\\ndescription: Prepare a weekly brief.\\n---\\nUse the weekly template." });
   if (file.isError) throw new Error(file.text);
-  const template = await write({ path: folder + "/" + path, content: "Weekly template v1" });
-  if (template.isError) throw new Error(template.text);`
+  const template = await write({ path: folder + "/" + path, content: "# Weekly template v1\\n\\n- **Highlight**\\n- Next up" });
+  if (template.isError) throw new Error(template.text);
+  const written = await write({ path: sourcePath, content: "export function brief(topic: string) {\\n  return { title: topic, ready: true };\\n}" });
+  if (written.isError) throw new Error(written.text);`
 			: ""
 	}
   const skills = await listSkills();
   const instructions = await activateSkill({ name });
   const resource = await readSkillResource({ name, path });
+  const source = await read({ path: sourcePath });
+  if (source.isError) throw new Error(source.text);
   return { before, skills, instructions, resource };
 }`,
 	};
