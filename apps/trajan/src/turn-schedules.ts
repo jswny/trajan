@@ -36,6 +36,14 @@ const CancelInput = Schema.Struct({ id: Schema.NonEmptyString });
 const pageSize = 5;
 const scheduleJob = "submit-scheduled-turn";
 
+function occurrence(job: LifecycleJob, prompt: string): typeof TurnSubmission.Type {
+	const date = DateTime.formatIso(DateTime.makeUnsafe(job.time));
+	return {
+		id: `scheduled:${job.id}:${job.time}`,
+		prompt: `Scheduled task for ${date}\n\n${prompt}`,
+	};
+}
+
 export function nextWeeklyRun(when: typeof Weekly.Type, after: number) {
 	const [hour, minute] = when.time.split(":").map(Number);
 	const today = DateTime.startOf(
@@ -75,6 +83,10 @@ export class TurnSchedules extends LifecycleCapability {
 		private readonly submit: (
 			input: typeof TurnSubmission.Type,
 		) => Effect.Effect<{ runId: string | null; error?: string }, TurnIoError>,
+		private readonly recordMissed: (
+			input: typeof TurnSubmission.Type,
+			text: string,
+		) => Effect.Effect<void, TurnIoError>,
 	) {
 		super("turn-schedules");
 	}
@@ -165,12 +177,8 @@ export class TurnSchedules extends LifecycleCapability {
 	) {
 		yield* Effect.annotateCurrentSpan({ scheduleId: job.id, scheduledFor: job.time });
 		const plan = yield* Schema.decodeUnknownEffect(ScheduledTurn)(job.payload);
-		const date = DateTime.formatIso(DateTime.makeUnsafe(job.time));
 		// The queue keeps the same due time through retries of this occurrence.
-		const receipt = yield* this.submit({
-			id: `scheduled:${job.id}:${job.time}`,
-			prompt: `Scheduled task for ${date}\n\n${plan.prompt}`,
-		});
+		const receipt = yield* this.submit(occurrence(job, plan.prompt));
 		if (receipt.runId === null) {
 			return yield* codeModeError(receipt.error ?? "Scheduled turn was rejected.");
 		}
@@ -183,10 +191,28 @@ export class TurnSchedules extends LifecycleCapability {
 
 	onJobError({ job }: LifecycleJobContext, error: unknown) {
 		return Effect.runPromise(
-			Effect.logError("Scheduled turn could not be queued", error).pipe(
-				Effect.annotateLogs({ scheduleId: job.id, scheduledFor: job.time }),
-				Effect.andThen(Schema.decodeUnknownEffect(ScheduledTurn)(job.payload)),
-				Effect.flatMap(({ when }) => this.#advance(when, job.time)),
+			Effect.gen({ self: this }, function* () {
+				const plan = yield* Schema.decodeUnknownEffect(ScheduledTurn)(job.payload);
+				const outcome = yield* this.#advance(plan.when, job.time);
+				const current = this.lifecycle.jobs.get(job.id);
+				if (current?.time !== job.time) {
+					return current && { rescheduleAt: current.time };
+				}
+				const submission = occurrence(job, plan.prompt);
+				const next = outcome
+					? ` Next scheduled run is ${DateTime.formatIso(DateTime.makeUnsafe(outcome.rescheduleAt))}.`
+					: "";
+				yield* this.recordMissed(
+					submission,
+					`A scheduled task could not be queued after retries.${next}\n\n${submission.prompt}`,
+				);
+				return outcome;
+			}).pipe(
+				Effect.tapError((cause) =>
+					Effect.logError("Could not record the scheduled turn outcome", cause, error).pipe(
+						Effect.annotateLogs({ scheduleId: job.id, scheduledFor: job.time }),
+					),
+				),
 			),
 		);
 	}

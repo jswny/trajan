@@ -20,6 +20,7 @@ import {
 	compactResumePrompt,
 	compactSetupPrompt,
 	createOpenAiResponsesFixture,
+	scheduleOutcomePrompt,
 } from "./openai-responses-fixture";
 
 const chatFixtureReset = "Forced chat fixture restart";
@@ -234,18 +235,42 @@ export class ChatTestObject extends TrajanChatObject {
 		);
 	}
 
-	override async submit(input: unknown) {
-		const receipt = await super.submit(input);
+	protected override submitEffect(input: unknown) {
 		const submission = decodeSubmission(input);
 		if (
-			receipt.accepted &&
-			Option.isSome(submission) &&
-			submission.value.id.startsWith("scheduled:") &&
-			submission.value.prompt.endsWith(scheduledPrompt)
+			!(
+				Option.isSome(submission) &&
+				submission.value.id.startsWith("scheduled:") &&
+				submission.value.prompt.endsWith(scheduledPrompt)
+			)
 		) {
-			throw new Error("Fixture dropped the receipt after admitting a scheduled turn.");
+			return super.submitEffect(input);
 		}
-		return receipt;
+		const mode = this.ctx.storage.kv.get<string>("scheduled-failure");
+		if (mode === "before-admission") {
+			return Effect.fail(
+				new TurnIoError({
+					operation: "submit scheduled turn",
+					cause: "Fixture prevented admission.",
+				}),
+			);
+		}
+		return super.submitEffect(input).pipe(
+			Effect.tap((receipt) =>
+				receipt.accepted || mode === "after-admission"
+					? Effect.fail(
+							new TurnIoError({
+								operation: "submit scheduled turn",
+								cause: "Fixture dropped the receipt.",
+							}),
+						)
+					: Effect.void,
+			),
+		);
+	}
+
+	setScheduledFailure(mode: "before-admission" | "after-admission") {
+		return this.ctx.storage.put("scheduled-failure", mode);
 	}
 
 	readonly #execute = Effect.fn("chat.fixture.executeTool")(function* (
@@ -274,6 +299,12 @@ export class ChatTestObject extends TrajanChatObject {
 		const user = messages.findLast((message) => message.role === "user");
 		const last = messages.at(-1);
 		const appendTwice = user?.text === "Append hello, then world.";
+		if (last?.role === "user" && last.text === "Report recent runtime outcomes.") {
+			return {
+				role: "assistant",
+				text: JSON.stringify(messages.filter(({ role }) => role === "runtime-outcome")),
+			};
+		}
 		if (last?.role === "user" && last.text === "Fail this turn.") {
 			return yield* new TurnModelError({
 				message: "The fixture model failed.",
@@ -603,7 +634,11 @@ export default async function () {
 				contextFormat: this.#responses.contextFormat,
 				stream: (messages, options) => {
 					const user = messages.findLast((message) => message.role === "user");
-					if (user?.text === compactSetupPrompt || user?.text === compactResumePrompt) {
+					if (
+						user?.text === compactSetupPrompt ||
+						user?.text === compactResumePrompt ||
+						user?.text === scheduleOutcomePrompt
+					) {
 						return this.#responses.stream(messages, options);
 					}
 					return Stream.unwrap(

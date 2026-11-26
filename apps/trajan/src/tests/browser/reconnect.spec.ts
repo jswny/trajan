@@ -646,6 +646,21 @@ test("runs a scheduled turn once across a restart with the chat closed", async (
 	).toHaveCount(1);
 });
 
+test("a missed scheduled turn leaves a single notice that survives reload", async ({ page }) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/miss-schedule`)).status()).toBe(204);
+	await composer.fill("Schedule a workspace check.");
+	await composer.press("Enter");
+	const transcript = page.getByRole("main");
+	const notice = transcript.getByText(/A scheduled task could not be queued after retries\./);
+	await expect(notice).toHaveCount(1);
+	await page.reload();
+	await expect(notice).toHaveCount(1);
+	await expect(
+		transcript.getByText("The scheduled workspace check ran.", { exact: true }),
+	).toHaveCount(0);
+});
+
 test("replays the original schedule receipt after its one-time job has fired", async ({ page }) => {
 	const composer = await openChat(page);
 	await composer.fill("Schedule a workspace check and wait.");

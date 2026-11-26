@@ -96,6 +96,19 @@ const TurnNotice = Schema.Struct({
 });
 export const TurnMessage = Schema.Union([UserMessage, Reply, ToolCall, ToolMessage, TurnNotice]);
 export const ConversationMessage = Schema.Union([UserMessage, Reply]);
+export const RuntimeOutcome = Schema.Struct({
+	role: Schema.Literal("runtime-outcome"),
+	status: TurnNotice.fields.status,
+	text: Schema.String,
+	request: Schema.String,
+	tools: Schema.Array(
+		Schema.Struct({
+			name: ToolActivity.fields.name,
+			status: ToolActivity.fields.status,
+			path: Schema.optionalKey(FileChange.fields.path),
+		}),
+	),
+});
 const ModelToolCall = Schema.Struct({
 	...ToolCall.fields,
 	// Adapter context belongs to the checkpointed model response.
@@ -108,10 +121,11 @@ const ModelReply = Schema.Struct({
 const ModelResponse = Schema.Union([ModelReply, ModelToolCall]);
 export type TurnModelResponse = typeof ModelResponse.Type;
 
-type ModelHistoryEntry =
-	| typeof ConversationMessage.Type
+type TurnHistoryEntry =
+	| typeof UserMessage.Type
 	| typeof ModelToolCall.Type
 	| typeof ToolMessage.Type;
+type ModelContextEntry = typeof ConversationMessage.Type | typeof RuntimeOutcome.Type;
 const MAX_TOOL_CALLS = 8;
 
 export const TurnTranscript = Schema.Struct({
@@ -174,7 +188,7 @@ export class TurnModel extends Context.Service<
 		/** Identifies the format of the opaque context this adapter reads and writes. */
 		readonly contextFormat: typeof ModelContextFormat.Type;
 		readonly stream: (
-			messages: ReadonlyArray<ModelHistoryEntry>,
+			messages: ReadonlyArray<ModelContextEntry | TurnHistoryEntry>,
 			options: { readonly allowTools: boolean; readonly modelContext?: Schema.Json },
 		) => Stream.Stream<TurnModelEvent, TurnModelError>;
 	}
@@ -206,13 +220,13 @@ export class TurnTools extends Context.Service<
 export const runTurn = Effect.fn("harness.runTurn")(function* (
 	submission: typeof TurnSubmission.Type,
 	journal: TurnJournal,
-	context: ReadonlyArray<typeof ConversationMessage.Type> = [],
+	context: ReadonlyArray<ModelContextEntry> = [],
 	publish: (event: TurnProgress) => Effect.Effect<void> = () => Effect.void,
 	modelContext?: Schema.Json,
 ) {
 	const model = yield* TurnModel;
 	const tools = yield* TurnTools;
-	const history: Array<ModelHistoryEntry> = [...context, { role: "user", text: submission.prompt }];
+	const history: Array<TurnHistoryEntry> = [{ role: "user", text: submission.prompt }];
 
 	for (let index = 0; ; index++) {
 		const allowTools = index < MAX_TOOL_CALLS;
@@ -223,7 +237,7 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 				Effect.gen(function* () {
 					yield* publish({ type: "reset" });
 					const last = yield* model
-						.stream([...history], {
+						.stream([...context, ...history], {
 							allowTools,
 							...(modelContext !== undefined && { modelContext }),
 						})
@@ -244,7 +258,7 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 			// Project the transcript without adapter continuation data.
 			const transcript = yield* Schema.decodeEffect(TurnTranscript)({
 				submissionId: submission.id,
-				messages: [...history.slice(context.length), decision],
+				messages: [...history, decision],
 			});
 			return {
 				...transcript,

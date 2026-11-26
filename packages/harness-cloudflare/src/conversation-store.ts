@@ -4,7 +4,7 @@ import {
 	TurnMessage,
 	TurnTranscript,
 } from "@trajan/harness";
-import type { TurnCompletion, TurnSubmission } from "@trajan/harness";
+import type { RuntimeOutcome, TurnCompletion, TurnSubmission } from "@trajan/harness";
 import { Option, Schema } from "effect";
 
 const contextTurnLimit = 16;
@@ -13,7 +13,10 @@ const messageJson = Schema.fromJsonString(TurnMessage);
 const contextJson = Schema.fromJsonString(ConversationMessage);
 const transcriptJson = Schema.fromJsonString(TurnTranscript);
 const modelContextKey = "harness-model-context";
+const modelOutcomesCursorKey = "harness-model-outcomes-through";
+const outcomesLimit = 12;
 const decodeModelContext = Schema.decodeUnknownOption(SavedModelContext);
+const decodeOutcomesCursor = Schema.decodeUnknownSync(Schema.UndefinedOr(Schema.Natural));
 
 export type HistoryQuery = {
 	readonly before?: number;
@@ -44,6 +47,14 @@ const decodeOptionalSubmission = Schema.decodeUnknownSync(Schema.UndefinedOr(Sub
 const decodeMessage = Schema.decodeUnknownSync(MessageRow);
 const decodeEntry = Schema.decodeUnknownSync(EntryRow);
 const decodeCount = Schema.decodeUnknownSync(Schema.Struct({ count: Schema.Natural }));
+const decodeOutcomeRow = Schema.decodeUnknownSync(
+	Schema.Struct({
+		...MessageRow.fields,
+		prompt: Schema.String,
+		seq: SubmissionRow.fields.seq,
+		submission_seq: SubmissionRow.fields.seq,
+	}),
+);
 
 export class ConversationStore {
 	constructor(
@@ -107,6 +118,30 @@ export class ConversationStore {
 				submission.prompt,
 			);
 			return { runId, accepted: true };
+		});
+	}
+
+	recordUnadmittedSubmission(submission: typeof TurnSubmission.Type, text: string) {
+		return this.storage.transactionSync(() => {
+			const [row] = this.storage.sql
+				.exec(
+					`INSERT INTO harness_submissions (run_id, submission_id, prompt, state, error)
+				 VALUES (?, ?, ?, 'failed', ?) ON CONFLICT(submission_id) DO NOTHING RETURNING seq`,
+					`missed:${submission.id}`,
+					submission.id,
+					submission.prompt,
+					text,
+				)
+				.toArray();
+			if (!row) {
+				return false;
+			}
+			this.storage.sql.exec(
+				"INSERT INTO harness_entries (submission_seq, role, message) VALUES (?, 'notice', ?)",
+				Schema.decodeUnknownSync(SubmissionRow.fields.seq)(row.seq),
+				Schema.encodeSync(messageJson)({ role: "notice", status: "failed", text }),
+			);
+			return true;
 		});
 	}
 
@@ -180,7 +215,57 @@ export class ConversationStore {
 		return Option.getOrUndefined(decodeModelContext(this.storage.kv.get(modelContextKey)));
 	}
 
-	commit(runId: string, transcript: TurnCompletion) {
+	runtimeOutcomes(through: number) {
+		const delivered = decodeOutcomesCursor(this.storage.kv.get(modelOutcomesCursorKey)) ?? 0;
+		const rows = this.storage.sql
+			.exec(
+				`SELECT harness_entries.seq, message, prompt, submission_seq FROM harness_entries
+			 JOIN harness_submissions ON harness_submissions.seq = submission_seq
+			 WHERE role = 'notice' AND harness_entries.seq > ? AND harness_entries.seq <= ? ORDER BY harness_entries.seq LIMIT ?`,
+				delivered,
+				through,
+				outcomesLimit,
+			)
+			.toArray()
+			.map((row) => decodeOutcomeRow(row));
+		return {
+			through: rows.length === outcomesLimit ? rows[outcomesLimit - 1].seq : through,
+			messages: rows.flatMap((row) => {
+				const message = Schema.decodeSync(messageJson)(row.message);
+				if (message.role !== "notice") {
+					return [];
+				}
+				const tools = this.storage.sql
+					.exec(
+						"SELECT message FROM harness_entries WHERE submission_seq = ? AND role = 'tool' ORDER BY seq",
+						row.submission_seq,
+					)
+					.toArray()
+					.flatMap((raw) => {
+						const entry = Schema.decodeSync(messageJson)(decodeMessage(raw).message);
+						return entry.role === "tool"
+							? (entry.result.activity ?? []).map(({ name, status, fileChange }) => ({
+									name,
+									status,
+									...(fileChange && { path: fileChange.path.slice(0, 256) }),
+								}))
+							: [];
+					})
+					.slice(-12);
+				return [
+					{
+						role: "runtime-outcome",
+						status: message.status,
+						text: message.text.slice(0, 512),
+						request: row.prompt.slice(0, 512),
+						tools,
+					} satisfies typeof RuntimeOutcome.Type,
+				];
+			}),
+		};
+	}
+
+	commit(runId: string, transcript: TurnCompletion, outcomesThrough: number) {
 		const messages = transcript.messages.map((message) => ({
 			role: message.role,
 			json: Schema.encodeSync(messageJson)(message),
@@ -214,6 +299,7 @@ export class ConversationStore {
 			} else {
 				this.storage.kv.delete(modelContextKey);
 			}
+			this.storage.kv.put(modelOutcomesCursorKey, outcomesThrough);
 			this.settleRunState(runId, "completed");
 		});
 	}

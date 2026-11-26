@@ -270,13 +270,25 @@ export abstract class CloudflareHarness<
 			});
 		}
 		const { contextFormat } = yield* TurnModel;
-		const { context, modelContext } = yield* conversationEffect("read context", () => {
-			const saved = this.#conversation.modelContext();
-			if (saved?.adapter === contextFormat.adapter && saved.version === contextFormat.version) {
-				return { context: [], modelContext: saved.state };
-			}
-			return { context: this.#conversation.context(through), modelContext: undefined };
-		});
+		const { context, modelContext, outcomesThrough } = yield* conversationEffect(
+			"read context",
+			() => {
+				const saved = this.#conversation.modelContext();
+				const outcomes = this.#conversation.runtimeOutcomes(through);
+				if (saved?.adapter === contextFormat.adapter && saved.version === contextFormat.version) {
+					return {
+						context: outcomes.messages,
+						modelContext: saved.state,
+						outcomesThrough: outcomes.through,
+					};
+				}
+				return {
+					context: [...this.#conversation.context(through), ...outcomes.messages],
+					modelContext: undefined,
+					outcomesThrough: outcomes.through,
+				};
+			},
+		);
 		const transcript = yield* runTurn(
 			{ id: row.submission_id, prompt: row.prompt },
 			taskJournal(runId, step),
@@ -285,7 +297,9 @@ export abstract class CloudflareHarness<
 			modelContext,
 		);
 
-		yield* conversationEffect("commit turn", () => this.#conversation.commit(runId, transcript));
+		yield* conversationEffect("commit turn", () =>
+			this.#conversation.commit(runId, transcript, outcomesThrough),
+		);
 		yield* Effect.sync(() => this.onStateChange?.(runId));
 		yield* Effect.promise(async (signal) => this.onTurnPhase?.("after-commit", signal));
 		yield* this.#inbox.wake();
@@ -331,6 +345,14 @@ export abstract class CloudflareHarness<
 				Effect.succeed({ accepted: false as const, runId: null, error: error.message }),
 			),
 		);
+	}
+
+	protected recordUnadmittedSubmission(submission: typeof TurnSubmission.Type, text: string) {
+		return conversationEffect("record missed submission", () => {
+			if (this.#conversation.recordUnadmittedSubmission(submission, text)) {
+				this.onStateChange?.();
+			}
+		});
 	}
 
 	protected stopEffect(runId: string) {

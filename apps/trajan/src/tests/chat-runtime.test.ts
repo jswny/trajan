@@ -12,6 +12,7 @@ import {
 	compactReference,
 	compactResumePrompt,
 	compactSetupPrompt,
+	scheduleOutcomePrompt,
 } from "./openai-responses-fixture";
 
 const submission = { id: "submission-1", prompt: "hello" };
@@ -390,6 +391,91 @@ test("rolls back schedule creation when its Code Mode receipt cannot commit", as
 		),
 	).toEqual({ schedules: [], nextOffset: null });
 });
+
+for (const mode of ["before-admission", "after-admission"] as const) {
+	test(`reconciles exhausted schedule retries ${mode}`, async () => {
+		let stub = openFixture();
+		if (mode === "before-admission") {
+			const setup = await submit(stub, { id: "compact", prompt: compactSetupPrompt });
+			await expect.poll(() => readTurn(stub, setup.runId)).toMatchObject({ state: "completed" });
+		}
+		await stub.setScheduledFailure(mode);
+		const created = Schema.decodeSync(Schema.fromJsonString(ToolResult))(
+			await stub.workspaceTool("exec", {
+				code: `import { scheduleTurn } from "codemode:tools";
+export default async function () {
+  return scheduleTurn({ prompt: "Check the workspace on schedule.", when: { type: "weekly", days: ["mon"], time: "08:00", timeZone: "UTC" } });
+}`,
+			}),
+		);
+		expect(created.status).toBe("completed");
+		await runInDurableObject(stub, async (instance, { storage }) => {
+			storage.sql.exec(
+				"UPDATE cf_agents_jobs SET time = ? WHERE capability = 'turn-schedules'",
+				Date.now(),
+			);
+			await instance.lifecycle.rearmAlarm();
+		});
+		await runDurableObjectAlarm(stub);
+		const { instance } = await stub.state();
+		const historyIncludes =
+			mode === "before-admission"
+				? "A scheduled task could not be queued after retries."
+				: "The scheduled workspace check ran.";
+		await expect
+			.poll(async () =>
+				(await stub.history({})).entries.filter(({ message }) => message.includes(historyIncludes)),
+			)
+			.toHaveLength(1);
+		await expect
+			.poll(async () => {
+				const [schedule] = await runInDurableObject(stub, (_, { storage }) =>
+					storage.sql
+						.exec<{ time: number }>(
+							"SELECT time FROM cf_agents_jobs WHERE capability = 'turn-schedules'",
+						)
+						.toArray(),
+				);
+				return schedule?.time ?? 0;
+			})
+			.toBeGreaterThan(Date.now());
+		await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+		stub = await waitForRestart(stub, instance);
+		const { entries } = await stub.history({});
+		if (mode === "before-admission") {
+			const notices = entries
+				.map(({ message }) => Schema.decodeSync(messageJson)(message))
+				.filter(({ role }) => role === "notice");
+			expect(notices).toEqual([
+				{
+					role: "notice",
+					status: "failed",
+					text: expect.stringContaining("Next scheduled run is "),
+				},
+			]);
+			const followUp = await submit(stub, {
+				id: "inspect-schedule",
+				prompt: scheduleOutcomePrompt,
+			});
+			await expect
+				.poll(() => readTurn(stub, followUp.runId))
+				.toMatchObject({
+					state: "completed",
+					result: {
+						messages: [
+							{ role: "user", text: scheduleOutcomePrompt },
+							{ role: "assistant", text: "The scheduled workspace check was missed." },
+						],
+					},
+				});
+		} else {
+			expect(entries.map(({ message }) => Schema.decodeSync(messageJson)(message).role)).toEqual([
+				"user",
+				"assistant",
+			]);
+		}
+	});
+}
 
 test("captures script output and confines named Git tools to the workspace", async () => {
 	const stub = openFixture();
@@ -795,6 +881,36 @@ test("stopping a turn archives its committed write even without live tool activi
 			Array.from(storage.kv.list({ prefix: `code-mode:${encodeURIComponent(runId)}:` })),
 		),
 	).toEqual([]);
+	const prompt = "Report recent runtime outcomes.";
+	const followUp = await submit(restarted, { id: "inspect-outcome", prompt });
+	await expect
+		.poll(() => readTurn(restarted, followUp.runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: prompt },
+					{
+						role: "assistant",
+						text: expect.stringContaining(
+							'"name":"write","status":"completed","path":"/workspace/turn.txt"',
+						),
+					},
+				],
+			},
+		});
+	const later = await submit(restarted, { id: "inspect-outcome-again", prompt });
+	await expect
+		.poll(() => readTurn(restarted, later.runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: prompt },
+					{ role: "assistant", text: "[]" },
+				],
+			},
+		});
 });
 
 test("a later model failure keeps the completed exec and its diff in history", async () => {

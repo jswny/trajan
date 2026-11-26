@@ -40,7 +40,10 @@ function sendChat(socket: WebSocket, data: string) {
 
 export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 	protected readonly toolCatalog: ReadonlyArray<typeof ChatToolInfo.Type> = [];
-	protected readonly schedules = new TurnSchedules((input) => this.submitEffect(input));
+	protected readonly schedules = new TurnSchedules(
+		(input) => this.submitEffect(input),
+		(input, text) => this.recordUnadmittedSubmission(input, text),
+	);
 	protected get browserWatch(): typeof BrowserWatch.Type {
 		return null;
 	}

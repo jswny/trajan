@@ -6,6 +6,7 @@ import { modelConfig } from "../model-config";
 export const compactSetupPrompt = "Prepare the compacted reference.";
 export const compactResumePrompt = "Recall the compacted reference and save it using exec.";
 export const compactReference = "amber-heron-795";
+export const scheduleOutcomePrompt = "What happened to the scheduled workspace check?";
 const compaction = { type: "compaction", encrypted_content: "opaque-fixture-compaction" };
 const betweenCallAndOutput = {
 	type: "compaction",
@@ -59,6 +60,17 @@ export function createOpenAiResponsesFixture(
 				}
 				if (input[0]?.encrypted_content !== compaction.encrypted_content) {
 					throw new Error("Expected the durable compaction item at the start of the request.");
+				}
+				if (last?.content === scheduleOutcomePrompt) {
+					const outcome = input.at(-2)?.content;
+					if (
+						typeof outcome !== "string" ||
+						!outcome.startsWith("Trajan runtime outcome\n") ||
+						!outcome.includes("A scheduled task could not be queued after retries.")
+					) {
+						throw new Error("Expected the missed schedule after the saved compaction item.");
+					}
+					return sseResponse([assistant("The scheduled workspace check was missed.")]);
 				}
 				if (last?.content === compactResumePrompt && input.length === 2) {
 					return sseResponse([
