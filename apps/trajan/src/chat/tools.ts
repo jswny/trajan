@@ -1,4 +1,4 @@
-import { createCodeMode } from "@trajan/code-mode";
+import { createCodeMode, describeTools } from "@trajan/code-mode";
 import type { CodeModeTool } from "@trajan/code-mode";
 import { TurnIoError } from "@trajan/harness";
 import type { ToolActivity, ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
@@ -49,10 +49,11 @@ export function createChatTools(
 		instructions,
 	}: { catalog: Parameters<typeof createCodeMode>[2]; instructions: string },
 ) {
-	const codeMode = createCodeMode(loader, storage, {
+	const registry = {
 		...catalog,
 		"codemode:tools": { ...catalog["codemode:tools"], ...scheduleTools },
-	});
+	};
+	const codeMode = createCodeMode(loader, storage, registry);
 	const execute = Effect.fn("chat.exec")(
 		function* (...[call, attempt, publishActivity]: Parameters<TurnTools["Service"]["execute"]>) {
 			if (call.name !== Exec.name) {
@@ -158,6 +159,7 @@ export function createChatTools(
 				"Write large results to a workspace file and return the path.",
 				instructions,
 				scheduleInstructions,
+				...describeTools(registry),
 			].join("\n"),
 			parameters: { ...Tool.getJsonSchema(Exec), additionalProperties: false },
 		},

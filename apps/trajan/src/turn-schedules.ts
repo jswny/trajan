@@ -1,4 +1,4 @@
-import type { CodeModeTool } from "@trajan/code-mode";
+import { defineTool } from "@trajan/code-mode";
 import { TurnSubmission } from "@trajan/harness";
 import type { TurnIoError } from "@trajan/harness";
 import { LifecycleCapability } from "agents/lifecycle";
@@ -33,6 +33,11 @@ const ScheduledTurn = Schema.Struct({
 });
 const ListInput = Schema.NullOr(Schema.Struct({ offset: Schema.optionalKey(Schema.Natural) }));
 const CancelInput = Schema.Struct({ id: Schema.NonEmptyString });
+const Schedule = Schema.Struct({
+	...ScheduledTurn.fields,
+	id: Schema.String,
+	nextRunAt: Schema.String,
+});
 const MissedOccurrence = Schema.Struct({
 	scheduleId: Schema.NonEmptyString,
 	scheduledFor: Schema.Natural,
@@ -100,15 +105,17 @@ export class TurnSchedules extends LifecycleCapability {
 	}
 
 	readonly tools = {
-		scheduleTurn: {
+		scheduleTurn: defineTool({
 			// The Lifecycle job and its Code Mode receipt share the Durable Object database.
 			replay: "atomic",
 			mutationLock: Semaphore.makeUnsafe(1),
+			input: ScheduledTurn,
+			output: Schedule,
 			run: Effect.fnUntraced(function* (
 				this: TurnSchedules,
-				...[input, { callId, signal }]: Parameters<CodeModeTool["run"]>
+				plan: typeof ScheduledTurn.Type,
+				{ callId, signal }: { callId: string; signal: AbortSignal },
 			) {
-				const plan = yield* Schema.decodeUnknownEffect(ScheduledTurn)(input);
 				const digest = yield* Effect.tryPromise(() =>
 					crypto.subtle.digest("SHA-256", new TextEncoder().encode(callId)),
 				);
@@ -135,12 +142,17 @@ export class TurnSchedules extends LifecycleCapability {
 					return this.lifecycle.jobs.push({ id, fn: scheduleJob, time, payload: plan });
 				});
 				return describe(job, plan);
-			}, Effect.mapError(codeModeError)).bind(this),
-		},
-		listSchedules: {
+			}).bind(this),
+		}),
+		listSchedules: defineTool({
 			replay: "safe",
-			run: Effect.fnUntraced(function* (this: TurnSchedules, input: Schema.Json) {
-				const { offset = 0 } = (yield* Schema.decodeUnknownEffect(ListInput)(input)) ?? {};
+			input: ListInput,
+			output: Schema.Struct({
+				schedules: Schema.Array(Schedule),
+				nextOffset: Schema.NullOr(Schema.Int),
+			}),
+			run: Effect.fnUntraced(function* (this: TurnSchedules, input: typeof ListInput.Type) {
+				const { offset = 0 } = input ?? {};
 				const jobs = this.lifecycle.jobs.list().filter(({ fn }) => fn === scheduleJob);
 				const schedules = yield* Effect.forEach(jobs.slice(offset, offset + pageSize), (job) =>
 					Schema.decodeUnknownEffect(ScheduledTurn)(job.payload).pipe(
@@ -151,25 +163,27 @@ export class TurnSchedules extends LifecycleCapability {
 					schedules,
 					nextOffset: offset + pageSize < jobs.length ? offset + pageSize : null,
 				};
-			}, Effect.mapError(codeModeError)).bind(this),
-		},
-		cancelSchedule: {
+			}).bind(this),
+		}),
+		cancelSchedule: defineTool({
 			replay: "safe",
+			input: CancelInput,
+			output: Schema.Struct({ id: Schema.String, status: Schema.Literal("inactive") }),
 			run: Effect.fnUntraced(function* (
 				this: TurnSchedules,
-				...[input, { signal }]: Parameters<CodeModeTool["run"]>
+				{ id }: typeof CancelInput.Type,
+				{ signal }: { signal: AbortSignal },
 			) {
-				const { id } = yield* Schema.decodeUnknownEffect(CancelInput)(input);
 				yield* Effect.tryPromise(async () => {
 					signal.throwIfAborted();
 					if (this.lifecycle.jobs.get(id)?.fn === scheduleJob) {
 						await this.lifecycle.jobs.cancel(id);
 					}
 				});
-				return { id, status: "inactive" };
-			}, Effect.mapError(codeModeError)).bind(this),
-		},
-	} satisfies Record<string, CodeModeTool>;
+				return { id, status: "inactive" as const };
+			}).bind(this),
+		}),
+	};
 
 	readonly #advance = Effect.fnUntraced(function* (
 		when: typeof ScheduledTurn.Type.when,

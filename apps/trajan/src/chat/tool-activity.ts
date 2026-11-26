@@ -20,14 +20,6 @@ const decodeActivity = Schema.decodeUnknownSync(Schema.UndefinedOr(ExecutionActi
 const decodeContent = Schema.decodeUnknownOption(ToolContent);
 const decodeFileChange = Schema.decodeUnknownOption(FileChange);
 const decodeFilePreview = Schema.decodeUnknownOption(FilePreview);
-const decodeGitPushTarget = Schema.decodeUnknownOption(
-	Schema.Struct({
-		dir: Schema.optionalKey(Schema.String),
-		remote: Schema.optionalKey(Schema.NonEmptyString),
-		ref: Schema.optionalKey(Schema.NonEmptyString),
-		remoteRef: Schema.optionalKey(Schema.NonEmptyString),
-	}),
-);
 const encoder = new TextEncoder();
 
 function limitPreview(text: string) {
@@ -96,33 +88,14 @@ export function toolActivity({
 }
 
 export function uncertainToolEffects(calls: ReadonlyArray<CodeModeActivity>) {
-	return calls.flatMap(({ id, name, input, reply }): Array<typeof UncertainToolEffect.Type> => {
-		if (reply?.status !== "interrupted") {
-			return [];
-		}
-		if (name === "git.push") {
-			const target = Option.getOrUndefined(decodeGitPushTarget(input));
-			const remote = target?.remote
-				? `remote ${JSON.stringify(target.remote.slice(0, 128))}`
-				: "the configured push remote";
-			const ref = target?.remoteRef
-				? `ref ${JSON.stringify(target.remoteRef.slice(0, 256))}`
-				: target?.ref
-					? `the destination for ${JSON.stringify(target.ref.slice(0, 256))}`
-					: "the destination for the current branch";
-			const directory = target?.dir
-				? ` in repository ${JSON.stringify(target.dir.slice(0, 256))}`
-				: "";
-			return [
-				{
-					id,
-					name,
-					message: `Remote outcome unknown. Verify ${ref} on ${remote}${directory} before retrying the push.`,
-				},
-			];
-		}
-		return [{ id, name, message: reply.message }];
-	});
+	return calls.flatMap(
+		({ id, name, uncertainty, reply }): Array<typeof UncertainToolEffect.Type> => {
+			if (reply?.status !== "interrupted") {
+				return [];
+			}
+			return [{ id, name, message: uncertainty ?? reply.message }];
+		},
+	);
 }
 
 export function toolActivityKey(runId: string) {

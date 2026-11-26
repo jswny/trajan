@@ -11,21 +11,78 @@ export class CodeModeRejected extends Data.TaggedError("CodeModeRejected")<{
 	readonly message: string;
 }> {}
 
-export type CodeModeTool = {
+type ToolPolicy =
+	| { readonly replay: "safe" | "unsafe" }
+	// Atomic tools may mutate only this Durable Object's storage.
+	| { readonly replay: "atomic"; readonly mutationLock: Semaphore.Semaphore };
+
+type ToolContext<D = Schema.Json> = {
+	readonly callId: string;
+	readonly signal: AbortSignal;
+	readonly recordDetails: (details: D) => void;
+};
+
+export type CodeModeTool = ToolPolicy & {
+	readonly parameters?: unknown;
+	readonly description?: string;
+	readonly describeUncertainty?: (input: Schema.Json) => string | undefined;
 	readonly isError?: (value: Schema.Json) => boolean;
 	readonly run: (
 		input: Schema.Json,
-		context: {
-			readonly callId: string;
-			readonly signal: AbortSignal;
-			readonly recordDetails: (details: Schema.Json) => void;
-		},
+		context: ToolContext,
 	) => Effect.Effect<Schema.Json, CodeModeError>;
-} & (
-	| { readonly replay: "safe" | "unsafe" }
-	// Atomic tools may mutate only this Durable Object's storage.
-	| { readonly replay: "atomic"; readonly mutationLock: Semaphore.Semaphore }
-);
+};
+
+export function defineTool<A, B extends Schema.Json, D extends Schema.Json = never>(
+	definition: ToolPolicy & {
+		readonly input: Schema.Codec<A>;
+		readonly output: Schema.Codec<B>;
+		readonly details?: Schema.Codec<D>;
+		readonly description?: string;
+		readonly normalizeInput?: (input: Schema.Json) => Schema.Json;
+		readonly recovery?: (input: A) => string;
+		readonly run: (input: A, context: ToolContext<D>) => Effect.Effect<B, unknown>;
+	},
+): CodeModeTool {
+	const { input, output, details, description, normalizeInput, recovery, run, ...policy } =
+		definition;
+	const decodeInput = Schema.decodeUnknownEffect(input);
+	const decodeDetails = details && Schema.decodeUnknownEffect(details);
+	return {
+		...policy,
+		parameters: Schema.toJsonSchemaDocument(input).schema,
+		...(description && { description }),
+		...(recovery && {
+			describeUncertainty: (raw) =>
+				Option.map(
+					Schema.decodeUnknownOption(input)(normalizeInput ? normalizeInput(raw) : raw),
+					recovery,
+				).pipe(Option.getOrUndefined),
+		}),
+		run: (raw, context) =>
+			decodeInput(normalizeInput ? normalizeInput(raw) : raw).pipe(
+				Effect.flatMap((args) =>
+					Effect.suspend(() => {
+						let recorded: D | undefined;
+						return run(args, {
+							...context,
+							recordDetails: (value) => {
+								recorded = value;
+							},
+						}).pipe(
+							Effect.tap(() =>
+								decodeDetails && recorded !== undefined
+									? decodeDetails(recorded).pipe(Effect.map(context.recordDetails))
+									: Effect.void,
+							),
+						);
+					}),
+				),
+				Effect.flatMap(Schema.decodeEffect(output)),
+				Effect.mapError(ioError),
+			),
+	};
+}
 
 export interface CodeModeActivity {
 	readonly id: string;
@@ -34,6 +91,7 @@ export interface CodeModeActivity {
 	readonly input: Schema.Json;
 	readonly reply?: ToolReply;
 	readonly details?: Schema.Json;
+	readonly uncertainty?: string;
 }
 
 interface RunOptions {
@@ -42,17 +100,28 @@ interface RunOptions {
 	readonly onActivity?: (activity: CodeModeActivity) => Effect.Effect<void, CodeModeError>;
 }
 
-const applicationModules = ["codemode:tools", "codemode:git"] as const;
 const runtimeModule = "codemode:runtime";
 const ToolCall = Schema.Struct({
-	module: Schema.Literals([...applicationModules, runtimeModule]),
+	module: Schema.NonEmptyString,
 	name: Schema.String,
 	input: Schema.Json,
 });
 
 type ToolCall = typeof ToolCall.Type;
 type ToolNamespace = Readonly<Record<string, CodeModeTool>>;
-type Catalog = Partial<Record<(typeof applicationModules)[number], ToolNamespace>>;
+type Catalog = Partial<Record<`codemode:${string}`, ToolNamespace>>;
+
+export function describeTools(catalog: Catalog) {
+	return Object.entries(catalog).flatMap(([module, tools]) =>
+		Object.entries(tools ?? {}).flatMap(([name, { parameters, description }]) =>
+			parameters === undefined
+				? []
+				: [
+						`${module} / ${name}${description ? `: ${description}` : ""}\nArguments: ${JSON.stringify(parameters)}`,
+					],
+		),
+	);
+}
 
 const maxCalls = 64;
 const maxValueBytes = 64 * 1024;
@@ -139,6 +208,7 @@ const activity = (
 	status: CodeModeActivity["status"],
 	reply?: ToolReply,
 	details?: Schema.Json,
+	uncertainty?: string,
 ): CodeModeActivity => ({
 	id,
 	name:
@@ -149,6 +219,7 @@ const activity = (
 	input: call.input,
 	...(reply && { reply }),
 	...(details !== undefined && { details }),
+	...(uncertainty && { uncertainty }),
 });
 const replyStatus = (tool: CodeModeTool | undefined, reply: ToolReply) =>
 	reply.status === "returned"
@@ -191,7 +262,17 @@ export function createCodeMode(
 			}
 			const reply = entry.reply ?? (entry.replay === "unsafe" ? interrupted : undefined);
 			if (reply) {
-				calls.push(activity(callId, call, replyStatus(getTool(call), reply), reply, entry.details));
+				const tool = getTool(call);
+				calls.push(
+					activity(
+						callId,
+						call,
+						replyStatus(tool, reply),
+						reply,
+						entry.details,
+						reply.status === "interrupted" ? tool?.describeUncertainty?.(call.input) : undefined,
+					),
+				);
 			}
 		}
 		return { saved, calls };

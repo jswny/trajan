@@ -180,7 +180,7 @@ export class ChatTestObject extends TrajanChatObject {
 				scheduleTurn: {
 					...schedule,
 					run: (input, context) =>
-						scheduleTools.listSchedules.run(null).pipe(
+						scheduleTools.listSchedules.run(null, context).pipe(
 							Effect.tap((before) =>
 								Effect.sync(() => storage.kv.put("schedules-before-create", before)),
 							),

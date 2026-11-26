@@ -2,7 +2,8 @@ import { resolve } from "node:path/posix";
 import { Workspace } from "@cloudflare/computer";
 import { createGitClient } from "@cloudflare/computer/git";
 import type { GitClient } from "@cloudflare/computer/git";
-import { CodeModeError } from "@trajan/code-mode";
+import { CodeModeError, defineTool } from "@trajan/code-mode";
+import { FilePreview } from "@trajan/harness";
 import type { CodeModeTool } from "@trajan/code-mode";
 import {
 	DEFAULT_WORKSPACE_SKILLS_ROOT,
@@ -94,34 +95,34 @@ function workspaceGit(workspace: Workspace, mutations: Semaphore.Semaphore) {
 
 	function operation<A extends { readonly dir?: string }, B>(
 		replay: CodeModeTool["replay"],
-		schema: Schema.Codec<A>,
+		input: Schema.Codec<A>,
 		call: (git: GitClient, options: A) => Promise<B>,
-	): CodeModeTool & { readonly schema: Schema.Codec<A> } {
-		const invoke = Effect.fnUntraced(
-			function* (input: Schema.Json, { signal }: Parameters<CodeModeTool["run"]>[1]) {
-				const args = yield* Schema.decodeUnknownEffect(schema)(input ?? {});
-				const dir = yield* confinedDirectory(args.dir, signal);
-				const value = yield* Effect.tryPromise({
-					try: () => {
-						signal.throwIfAborted();
-						// The client's index cache survives SQLite rollbacks and can miss index creation.
-						return call(createWorkspaceGitClient({ ws: workspace }), { ...args, dir });
-					},
-					catch: codeModeError,
-				});
-				return yield* Schema.decodeUnknownEffect(Schema.Json)(value ?? null);
+		recovery?: (input: A) => string,
+	) {
+		const invoke = Effect.fnUntraced(function* (args: A, signal: AbortSignal) {
+			const dir = yield* confinedDirectory(args.dir, signal);
+			const value = yield* Effect.tryPromise({
+				try: () => {
+					signal.throwIfAborted();
+					// The client's index cache survives SQLite rollbacks and can miss index creation.
+					return call(createWorkspaceGitClient({ ws: workspace }), { ...args, dir });
+				},
+				catch: codeModeError,
+			});
+			return yield* Schema.decodeUnknownEffect(Schema.Json)(value ?? null);
+		});
+		return defineTool({
+			...(replay === "atomic" ? { replay, mutationLock: mutations } : { replay }),
+			input,
+			output: Schema.Json,
+			normalizeInput: (raw) => raw ?? {},
+			...(recovery && { recovery }),
+			run: (args, { signal }) => {
+				const run = invoke(args, signal);
+				// Status and diff may refresh index metadata. Hold the lock until Git settles.
+				return replay === "atomic" ? run : mutations.withPermit(Effect.uninterruptible(run));
 			},
-			Effect.catchTag("SchemaError", (error) => Effect.fail(codeModeError(error))),
-		);
-		if (replay === "atomic") {
-			return { replay, schema, mutationLock: mutations, run: invoke };
-		}
-		return {
-			replay,
-			schema,
-			// Status and diff may refresh index metadata. Hold the lock until Git settles.
-			run: (input, context) => mutations.withPermit(Effect.uninterruptible(invoke(input, context))),
-		};
+		});
 	}
 
 	return {
@@ -172,6 +173,20 @@ function workspaceGit(workspace: Workspace, mutations: Semaphore.Semaphore) {
 			"unsafe",
 			Schema.Struct({ ...directory, remote: ref, ref, remoteRef: ref }),
 			(git, args) => git.push(args),
+			(target) => {
+				const remote = target.remote
+					? `remote ${JSON.stringify(target.remote.slice(0, 128))}`
+					: "the configured push remote";
+				const ref = target.remoteRef
+					? `ref ${JSON.stringify(target.remoteRef.slice(0, 256))}`
+					: target.ref
+						? `the destination for ${JSON.stringify(target.ref.slice(0, 256))}`
+						: "the destination for the current branch";
+				const directory = target.dir
+					? ` in repository ${JSON.stringify(target.dir.slice(0, 256))}`
+					: "";
+				return `Remote outcome unknown. Verify ${ref} on ${remote}${directory} before retrying the push.`;
+			},
 		),
 	};
 }
@@ -180,66 +195,72 @@ const SkillName = Schema.Struct({ name: Schema.NonEmptyString });
 const SkillResourceRequest = Schema.Struct({ ...SkillName.fields, path: Schema.NonEmptyString });
 
 function workspaceSkills(workspace: Workspace) {
-	function operation<A>(
-		schema: Schema.Codec<A>,
+	function operation<A, B extends Schema.Json>(
+		input: Schema.Codec<A>,
+		output: Schema.Codec<B>,
 		read: (
 			catalog: SkillCatalog,
 			input: A,
-			recordDetails: Parameters<CodeModeTool["run"]>[1]["recordDetails"],
-		) => Effect.Effect<Schema.Json, CodeModeError>,
-	): CodeModeTool {
-		return {
+			recordDetails: (detail: typeof FilePreview.Type) => void,
+		) => Effect.Effect<B, CodeModeError>,
+	) {
+		return defineTool({
 			replay: "safe",
-			run: Effect.fnUntraced(
-				function* (raw, { signal, recordDetails }) {
-					const input = yield* Schema.decodeUnknownEffect(schema)(raw);
-					const catalog = yield* Effect.tryPromise({
-						try: () => {
-							signal.throwIfAborted();
-							return loadSkillCatalog([skillSource(workspace)]);
-						},
-						catch: codeModeError,
-					});
-					const failure = catalog.diagnostics.find(
-						(diagnostic) => diagnostic._tag === "SourceFailed",
-					);
-					if (failure) {
-						return yield* codeModeError(failure.error);
-					}
-					return yield* read(catalog, input, recordDetails);
-				},
-				Effect.catchTag("SchemaError", (error) => Effect.fail(codeModeError(error))),
-			),
-		};
+			input,
+			output,
+			details: FilePreview,
+			run: Effect.fnUntraced(function* (args, { signal, recordDetails }) {
+				const catalog = yield* Effect.tryPromise({
+					try: () => {
+						signal.throwIfAborted();
+						return loadSkillCatalog([skillSource(workspace)]);
+					},
+					catch: codeModeError,
+				});
+				const failure = catalog.diagnostics.find(
+					(diagnostic) => diagnostic._tag === "SourceFailed",
+				);
+				if (failure) {
+					return yield* codeModeError(failure.error);
+				}
+				return yield* read(catalog, args, recordDetails);
+			}),
+		});
 	}
 
 	return {
-		listSkills: operation(Schema.NullOr(Schema.Struct({})), (catalog) =>
-			Effect.succeed(
-				catalog.skills.map(({ skill: { name, description } }) => ({ name, description })),
-			),
+		listSkills: operation(
+			Schema.NullOr(Schema.Struct({})),
+			Schema.Array(Schema.Struct({ name: Schema.String, description: Schema.String })),
+			(catalog) =>
+				Effect.succeed(
+					catalog.skills.map(({ skill: { name, description } }) => ({ name, description })),
+				),
 		),
-		activateSkill: operation(SkillName, (catalog, { name }) => {
+		activateSkill: operation(SkillName, Schema.String, (catalog, { name }) => {
 			const activated = catalog.activate(name);
 			return activated.ok
 				? Effect.succeed(activated.value)
 				: Effect.fail(codeModeError(activated.error));
 		}),
-		readSkillResource: operation(SkillResourceRequest, (catalog, input, recordDetails) =>
-			Effect.gen(function* () {
-				const read = yield* Effect.tryPromise({
-					try: () => catalog.readResource(input),
-					catch: codeModeError,
-				});
-				if (!read.ok) {
-					return yield* codeModeError(read.error);
-				}
-				const { resource } = read.value;
-				if (resource.encoding === "text") {
-					recordDetails(filePreview(resource.path, resource.content));
-				}
-				return renderSkillResource(read.value);
-			}),
+		readSkillResource: operation(
+			SkillResourceRequest,
+			Schema.String,
+			(catalog, input, recordDetails) =>
+				Effect.gen(function* () {
+					const read = yield* Effect.tryPromise({
+						try: () => catalog.readResource(input),
+						catch: codeModeError,
+					});
+					if (!read.ok) {
+						return yield* codeModeError(read.error);
+					}
+					const { resource } = read.value;
+					if (resource.encoding === "text") {
+						recordDetails(filePreview(resource.path, resource.content));
+					}
+					return renderSkillResource(read.value);
+				}),
 		),
 	};
 }
@@ -248,12 +269,14 @@ export function workspaceToolset(workspace: Workspace) {
 	const mutations = Semaphore.makeUnsafe(1);
 	const files = workspaceFileTools(workspace, root);
 	const fileTools = Object.fromEntries(
-		files.tools.map(({ name }) => [
+		files.tools.map(({ name, parameters, description }) => [
 			name,
 			{
 				...(atomicFiles.has(name)
 					? { replay: "atomic" as const, mutationLock: mutations }
 					: { replay: replaySafeFiles.has(name) ? ("safe" as const) : ("unsafe" as const) }),
+				parameters,
+				description,
 				isError: isFileToolError,
 				run: Effect.fnUntraced(function* (input, { callId, signal, recordDetails }) {
 					const { result, observed } = yield* files
@@ -303,17 +326,9 @@ export function workspaceToolset(workspace: Workspace) {
 	const instructions = [
 		"Import named file tools from codemode:tools. Each takes an object and returns { text, isError, details? }. Check isError before using its result.",
 		"Successful write and edit calls both return details: { path, bytesWritten }.",
-		...files.tools.map(
-			({ name, description, parameters }) =>
-				`${name}: ${description}\nArguments: ${JSON.stringify(parameters)}`,
-		),
 		"Skills are named exports from codemode:tools. Use listSkills() to find a relevant workflow, activateSkill({ name }) to load its instructions and file list, and readSkillResource({ name, path }) to read a bundled file by its skill-relative path.",
 		`Use the workspace file tools to create or update skills under ${DEFAULT_WORKSPACE_SKILLS_ROOT}/<name>/SKILL.md. Start the file with YAML frontmatter containing name (matching the folder) and description. Skill tools discover saved changes on the next call.`,
 		"Import named Git tools from codemode:git. The directory defaults to /workspace.",
-		...Object.entries(gitTools).map(
-			([name, { schema }]) =>
-				`${name}: ${JSON.stringify(Schema.toJsonSchemaDocument(schema).schema)}`,
-		),
 	].join("\n");
 	return {
 		instructions,

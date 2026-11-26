@@ -1,6 +1,5 @@
 import { isIP } from "node:net";
-import { CodeModeError } from "@trajan/code-mode";
-import type { CodeModeTool } from "@trajan/code-mode";
+import { CodeModeError, defineTool } from "@trajan/code-mode";
 import type { BrowserSession, BrowserSessionReport } from "agents/browser";
 import { Effect, Result, Schema } from "effect";
 import { codeModeError } from "./workspace";
@@ -105,13 +104,15 @@ export function browserToolset(
 ) {
 	function operation<A, B extends Schema.Json>(
 		replay: "safe" | "unsafe",
-		inputSchema: Schema.Codec<A>,
+		input: Schema.Codec<A>,
+		output: Schema.Codec<B>,
 		run: (session: Session, input: A) => Effect.Effect<B, CodeModeError | Schema.SchemaError>,
 	) {
-		return {
+		return defineTool({
 			replay,
-			run: Effect.fnUntraced(function* (raw, { signal }) {
-				const input = yield* Schema.decodeUnknownEffect(inputSchema)(raw);
+			input,
+			output,
+			run: Effect.fnUntraced(function* (args: A, { signal }: { signal: AbortSignal }) {
 				let report: BrowserSessionReport | undefined;
 				const result = yield* Effect.acquireUseRelease(
 					Effect.sync(() => browser.session({ scope: "conversation:main", lock: true })),
@@ -119,7 +120,7 @@ export function browserToolset(
 						Effect.tryPromise({
 							try: () => session.lock({ signal }),
 							catch: codeModeError,
-						}).pipe(Effect.andThen(run(session, input)), Effect.result),
+						}).pipe(Effect.andThen(run(session, args)), Effect.result),
 					(session) =>
 						Effect.promise(async () => {
 							report = await session.close();
@@ -137,65 +138,80 @@ export function browserToolset(
 				}
 				yield* onPage(report?.restarted || report?.tabClosed ? "reopened" : "open");
 				return result.success;
-			}, Effect.mapError(codeModeError)),
-		} satisfies CodeModeTool;
+			}),
+		});
 	}
 
 	const tools = {
-		browserNavigate: operation("unsafe", urlInput, (session, { url }) =>
-			Effect.gen(function* () {
-				const reply = yield* send(session, "Page.navigate", { url }).pipe(
-					Effect.flatMap(Schema.decodeUnknownEffect(navigationReply)),
-				);
-				if (reply.errorText) {
-					return yield* new CodeModeError({
-						message: `Browser navigation failed: ${reply.errorText}`,
-					});
-				}
-				return { requestedUrl: url };
-			}),
-		),
-		browserRead: operation("safe", emptyInput, readPage),
-		browserScreenshot: operation("safe", emptyInput, (session) =>
-			Effect.gen(function* () {
-				yield* readPage(session);
-				const { cssVisualViewport: view } = yield* send(session, "Page.getLayoutMetrics").pipe(
-					Effect.flatMap(Schema.decodeUnknownEffect(viewportReply)),
-				);
-				const scale = Math.min(1, 640 / view.clientWidth, 480 / view.clientHeight);
-				for (const resolution of [scale, scale / 2]) {
-					const { data } = yield* send(session, "Page.captureScreenshot", {
-						format: "jpeg",
-						quality: 40,
-						clip: {
-							x: view.pageX,
-							y: view.pageY,
-							width: view.clientWidth,
-							height: view.clientHeight,
-							scale: resolution,
-						},
-					}).pipe(Effect.flatMap(Schema.decodeUnknownEffect(screenshotReply)));
-					if (data.length <= screenshotBudget) {
-						return [{ type: "image", mimeType: "image/jpeg", data }];
+		browserNavigate: operation(
+			"unsafe",
+			urlInput,
+			Schema.Struct({ requestedUrl: Schema.String }),
+			(session, { url }) =>
+				Effect.gen(function* () {
+					const reply = yield* send(session, "Page.navigate", { url }).pipe(
+						Effect.flatMap(Schema.decodeUnknownEffect(navigationReply)),
+					);
+					if (reply.errorText) {
+						return yield* new CodeModeError({
+							message: `Browser navigation failed: ${reply.errorText}`,
+						});
 					}
-				}
-				return yield* new CodeModeError({
-					message: "The screenshot exceeds the Code Mode size limit.",
-				});
-			}),
+					return { requestedUrl: url };
+				}),
 		),
-		browserClose: {
+		browserRead: operation("safe", emptyInput, pageReply.fields.result.fields.value, readPage),
+		browserScreenshot: operation(
+			"safe",
+			emptyInput,
+			Schema.Array(
+				Schema.Struct({
+					type: Schema.Literal("image"),
+					mimeType: Schema.Literal("image/jpeg"),
+					data: Schema.NonEmptyString,
+				}),
+			),
+			(session) =>
+				Effect.gen(function* () {
+					yield* readPage(session);
+					const { cssVisualViewport: view } = yield* send(session, "Page.getLayoutMetrics").pipe(
+						Effect.flatMap(Schema.decodeUnknownEffect(viewportReply)),
+					);
+					const scale = Math.min(1, 640 / view.clientWidth, 480 / view.clientHeight);
+					for (const resolution of [scale, scale / 2]) {
+						const { data } = yield* send(session, "Page.captureScreenshot", {
+							format: "jpeg",
+							quality: 40,
+							clip: {
+								x: view.pageX,
+								y: view.pageY,
+								width: view.clientWidth,
+								height: view.clientHeight,
+								scale: resolution,
+							},
+						}).pipe(Effect.flatMap(Schema.decodeUnknownEffect(screenshotReply)));
+						if (data.length <= screenshotBudget) {
+							return [{ type: "image", mimeType: "image/jpeg", data }] as const;
+						}
+					}
+					return yield* new CodeModeError({
+						message: "The screenshot exceeds the Code Mode size limit.",
+					});
+				}),
+		),
+		browserClose: defineTool({
 			replay: "unsafe",
-			run: Effect.fnUntraced(function* (raw) {
-				yield* Schema.decodeUnknownEffect(emptyInput)(raw);
+			input: emptyInput,
+			output: Schema.Struct({ closed: Schema.Boolean }),
+			run: Effect.fnUntraced(function* () {
 				const closed = yield* Effect.tryPromise({
 					try: () => browser.close(),
 					catch: codeModeError,
 				});
 				yield* onPage("closed");
 				return { closed };
-			}, Effect.mapError(codeModeError)),
-		} satisfies CodeModeTool,
+			}),
+		}),
 	};
 	return {
 		tools,
