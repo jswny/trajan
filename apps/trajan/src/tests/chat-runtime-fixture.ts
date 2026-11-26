@@ -36,6 +36,7 @@ type PausePoint =
 	| "during-replay-delete"
 	| "reject-atomic-write"
 	| "during-replay-git"
+	| "during-replay-schedule"
 	| "code-mode-read"
 	| "code-mode-edit"
 	| "code-mode-browser"
@@ -166,52 +167,71 @@ export class ChatTestObject extends TrajanChatObject {
 				),
 		});
 		const branch = faultBeforeCommit(git.branch, "during-replay-git");
-		return createChatTools(this.env.LOADER, storage, this.schedules, {
-			instructions,
-			catalog: {
-				"codemode:tools": {
-					...files,
-					write: faultBeforeCommit(files.write, "during-replay-write"),
-					edit: faultBeforeCommit(files.edit, "during-replay-edit"),
-					delete: faultBeforeCommit(files.delete, "during-replay-delete"),
-					read_first: read("first"),
-					read_second: read("second"),
-					wait_for_restart: {
-						replay: "safe",
-						run: (_input, { callId, signal }) =>
-							Effect.tryPromise({
-								try: async () => {
-									const key = `fixture-wait:${callId}`;
-									if (!storage.kv.get(key)) {
-										storage.kv.put(key, true);
-										await storage.put("pausedAt", "waiting-for-restart");
-										signal.throwIfAborted();
-										await new Promise<void>((resolve) => {
-											signal.addEventListener("abort", () => resolve(), { once: true });
-										});
-										signal.throwIfAborted();
-									}
-									return null;
-								},
-								catch: codeModeError,
-							}),
-					},
+		const scheduleTools = this.schedules.tools;
+		const schedule = faultBeforeCommit(scheduleTools.scheduleTurn, "during-replay-schedule");
+		return createChatTools(
+			this.env.LOADER,
+			storage,
+			{
+				...scheduleTools,
+				scheduleTurn: {
+					...schedule,
+					run: (input, context) =>
+						scheduleTools.listSchedules.run(null).pipe(
+							Effect.tap((before) =>
+								Effect.sync(() => storage.kv.put("schedules-before-create", before)),
+							),
+							Effect.andThen(schedule.run(input, context)),
+						),
 				},
-				"codemode:git": {
-					...git,
-					branch: {
-						...branch,
-						run: (input, context) =>
-							Effect.sync(() => {
-								storage.kv.put(
-									"git-branch-attempts",
-									(storage.kv.get<number>("git-branch-attempts") ?? 0) + 1,
-								);
-							}).pipe(Effect.andThen(branch.run(input, context))),
+			},
+			{
+				instructions,
+				catalog: {
+					"codemode:tools": {
+						...files,
+						write: faultBeforeCommit(files.write, "during-replay-write"),
+						edit: faultBeforeCommit(files.edit, "during-replay-edit"),
+						delete: faultBeforeCommit(files.delete, "during-replay-delete"),
+						read_first: read("first"),
+						read_second: read("second"),
+						wait_for_restart: {
+							replay: "safe",
+							run: (_input, { callId, signal }) =>
+								Effect.tryPromise({
+									try: async () => {
+										const key = `fixture-wait:${callId}`;
+										if (!storage.kv.get(key)) {
+											storage.kv.put(key, true);
+											await storage.put("pausedAt", "waiting-for-restart");
+											signal.throwIfAborted();
+											await new Promise<void>((resolve) => {
+												signal.addEventListener("abort", () => resolve(), { once: true });
+											});
+											signal.throwIfAborted();
+										}
+										return null;
+									},
+									catch: codeModeError,
+								}),
+						},
+					},
+					"codemode:git": {
+						...git,
+						branch: {
+							...branch,
+							run: (input, context) =>
+								Effect.sync(() => {
+									storage.kv.put(
+										"git-branch-attempts",
+										(storage.kv.get<number>("git-branch-attempts") ?? 0) + 1,
+									);
+								}).pipe(Effect.andThen(branch.run(input, context))),
+						},
 					},
 				},
 			},
-		});
+		);
 	}
 
 	override async submit(input: unknown) {
@@ -440,19 +460,25 @@ export default async function () {
 				},
 			};
 		}
-		if (last?.role === "user" && last.text === "Schedule a workspace check.") {
+		if (
+			last?.role === "user" &&
+			(last.text === "Schedule a workspace check." ||
+				last.text === "Schedule a workspace check and wait.")
+		) {
 			return {
 				role: "tool-call",
 				id: "exec-schedule",
 				name: "exec",
 				input: {
-					code: `import { scheduleTurn } from "codemode:tools";
+					code: `import { scheduleTurn, wait_for_restart } from "codemode:tools";
 import { now } from "codemode:runtime";
 export default async function () {
-  return scheduleTurn({
+  const receipt = await scheduleTurn({
     prompt: ${JSON.stringify(scheduledPrompt)},
     when: { type: "once", at: new Date(await now() + 3000).toISOString() }
   });
+  ${last.text.endsWith("and wait.") ? "await wait_for_restart();" : ""}
+  return receipt;
 }`,
 				},
 			};
@@ -686,7 +712,7 @@ export default async function () {
 		const tools = createChatTools(
 			this.env.LOADER,
 			this.ctx.storage,
-			this.schedules,
+			this.schedules.tools,
 			workspaceToolset(this.#workspace),
 		);
 		return Effect.runPromise(
@@ -725,6 +751,7 @@ export default async function () {
 			point === "during-replay-edit" ||
 			point === "during-replay-delete" ||
 			point === "during-replay-git" ||
+			point === "during-replay-schedule" ||
 			point === "reject-atomic-write"
 		) {
 			this.#atomicFault = point;

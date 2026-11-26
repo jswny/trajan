@@ -359,6 +359,38 @@ export default async function () {
 	});
 });
 
+test("rolls back schedule creation when its Code Mode receipt cannot commit", async () => {
+	const stub = openFixture();
+	const { instance } = await stub.state();
+	await stub.pause("during-replay-schedule");
+	const { runId } = await submit(stub, {
+		id: "schedule-rollback",
+		prompt: "Schedule a workspace check.",
+	});
+	const restarted = await waitForRestart(stub, instance);
+	await expect
+		.poll(() => readTurn(restarted, runId), { timeout: 7000 })
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: expect.arrayContaining([
+					expect.objectContaining({
+						role: "tool",
+						result: expect.objectContaining({
+							status: "completed",
+							output: expect.objectContaining({ id: expect.any(String) }),
+						}),
+					}),
+				]),
+			},
+		});
+	expect(
+		await runInDurableObject(restarted, (_, { storage }) =>
+			storage.kv.get("schedules-before-create"),
+		),
+	).toEqual({ schedules: [], nextOffset: null });
+});
+
 test("captures script output and confines named Git tools to the workspace", async () => {
 	const stub = openFixture();
 	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));

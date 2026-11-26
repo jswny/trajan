@@ -1,10 +1,10 @@
 import { createCodeMode } from "@trajan/code-mode";
+import type { CodeModeTool } from "@trajan/code-mode";
 import { TurnIoError } from "@trajan/harness";
 import type { ToolActivity, ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
 import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
 import { scheduleInstructions } from "../turn-schedules";
-import type { TurnSchedules } from "../turn-schedules";
 import { codeModeError } from "../workspace";
 import {
 	RECENT_TOOL_CALLS,
@@ -42,7 +42,7 @@ function markInterrupted(activity: ReadonlyArray<typeof ToolActivity.Type>) {
 export function createChatTools(
 	loader: WorkerLoader,
 	storage: DurableObjectStorage,
-	schedules: TurnSchedules,
+	scheduleTools: Readonly<Record<string, CodeModeTool>>,
 	{
 		catalog,
 		instructions,
@@ -50,7 +50,7 @@ export function createChatTools(
 ) {
 	const codeMode = createCodeMode(loader, storage, {
 		...catalog,
-		"codemode:tools": { ...catalog["codemode:tools"], ...schedules.tools },
+		"codemode:tools": { ...catalog["codemode:tools"], ...scheduleTools },
 	});
 	const execute = Effect.fn("chat.exec")(
 		function* (...[call, attempt, publishActivity]: Parameters<TurnTools["Service"]["execute"]>) {

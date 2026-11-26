@@ -38,7 +38,7 @@ export class Trajan extends TrajanChatObject {
 	readonly #tools = createChatTools(
 		this.env.LOADER,
 		this.ctx.storage,
-		this.schedules,
+		this.schedules.tools,
 		this.#toolset(),
 	);
 

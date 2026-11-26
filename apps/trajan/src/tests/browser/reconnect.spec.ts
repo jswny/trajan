@@ -570,6 +570,24 @@ test("runs a scheduled turn once across a restart with the chat closed", async (
 	).toHaveCount(1);
 });
 
+test("replays the original schedule receipt after its one-time job has fired", async ({ page }) => {
+	const composer = await openChat(page);
+	await composer.fill("Schedule a workspace check and wait.");
+	await composer.press("Enter");
+	const card = toolCards(page).last();
+	await card.locator(":scope > summary").click();
+	const receipt = card.getByRole("listitem").filter({ hasText: /scheduleTurn.*Succeeded/ });
+	await expect(receipt).toBeVisible();
+	await expect(page.getByText("1 queued behind this run")).toBeVisible();
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await page.reload();
+	const transcript = page.getByRole("main");
+	await expect(transcript.getByText(/^Scheduled \{/)).toHaveCount(1);
+	await expect(
+		transcript.getByText("The scheduled workspace check ran.", { exact: true }),
+	).toHaveCount(1);
+});
+
 test("keeps separate outcomes for concurrent calls to the same tool", async ({ page }) => {
 	const composer = await openChat(page);
 	await composer.fill("Run a workspace module.");

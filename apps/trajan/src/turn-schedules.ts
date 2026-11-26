@@ -2,7 +2,7 @@ import type { CodeModeTool } from "@trajan/code-mode";
 import type { TurnIoError, TurnSubmission } from "@trajan/harness";
 import { LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJob, LifecycleJobContext } from "agents/lifecycle";
-import { Clock, DateTime, Effect, Option, Schema } from "effect";
+import { Clock, DateTime, Effect, Option, Schema, Semaphore } from "effect";
 import { codeModeError } from "./workspace";
 
 const days = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
@@ -81,7 +81,9 @@ export class TurnSchedules extends LifecycleCapability {
 
 	readonly tools = {
 		scheduleTurn: {
-			replay: "safe",
+			// The Lifecycle job and its Code Mode receipt share the Durable Object database.
+			replay: "atomic",
+			mutationLock: Semaphore.makeUnsafe(1),
 			run: Effect.fnUntraced(function* (
 				this: TurnSchedules,
 				...[input, { callId, signal }]: Parameters<CodeModeTool["run"]>
