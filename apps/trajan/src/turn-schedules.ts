@@ -1,5 +1,6 @@
 import type { CodeModeTool } from "@trajan/code-mode";
-import type { TurnIoError, TurnSubmission } from "@trajan/harness";
+import { TurnSubmission } from "@trajan/harness";
+import type { TurnIoError } from "@trajan/harness";
 import { LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJob, LifecycleJobContext } from "agents/lifecycle";
 import { Clock, DateTime, Effect, Option, Schema, Semaphore } from "effect";
@@ -32,9 +33,16 @@ const ScheduledTurn = Schema.Struct({
 });
 const ListInput = Schema.NullOr(Schema.Struct({ offset: Schema.optionalKey(Schema.Natural) }));
 const CancelInput = Schema.Struct({ id: Schema.NonEmptyString });
+const MissedOccurrence = Schema.Struct({
+	scheduleId: Schema.NonEmptyString,
+	scheduledFor: Schema.Natural,
+	submission: TurnSubmission,
+});
 // Return full prompts while keeping each list result within Code Mode's value limit.
 const pageSize = 5;
 const scheduleJob = "submit-scheduled-turn";
+const reportJob = "report-missed-scheduled-turn";
+const reportRetryDelayMs = 30_000;
 
 function occurrence(job: LifecycleJob, prompt: string): typeof TurnSubmission.Type {
 	const date = DateTime.formatIso(DateTime.makeUnsafe(job.time));
@@ -133,7 +141,7 @@ export class TurnSchedules extends LifecycleCapability {
 			replay: "safe",
 			run: Effect.fnUntraced(function* (this: TurnSchedules, input: Schema.Json) {
 				const { offset = 0 } = (yield* Schema.decodeUnknownEffect(ListInput)(input)) ?? {};
-				const jobs = this.lifecycle.jobs.list();
+				const jobs = this.lifecycle.jobs.list().filter(({ fn }) => fn === scheduleJob);
 				const schedules = yield* Effect.forEach(jobs.slice(offset, offset + pageSize), (job) =>
 					Schema.decodeUnknownEffect(ScheduledTurn)(job.payload).pipe(
 						Effect.map((plan) => describe(job, plan)),
@@ -154,7 +162,9 @@ export class TurnSchedules extends LifecycleCapability {
 				const { id } = yield* Schema.decodeUnknownEffect(CancelInput)(input);
 				yield* Effect.tryPromise(async () => {
 					signal.throwIfAborted();
-					await this.lifecycle.jobs.cancel(id);
+					if (this.lifecycle.jobs.get(id)?.fn === scheduleJob) {
+						await this.lifecycle.jobs.cancel(id);
+					}
 				});
 				return { id, status: "inactive" };
 			}, Effect.mapError(codeModeError)).bind(this),
@@ -186,34 +196,102 @@ export class TurnSchedules extends LifecycleCapability {
 	});
 
 	onJob({ job }: LifecycleJobContext) {
+		if (job.fn === reportJob) {
+			return Effect.runPromise(this.#runReport(job));
+		}
 		return Effect.runPromise(this.#runJob(job));
 	}
 
-	onJobError({ job }: LifecycleJobContext, error: unknown) {
+	#report(occurrence: typeof MissedOccurrence.Type, nextRun?: number) {
+		const next =
+			nextRun === undefined
+				? ""
+				: ` Next scheduled run is ${DateTime.formatIso(DateTime.makeUnsafe(nextRun))}.`;
+		return this.recordMissed(
+			occurrence.submission,
+			`A scheduled task could not be queued after retries.${next}\n\n${occurrence.submission.prompt}`,
+		);
+	}
+
+	readonly #runReport = Effect.fn("turn-schedules.reportMissed")(function* (
+		this: TurnSchedules,
+		job: LifecycleJob,
+	) {
+		const missed = yield* Schema.decodeUnknownEffect(MissedOccurrence)(job.payload);
+		const next = this.lifecycle.jobs.get(missed.scheduleId)?.time;
+		yield* this.#report(
+			missed,
+			next !== undefined && next > missed.scheduledFor ? next : undefined,
+		);
+	});
+
+	onJobError({ job }: LifecycleJobContext, dispatchError: unknown) {
 		return Effect.runPromise(
 			Effect.gen({ self: this }, function* () {
+				if (job.fn === reportJob) {
+					if (Schema.isSchemaError(dispatchError)) {
+						return yield* Effect.logError(
+							"Could not decode the missed schedule report",
+							dispatchError,
+						).pipe(Effect.annotateLogs({ jobId: job.id }));
+					}
+					yield* Effect.logWarning("Retrying the missed schedule report", dispatchError).pipe(
+						Effect.annotateLogs({ jobId: job.id }),
+					);
+					return { rescheduleAt: (yield* Clock.currentTimeMillis) + reportRetryDelayMs };
+				}
 				const plan = yield* Schema.decodeUnknownEffect(ScheduledTurn)(job.payload);
 				const outcome = yield* this.#advance(plan.when, job.time);
 				const current = this.lifecycle.jobs.get(job.id);
 				if (current?.time !== job.time) {
 					return current && { rescheduleAt: current.time };
 				}
-				const submission = occurrence(job, plan.prompt);
-				const next = outcome
-					? ` Next scheduled run is ${DateTime.formatIso(DateTime.makeUnsafe(outcome.rescheduleAt))}.`
-					: "";
-				yield* this.recordMissed(
-					submission,
-					`A scheduled task could not be queued after retries.${next}\n\n${submission.prompt}`,
-				);
-				return outcome;
-			}).pipe(
-				Effect.tapError((cause) =>
-					Effect.logError("Could not record the scheduled turn outcome", cause, error).pipe(
-						Effect.annotateLogs({ scheduleId: job.id, scheduledFor: job.time }),
+				const missed: typeof MissedOccurrence.Type = {
+					scheduleId: job.id,
+					scheduledFor: job.time,
+					submission: occurrence(job, plan.prompt),
+				};
+				return yield* this.#report(missed, outcome?.rescheduleAt).pipe(
+					Effect.as(outcome),
+					Effect.catch((error) =>
+						this.#deferReport(missed, error).pipe(
+							Effect.matchEffect({
+								onSuccess: () => Effect.succeed(outcome),
+								onFailure: (enqueueError) =>
+									Effect.logError(
+										"Could not retain the scheduled turn outcome",
+										enqueueError,
+										dispatchError,
+									).pipe(
+										Effect.annotateLogs({ scheduleId: job.id, scheduledFor: job.time }),
+										// Keep the original occurrence due if queuing its report also failed.
+										Effect.as("yield" as const),
+									),
+							}),
+						),
 					),
-				),
-			),
+				);
+			}),
 		);
 	}
+
+	readonly #deferReport = Effect.fnUntraced(function* (
+		this: TurnSchedules,
+		missed: typeof MissedOccurrence.Type,
+		cause: TurnIoError,
+	) {
+		const time = (yield* Clock.currentTimeMillis) + reportRetryDelayMs;
+		// The original schedule can advance once this occurrence has a durable report job.
+		yield* Effect.tryPromise(() =>
+			this.lifecycle.jobs.push({
+				id: `report:${missed.submission.id}`,
+				fn: reportJob,
+				time,
+				payload: missed,
+			}),
+		);
+		yield* Effect.logWarning("Deferred the missed schedule report", cause).pipe(
+			Effect.annotateLogs({ scheduleId: missed.scheduleId, scheduledFor: missed.scheduledFor }),
+		);
+	});
 }

@@ -290,6 +290,30 @@ export class ChatTestObject extends TrajanChatObject {
 		return this.ctx.storage.put("scheduled-failure", mode);
 	}
 
+	failMissedScheduleReports(attempts: number) {
+		return this.ctx.storage.put("missed-report-failures", attempts);
+	}
+
+	protected override recordUnadmittedSubmission(
+		submission: typeof TurnSubmission.Type,
+		text: string,
+	) {
+		return Effect.suspend(() => {
+			const kv = this.ctx.storage.kv;
+			const failures = kv.get<number>("missed-report-failures") ?? 0;
+			if (failures === 0) {
+				return super.recordUnadmittedSubmission(submission, text);
+			}
+			kv.put("missed-report-failures", failures - 1);
+			return Effect.fail(
+				new TurnIoError({
+					operation: "record missed submission",
+					cause: "Fixture could not write the notice.",
+				}),
+			);
+		});
+	}
+
 	readonly #execute = Effect.fn("chat.fixture.executeTool")(function* (
 		this: ChatTestObject,
 		...args: Parameters<TurnTools["Service"]["execute"]>

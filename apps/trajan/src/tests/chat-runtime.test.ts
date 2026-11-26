@@ -524,6 +524,83 @@ export default async function () {
 	});
 }
 
+test("a missed occurrence keeps its report through storage failures, restart, and schedule cancellation", async () => {
+	let stub = openFixture();
+	await stub.history({});
+	await stub.setScheduledFailure("before-admission");
+	await stub.failMissedScheduleReports(4);
+	const created = Schema.decodeSync(Schema.fromJsonString(ToolResult))(
+		await stub.workspaceTool("exec", {
+			code: `import { scheduleTurn } from "codemode:tools";
+export default async function () {
+  return scheduleTurn({ prompt: "Check the workspace on schedule.", when: { type: "weekly", days: ["mon"], time: "08:00", timeZone: "UTC" } });
+}`,
+		}),
+	);
+	expect(created.status).toBe("completed");
+	const jobs = () =>
+		runInDurableObject(stub, (_, { storage }) =>
+			storage.sql
+				.exec<{ id: string; fn: string; time: number }>(
+					"SELECT id, fn, time FROM cf_agents_jobs WHERE capability = 'turn-schedules' ORDER BY fn",
+				)
+				.toArray(),
+		);
+	const makeDue = (fn: string, time: number) =>
+		runInDurableObject(stub, (_, { storage }) => {
+			storage.sql.exec(
+				"UPDATE cf_agents_jobs SET time = ? WHERE capability = 'turn-schedules' AND fn = ?",
+				time,
+				fn,
+			);
+		});
+	const scheduledFor = Date.now() - 1000;
+	await makeDue("submit-scheduled-turn", scheduledFor);
+	await runDurableObjectAlarm(stub);
+	const reportId = expect.stringMatching(new RegExp(`^report:scheduled:.*:${scheduledFor}$`));
+	await expect.poll(jobs).toEqual([
+		{ id: reportId, fn: "report-missed-scheduled-turn", time: expect.any(Number) },
+		{ id: expect.any(String), fn: "submit-scheduled-turn", time: expect.any(Number) },
+	]);
+	expect((await stub.history({})).entries).toEqual([]);
+	const { instance } = await stub.state();
+	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+	stub = await waitForRestart(stub, instance);
+	await stub.history({});
+
+	const cancelled = Schema.decodeSync(Schema.fromJsonString(ToolResult))(
+		await stub.workspaceTool("exec", {
+			code: `import { listSchedules, cancelSchedule } from "codemode:tools";
+export default async function () {
+  const { schedules } = await listSchedules();
+  await cancelSchedule({ id: schedules[0].id });
+  return { listed: schedules.length, remaining: (await listSchedules()).schedules.length };
+}`,
+		}),
+	);
+	expect(cancelled).toMatchObject({ status: "completed", output: { listed: 1, remaining: 0 } });
+	const reportRetryTime = Date.now() - 1;
+	await makeDue("report-missed-scheduled-turn", reportRetryTime);
+	await runDurableObjectAlarm(stub);
+	await expect
+		.poll(jobs)
+		.toEqual([{ id: reportId, fn: "report-missed-scheduled-turn", time: expect.any(Number) }]);
+	await expect.poll(async () => (await jobs())[0]?.time).toBeGreaterThan(reportRetryTime + 20_000);
+	expect((await stub.history({})).entries).toEqual([]);
+
+	await makeDue("report-missed-scheduled-turn", Date.now() - 1);
+	await runDurableObjectAlarm(stub);
+	await expect.poll(jobs).toEqual([]);
+	const { entries } = await stub.history({});
+	expect(entries.map(({ message }) => Schema.decodeSync(messageJson)(message))).toEqual([
+		{
+			role: "notice",
+			status: "failed",
+			text: `A scheduled task could not be queued after retries.\n\nScheduled task for ${new Date(scheduledFor).toISOString()}\n\nCheck the workspace on schedule.`,
+		},
+	]);
+});
+
 test("captures script output and confines named Git tools to the workspace", async () => {
 	const stub = openFixture();
 	const decode = Schema.decodeSync(Schema.fromJsonString(ToolResult));

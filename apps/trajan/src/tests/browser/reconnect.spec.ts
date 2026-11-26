@@ -689,6 +689,20 @@ test("a missed scheduled turn leaves a single notice that survives reload", asyn
 	).toHaveCount(0);
 });
 
+test("shows the missed schedule after the notice write recovers", async ({ page }) => {
+	test.setTimeout(50_000);
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/defer-missed-schedule`)).status()).toBe(204);
+	await composer.fill("Schedule a workspace check.");
+	await composer.press("Enter");
+	const notice = page
+		.getByRole("main")
+		.getByText(/A scheduled task could not be queued after retries\./);
+	await expect(notice).toHaveCount(1, { timeout: 40_000 });
+	await page.reload();
+	await expect(notice).toHaveCount(1);
+});
+
 test("replays the original schedule receipt after its one-time job has fired", async ({ page }) => {
 	const composer = await openChat(page);
 	await composer.fill("Schedule a workspace check and wait.");
