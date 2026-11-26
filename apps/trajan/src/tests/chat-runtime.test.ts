@@ -1341,6 +1341,10 @@ test.each([
 	{ kind: "untagged", saved: [] },
 	{ kind: "from another adapter", saved: { adapter: "other", version: 1, state: [] } },
 	{ kind: "from another version", saved: { adapter: "openai-responses", version: 2, state: [] } },
+	{
+		kind: "malformed for this adapter",
+		saved: { adapter: "openai-responses", version: 1, state: { invalid: true } },
+	},
 ])("uses transcript context when saved context is $kind", async ({ saved }) => {
 	const stub = openFixture();
 	const phrase = crypto.randomUUID();

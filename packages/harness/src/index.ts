@@ -160,9 +160,19 @@ const ModelContextFormat = Schema.Struct({
 	version: Schema.Int.check(Schema.isGreaterThan(0)),
 });
 
+// Bound UTF-16 units conservatively so UTF-8 and checkpoint encoding fit storage.
+const modelContextJsonLimit = 2 * 1024 * 1024;
+export const ModelContextState = Schema.Json.check(
+	Schema.makeFilter(
+		(state) =>
+			JSON.stringify(state).length <= modelContextJsonLimit ||
+			"Model context exceeds the persistence budget.",
+	),
+);
+
 export const SavedModelContext = Schema.Struct({
 	...ModelContextFormat.fields,
-	state: Schema.Json,
+	state: ModelContextState,
 });
 
 export type TurnCompletion = typeof TurnTranscript.Type & {
@@ -209,6 +219,7 @@ export class TurnModel extends Context.Service<
 	{
 		/** Identifies the format of the opaque context this adapter reads and writes. */
 		readonly contextFormat: typeof ModelContextFormat.Type;
+		readonly contextSchema: Schema.Codec<Schema.Json>;
 		readonly stream: (
 			messages: ReadonlyArray<ModelContextEntry | TurnHistoryEntry>,
 			options: { readonly allowTools: boolean; readonly modelContext?: Schema.Json },
@@ -284,7 +295,16 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 							message: "The model stream ended without a response.",
 						});
 					}
-					return last.value.response;
+					const { response } = last.value;
+					if (
+						response.role === "assistant" &&
+						response.continuation !== undefined &&
+						!Schema.is(ModelContextState)(response.continuation)
+					) {
+						yield* Effect.logWarning("Discarded an oversized model continuation");
+						return { role: response.role, text: response.text };
+					}
+					return response;
 				}).pipe(Effect.tapError(() => notify({ type: "reset" }))),
 		);
 

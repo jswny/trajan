@@ -48,6 +48,7 @@ function turnLayer(complete: Complete, execute: TurnTools["Service"]["execute"])
 			TurnModel,
 			TurnModel.of({
 				contextFormat,
+				contextSchema: Schema.Json,
 				stream: (...args) =>
 					complete(...args).pipe(
 						Effect.map((response) => ({ type: "response" as const, response })),
@@ -78,6 +79,26 @@ it.effect("stores a direct reply without calling a tool", () =>
 			],
 		});
 		expect(execute).not.toHaveBeenCalled();
+	}),
+);
+
+it.effect("keeps a completed reply when its model context exceeds the persistence budget", () =>
+	Effect.gen(function* () {
+		const result = yield* runTurn(submission, journal).pipe(
+			Effect.provide(
+				turnLayer(
+					() =>
+						Effect.succeed({
+							role: "assistant",
+							text: "Done",
+							continuation: "x".repeat(5 * 1024 * 1024),
+						}),
+					() => Effect.succeed({ status: "completed", output: null }),
+				),
+			),
+		);
+		expect(result.messages.at(-1)).toEqual({ role: "assistant", text: "Done" });
+		expect(result.modelContext).toBeUndefined();
 	}),
 );
 
@@ -112,6 +133,7 @@ it.effect("publishes draft text but fails when the stream has no terminal respon
 		const result = yield* runTurn(submission, journal, [], publish).pipe(
 			Effect.provideService(TurnModel, {
 				contextFormat,
+				contextSchema: Schema.Json,
 				stream: () => Stream.succeed({ type: "text-delta", text: "Partial" }),
 			}),
 			Effect.provideService(TurnTools, {

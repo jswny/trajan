@@ -673,6 +673,7 @@ export default async function () {
 			TurnModel,
 			TurnModel.of({
 				contextFormat: this.#responses.contextFormat,
+				contextSchema: this.#responses.contextSchema,
 				stream: (messages, options) => {
 					const user = messages.findLast((message) => message.role === "user");
 					if (

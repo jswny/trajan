@@ -282,13 +282,17 @@ export abstract class CloudflareHarness<
 				message: "The turn has no context cursor.",
 			});
 		}
-		const { contextFormat } = yield* TurnModel;
+		const { contextFormat, contextSchema } = yield* TurnModel;
 		const { context, modelContext, outcomesThrough } = yield* conversationEffect(
 			"read context",
 			() => {
 				const saved = this.#conversation.modelContext();
 				const outcomes = this.#conversation.runtimeOutcomes(through);
-				if (saved?.adapter === contextFormat.adapter && saved.version === contextFormat.version) {
+				if (
+					saved?.adapter === contextFormat.adapter &&
+					saved.version === contextFormat.version &&
+					Schema.is(contextSchema)(saved.state)
+				) {
 					return {
 						context: outcomes.messages,
 						modelContext: saved.state,
