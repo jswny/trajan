@@ -91,8 +91,34 @@ export function toolActivityKey(runId: string) {
 	return `chat-tool-activity:${runId}`;
 }
 
+const executionsKey = (runId: string) => `chat-tool-executions:${runId}`;
+const decodeExecutions = Schema.decodeUnknownSync(
+	Schema.UndefinedOr(
+		Schema.Array(
+			Schema.Struct({ executionId: Schema.NonEmptyString, callId: Schema.NonEmptyString }),
+		),
+	),
+);
+
+export function readExecutions(storage: DurableObjectStorage, runId: string) {
+	return decodeExecutions(storage.kv.get(executionsKey(runId))) ?? [];
+}
+
+export function recordExecution(
+	storage: DurableObjectStorage,
+	runId: string,
+	executionId: string,
+	callId: string,
+) {
+	const executions = readExecutions(storage, runId);
+	if (!executions.some((entry) => entry.executionId === executionId)) {
+		storage.kv.put(executionsKey(runId), [...executions, { executionId, callId }]);
+	}
+}
+
 export function clearToolState(storage: DurableObjectStorage, runId: string) {
 	storage.kv.delete(toolActivityKey(runId));
+	storage.kv.delete(executionsKey(runId));
 	clearCodeModeRun(storage, runId);
 }
 

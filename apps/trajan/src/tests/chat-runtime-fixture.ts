@@ -121,6 +121,9 @@ export class ChatTestObject extends TrajanChatObject {
 		(point, signal) => this.#pauseAt(point, signal),
 	);
 	protected override readonly toolCatalog = [this.#effectTools.declaration];
+	protected override readSettledTools(runId: string) {
+		return this.#effectTools.readSettledTools(runId);
+	}
 
 	#createTools() {
 		const { catalog, instructions } = workspaceToolset(this.#workspace);
@@ -512,6 +515,9 @@ export default async function () {
 			return { role: "assistant", text: earlier.map(({ text }) => text).join(", ") || "None." };
 		}
 		if (last?.role === "tool") {
+			if (user?.text === "Fail the model after writing.") {
+				return yield* new TurnModelError({ message: "The fixture model failed after writing." });
+			}
 			if (last.callId === "exec-file-diffs" && last.result.status === "completed") {
 				return { role: "assistant", text: "Updated the report." };
 			}

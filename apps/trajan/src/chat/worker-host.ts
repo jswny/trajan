@@ -1,5 +1,5 @@
 import { TurnSubmission } from "@trajan/harness";
-import type { TurnProgress } from "@trajan/harness";
+import type { TurnMessage, TurnProgress } from "@trajan/harness";
 import { CloudflareHarness } from "@trajan/harness-cloudflare";
 import { WebSockets } from "agents/websockets";
 import { Effect, Schema } from "effect";
@@ -63,8 +63,12 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 		this.lifecycle.use(this.#sockets).use(this.schedules);
 	}
 
-	protected override clearRunState(runId: string): undefined {
+	protected abstract readSettledTools(runId: string): ReadonlyArray<typeof TurnMessage.Type>;
+
+	protected override settleRunState(runId: string, outcome: "completed" | "failed" | "cancelled") {
+		const tools = outcome === "completed" ? undefined : this.readSettledTools(runId);
 		clearToolState(this.ctx.storage, runId);
+		return tools;
 	}
 
 	protected override onStateChange(settledRunId?: string) {

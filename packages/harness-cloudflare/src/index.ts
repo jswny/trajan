@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { runTurn, TurnIoError, TurnModel, TurnModelError, TurnSubmission } from "@trajan/harness";
-import type { TurnJournal, TurnProgress, TurnTools } from "@trajan/harness";
+import type { TurnJournal, TurnMessage, TurnProgress, TurnTools } from "@trajan/harness";
 import { Lifecycle } from "agents/lifecycle";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
 import { Tasks } from "agents/tasks";
@@ -103,11 +103,14 @@ export abstract class CloudflareHarness<
 	protected onProgress?(runId: string, event: TurnProgress): void;
 	protected onStateChange?(settledRunId?: string): void;
 
-	/** Runs in the storage transaction that settles the turn. */
-	protected clearRunState?(runId: string): undefined;
+	/** Archives outcomes and clears run state in the transaction that settles the turn. */
+	protected settleRunState?(
+		runId: string,
+		outcome: "completed" | "failed" | "cancelled",
+	): ReadonlyArray<typeof TurnMessage.Type> | undefined;
 
-	readonly #conversation = new ConversationStore(this.ctx.storage, (runId) =>
-		this.clearRunState?.(runId),
+	readonly #conversation = new ConversationStore(this.ctx.storage, (runId, outcome) =>
+		this.settleRunState?.(runId, outcome),
 	);
 	readonly #tasks = new Tasks({
 		onError: () => Effect.runPromise(this.#wakeInbox()),

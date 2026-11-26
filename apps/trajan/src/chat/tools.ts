@@ -1,6 +1,6 @@
 import { createCodeMode } from "@trajan/code-mode";
 import { TurnIoError } from "@trajan/harness";
-import type { ToolActivity, ToolResult, TurnTools } from "@trajan/harness";
+import type { ToolActivity, ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
 import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
 import { scheduleInstructions } from "../turn-schedules";
@@ -8,7 +8,9 @@ import type { TurnSchedules } from "../turn-schedules";
 import { codeModeError } from "../workspace";
 import {
 	RECENT_TOOL_CALLS,
+	readExecutions,
 	readToolActivity,
+	recordExecution,
 	toolActivity,
 	writeToolActivity,
 } from "./tool-activity";
@@ -58,7 +60,10 @@ export function createChatTools(
 			const { code } = yield* Schema.decodeUnknownEffect(Code)(call.input);
 			const { runId, idempotencyKey: executionId } = attempt;
 			const saved = yield* Effect.try({
-				try: () => readToolActivity(storage, runId),
+				try: () => {
+					recordExecution(storage, runId, executionId, call.id);
+					return readToolActivity(storage, runId);
+				},
 				catch: executionError,
 			});
 			let recent = saved?.executionId === executionId ? markInterrupted(saved.activity) : [];
@@ -105,6 +110,21 @@ export function createChatTools(
 	);
 
 	return {
+		readSettledTools(runId: string): Array<typeof TurnMessage.Type> {
+			return readExecutions(storage, runId).flatMap(({ executionId, callId }) => {
+				const { saved, calls } = codeMode.readExecution(executionId, runId);
+				if (!saved || (!saved.result && calls.length === 0)) {
+					return [];
+				}
+				const result = saved.result
+					? { status: "completed" as const, output: saved.result.value }
+					: unknownOutcome("The script ended without a completed result.");
+				return [
+					{ role: "tool-call", id: callId, name: Exec.name, input: { code: saved.source } },
+					{ role: "tool", callId, result: { ...result, activity: calls.map(toolActivity) } },
+				];
+			});
+		},
 		declaration: {
 			name: Exec.name,
 			description: [

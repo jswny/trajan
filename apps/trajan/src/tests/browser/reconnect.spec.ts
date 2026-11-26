@@ -263,6 +263,45 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	await expect(transcript.getByText('Wrote "oncehello"', { exact: true })).toBeVisible();
 });
 
+for (const scenario of [
+	{ prompt: "Interrupt after writing.", notice: "Stopped", diff: "once", stop: true },
+	{
+		prompt: "Fail the model after writing.",
+		notice: "The fixture model failed after writing.",
+		diff: "Fail the model after writing.",
+		stop: false,
+	},
+]) {
+	test(`keeps the committed file diff after ${scenario.stop ? "stopping on iPhone" : "model failure on desktop"}`, async ({
+		page,
+	}) => {
+		if (!scenario.stop) {
+			await page.setViewportSize({ width: 1440, height: 900 });
+		}
+		const composer = await openChat(page);
+		await composer.fill(scenario.prompt);
+		await composer.press("Enter");
+		const card = toolCards(page).last();
+		const write = card
+			.getByRole("listitem")
+			.filter({ has: page.getByText("write", { exact: true }) });
+		if (scenario.stop) {
+			await card.locator(":scope > summary").click();
+			await expect(write).toHaveText(/write.*Succeeded/);
+			await page.getByRole("button", { name: "Stop" }).click();
+		}
+		await expect(page.getByRole("main").getByText(scenario.notice, { exact: true })).toBeVisible();
+		await page.reload();
+		await expect(page.getByRole("main").getByText(scenario.notice, { exact: true })).toBeVisible();
+		await card.locator(":scope > summary").click();
+		await expect(write).toHaveText(/write.*Succeeded/);
+		await write.locator(":scope > details > summary").click();
+		await expect(write.getByRole("region", { name: "File changes" }).locator("pre")).toContainText(
+			scenario.diff,
+		);
+	});
+}
+
 test("keeps the same tool card open through recovery, streaming, and commit", async ({ page }) => {
 	const composer = await openChat(page);
 	expect((await page.request.post(`${control}/pause-replay`)).status()).toBe(204);

@@ -48,7 +48,10 @@ const decodeCount = Schema.decodeUnknownSync(Schema.Struct({ count: Schema.Natur
 export class ConversationStore {
 	constructor(
 		private readonly storage: DurableObjectStorage,
-		private readonly clearRunState: (runId: string) => undefined,
+		private readonly settleRunState: (
+			runId: string,
+			outcome: "completed" | "failed" | "cancelled",
+		) => ReadonlyArray<typeof TurnMessage.Type> | undefined,
 	) {}
 
 	initialize() {
@@ -211,7 +214,7 @@ export class ConversationStore {
 			} else {
 				this.storage.kv.delete(modelContextKey);
 			}
-			this.clearRunState(runId);
+			this.settleRunState(runId, "completed");
 		});
 	}
 
@@ -254,14 +257,19 @@ export class ConversationStore {
 				status === "failed" ? text : null,
 				row.seq,
 			);
-			this.storage.sql.exec(
-				"INSERT INTO harness_entries (submission_seq, role, message) VALUES (?, 'user', ?), (?, 'notice', ?)",
-				row.seq,
-				Schema.encodeSync(messageJson)({ role: "user", text: row.prompt }),
-				row.seq,
-				Schema.encodeSync(messageJson)({ role: "notice", status, text }),
-			);
-			this.clearRunState(runId);
+			const messages: ReadonlyArray<typeof TurnMessage.Type> = [
+				{ role: "user", text: row.prompt },
+				...(this.settleRunState(runId, status) ?? []),
+				{ role: "notice", status, text },
+			];
+			for (const message of messages) {
+				this.storage.sql.exec(
+					"INSERT INTO harness_entries (submission_seq, role, message) VALUES (?, ?, ?)",
+					row.seq,
+					message.role,
+					Schema.encodeSync(messageJson)(message),
+				);
+			}
 		});
 	}
 

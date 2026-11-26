@@ -103,6 +103,8 @@ type Run = typeof Run.Type;
 const decodeEntry = Schema.decodeUnknownOption(Schema.UndefinedOr(Entry));
 const decodeDetails = Schema.decodeUnknownOption(boundedJson);
 const decodeRun = Schema.decodeUnknownEffect(Schema.UndefinedOr(Run));
+const readRun = Schema.decodeUnknownOption(Run);
+const readCall = Schema.decodeUnknownOption(Schema.fromJsonString(ToolCall));
 
 function runPrefix(scope: string) {
 	return `code-mode:${encodeURIComponent(scope)}:`;
@@ -127,6 +129,30 @@ class HostTools extends RpcTarget {
 	}
 }
 
+const activity = (
+	id: string,
+	call: ToolCall,
+	status: CodeModeActivity["status"],
+	reply?: ToolReply,
+	details?: Schema.Json,
+): CodeModeActivity => ({
+	id,
+	name:
+		call.module === "codemode:tools"
+			? call.name
+			: `${call.module.slice("codemode:".length)}.${call.name}`,
+	status,
+	input: call.input,
+	...(reply && { reply }),
+	...(details !== undefined && { details }),
+});
+const replyStatus = (tool: CodeModeTool | undefined, reply: ToolReply) =>
+	reply.status === "returned"
+		? tool?.isError?.(reply.value)
+			? "failed"
+			: "completed"
+		: reply.status;
+
 export function createCodeMode(
 	loader: WorkerLoader,
 	storage: DurableObjectStorage,
@@ -140,6 +166,32 @@ export function createCodeMode(
 	);
 	const active = new Set<string>();
 	const mutations = new Set<AbortSignal>();
+	const getTool = ({ module, name }: ToolCall) => {
+		const tools = toolsByModule.get(module);
+		return tools && Object.hasOwn(tools, name) ? tools[name] : undefined;
+	};
+
+	function readExecution(id: string, scope: string) {
+		const key = `${runPrefix(scope)}${encodeURIComponent(id)}`;
+		const saved = Option.getOrUndefined(readRun(storage.kv.get(key)));
+		const calls: Array<CodeModeActivity> = [];
+		for (let index = 0; index < maxCalls; index++) {
+			const callId = `${key}:call:${index}`;
+			const entry = Option.getOrUndefined(decodeEntry(storage.kv.get(callId)));
+			if (!entry) {
+				break;
+			}
+			const call = Option.getOrUndefined(readCall(entry.request));
+			if (!call || call.module === runtimeModule) {
+				continue;
+			}
+			const reply = entry.reply ?? (entry.replay === "unsafe" ? interrupted : undefined);
+			if (reply) {
+				calls.push(activity(callId, call, replyStatus(getTool(call), reply), reply, entry.details));
+			}
+		}
+		return { saved, calls };
+	}
 
 	const run = Effect.fn("code-mode.run")(function* (
 		id: string,
@@ -199,8 +251,7 @@ export function createCodeMode(
 					const request = JSON.stringify(
 						yield* Schema.decodeEffect(boundedJson)(input).pipe(Effect.mapError(ioError)),
 					);
-					const tools = toolsByModule.get(input.module);
-					const tool = tools && Object.hasOwn(tools, input.name) ? tools[input.name] : undefined;
+					const tool = getTool(input);
 					const stored = decodeEntry(storage.kv.get(callId));
 					if (Option.isNone(stored)) {
 						divergence = `Invalid Code Mode checkpoint for call ${index + 1}.`;
@@ -213,33 +264,13 @@ export function createCodeMode(
 					if (!tool) {
 						return failed("Unknown Code Mode tool.");
 					}
-					const name =
-						input.module === "codemode:tools"
-							? input.name
-							: `${input.module.slice("codemode:".length)}.${input.name}`;
 					const publish = (
 						status: CodeModeActivity["status"],
 						reply?: ToolReply,
 						details?: Schema.Json,
-					) =>
-						options.onActivity?.({
-							id: callId,
-							name,
-							status,
-							input: input.input,
-							...(reply && { reply }),
-							...(details !== undefined && { details }),
-						}) ?? Effect.void;
+					) => options.onActivity?.(activity(callId, input, status, reply, details)) ?? Effect.void;
 					const publishReply = (reply: ToolReply, details?: Schema.Json) =>
-						publish(
-							reply.status === "returned"
-								? tool.isError?.(reply.value)
-									? "failed"
-									: "completed"
-								: reply.status,
-							reply,
-							details,
-						);
+						publish(replyStatus(tool, reply), reply, details);
 					next++;
 					if (prior?.reply) {
 						yield* publishReply(prior.reply, prior.details);
@@ -387,5 +418,5 @@ export function createCodeMode(
 		);
 	}, Effect.scoped);
 
-	return { run };
+	return { run, readExecution };
 }

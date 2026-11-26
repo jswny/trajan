@@ -99,6 +99,10 @@ export class Trajan extends TrajanChatObject {
 			description: this.#tools.declaration.description,
 		},
 	];
+	protected override readSettledTools(runId: string) {
+		return this.#tools.readSettledTools(runId);
+	}
+
 	protected readonly turnLayer = Layer.merge(
 		Layer.succeed(
 			TurnModel,

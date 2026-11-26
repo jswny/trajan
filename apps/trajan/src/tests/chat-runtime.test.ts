@@ -711,7 +711,7 @@ test("a read-only exec replays a completed call and retries an interrupted call 
 	).toBeUndefined();
 });
 
-test("stopping a turn clears the active Code Mode journal", async () => {
+test("stopping a turn archives its committed write even without live tool activity", async () => {
 	const stub = openFixture();
 	const { runId } = await submit(stub, { id: "stop-exec", prompt: "Interrupt after writing." });
 	await expect.poll(() => stub.state()).toMatchObject({ text: "once" });
@@ -719,17 +719,79 @@ test("stopping a turn clears the active Code Mode journal", async () => {
 	if (executionId === undefined) {
 		throw new Error("Expected the active Computer execution ID");
 	}
+	await runInDurableObject(stub, (_, { storage }) => storage.kv.delete(toolActivityKey(runId)));
 	expect(await stub.stop(runId)).toEqual({ runId, stopped: true });
 	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "cancelled" });
 	expect((await stub.state()).text).toBe("once");
+	const { instance } = await stub.state();
+	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+	const restarted = await waitForRestart(stub, instance);
+	const messages = (await restarted.history({})).entries.map(({ message }) =>
+		Schema.decodeSync(messageJson)(message),
+	);
+	expect(messages).toMatchObject([
+		{ role: "user", text: "Interrupt after writing." },
+		{ role: "tool-call", id: "exec-interrupt" },
+		{
+			role: "tool",
+			callId: "exec-interrupt",
+			result: {
+				status: "unknown",
+				activity: expect.arrayContaining([
+					{
+						id: expect.any(String),
+						name: "write",
+						status: "completed",
+						input: expect.anything(),
+						output: expect.anything(),
+						fileChange: {
+							path: "/workspace/turn.txt",
+							kind: "added",
+							diff: expect.stringContaining("+once"),
+						},
+					},
+				]),
+			},
+		},
+		{ role: "notice", status: "cancelled", text: "Stopped" },
+	]);
 	expect(
-		await runInDurableObject(stub, (_, { storage }) => readToolActivity(storage, runId)),
+		await runInDurableObject(restarted, (_, { storage }) => readToolActivity(storage, runId)),
 	).toBeUndefined();
 	expect(
-		await runInDurableObject(stub, (_, { storage }) =>
+		await runInDurableObject(restarted, (_, { storage }) =>
 			Array.from(storage.kv.list({ prefix: `code-mode:${encodeURIComponent(runId)}:` })),
 		),
 	).toEqual([]);
+});
+
+test("a later model failure keeps the completed exec and its diff in history", async () => {
+	const stub = openFixture();
+	const prompt = "Fail the model after writing.";
+	const { runId } = await submit(stub, { id: "fail-after-write", prompt });
+	await expect.poll(() => stub.turn(runId), { timeout: 7000 }).toMatchObject({ state: "failed" });
+	const { entries } = await stub.history({});
+	expect(entries.map(({ message }) => Schema.decodeSync(messageJson)(message))).toMatchObject([
+		{ role: "user", text: prompt },
+		{ role: "tool-call", id: "append-1", input: appendExecInput(prompt) },
+		{
+			role: "tool",
+			callId: "append-1",
+			result: {
+				status: "completed",
+				output: prompt,
+				activity: [
+					{ name: "read" },
+					{
+						name: "write",
+						status: "completed",
+						fileChange: { diff: expect.stringContaining(`+${prompt}`) },
+					},
+				],
+			},
+		},
+		{ role: "notice", status: "failed", text: "The fixture model failed after writing." },
+	]);
 });
 
 test("retries an edit rolled back by a restart before its checkpoint", async () => {
