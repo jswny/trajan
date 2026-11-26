@@ -1,9 +1,16 @@
-import { ToolContent } from "@trajan/harness";
-import type { ToolActivity, ToolCall, ToolResult, UncertainToolEffect } from "@trajan/harness";
+import { toolResultContent } from "@trajan/harness";
+import type {
+	ToolActivity as ToolActivityEntry,
+	ToolCall,
+	ToolContent,
+	ToolResult,
+	UncertainToolEffect,
+} from "@trajan/harness";
 import { Schema } from "effect";
 import type { ChatPage } from "./chat/protocol";
+import { ToolActivity } from "./chat/tool-presentation";
 
-const decodeContent = Schema.decodeUnknownOption(ToolContent);
+const decodeActivity = Schema.decodeUnknownOption(ToolActivity);
 
 export type ChatText = {
 	readonly id: string;
@@ -44,36 +51,46 @@ export function chatTool(
 	callId: string,
 	call?: typeof ToolCall.Type,
 	result?: typeof ToolResult.Type,
-	activity: ReadonlyArray<typeof ToolActivity.Type> = [],
+	activity: ReadonlyArray<typeof ToolActivityEntry.Type> = [],
 ): ChatTool {
 	const tool = {
 		id: `tool:${JSON.stringify([submissionId, callId])}`,
 		role: "tool" as const,
 		name: call?.name ?? "Tool",
 		...(call && { input: call.input }),
-		activity: result?.activity ?? activity,
+		activity: (result?.activity ?? activity).map((entry) => {
+			const parsed = decodeActivity(entry);
+			return parsed._tag === "Some"
+				? parsed.value
+				: {
+						id: entry.id,
+						name: entry.name,
+						status: entry.status,
+					};
+		}),
 	};
 	if (!result) {
 		return tool;
 	}
-	const decoded = result.status === "completed" ? decodeContent(result.output) : null;
-	const content =
-		decoded?._tag === "Some"
-			? decoded.value
+	const output = result.status === "completed" ? toolResultContent(result) : null;
+	const content: typeof ToolContent.Type =
+		output?.type === "content"
+			? output.parts
 			: [
 					{
-						type: "text" as const,
+						type: "text",
 						text:
-							result.status === "completed"
-								? JSON.stringify(result.output, null, 2)
-								: result.message,
+							result.status !== "completed"
+								? result.message
+								: JSON.stringify(result.output, null, 2),
 					},
 				];
+
 	return {
 		...tool,
 		result: {
 			status: result.status,
-			format: result.status === "completed" && decoded?._tag !== "Some" ? "json" : "text",
+			format: output?.type === "json" ? "json" : "text",
 			content,
 			...(result.uncertainEffects && { uncertainEffects: result.uncertainEffects }),
 		},

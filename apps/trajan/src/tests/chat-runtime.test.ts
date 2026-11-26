@@ -1,6 +1,7 @@
+import { toolPreviewBytes } from "../chat/tool-presentation";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { ToolResult, TurnMessage, TurnTranscript, toolPreviewBytes } from "@trajan/harness";
+import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/harness";
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../chat/protocol";

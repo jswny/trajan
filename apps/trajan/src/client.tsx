@@ -9,7 +9,7 @@ import {
 	IconLoader,
 	IconSquircleFill,
 } from "@pierre/icons/beta";
-import type { ToolActivity, ToolActivityPreview } from "@trajan/harness";
+import type { ToolActivity, ToolActivityPreview } from "./chat/tool-presentation";
 import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserViewer } from "./browser-view";

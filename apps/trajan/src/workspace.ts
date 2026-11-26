@@ -3,7 +3,6 @@ import { Workspace } from "@cloudflare/computer";
 import { createGitClient } from "@cloudflare/computer/git";
 import type { GitClient } from "@cloudflare/computer/git";
 import { CodeModeError, defineTool } from "@trajan/code-mode";
-import { FilePreview } from "@trajan/harness";
 import type { CodeModeTool } from "@trajan/code-mode";
 import {
 	DEFAULT_WORKSPACE_SKILLS_ROOT,
@@ -14,6 +13,7 @@ import {
 import type { SkillCatalog } from "agents/skills";
 import { Effect, Predicate, Schema, Semaphore } from "effect";
 import { filePreview } from "./chat/tool-activity";
+import { FilePreview } from "./chat/tool-presentation";
 import { workspaceFileTools } from "./workspace-file-changes";
 import type { FileMutationReceipt } from "./workspace-file-changes";
 

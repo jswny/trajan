@@ -56,6 +56,10 @@ const decodeOutcomeRow = Schema.decodeUnknownSync(
 	}),
 );
 
+const decodeActivityPath = Schema.decodeUnknownOption(
+	Schema.Struct({ path: Schema.NonEmptyString }),
+);
+
 export class ConversationStore {
 	constructor(
 		private readonly storage: DurableObjectStorage,
@@ -247,11 +251,14 @@ export class ConversationStore {
 					});
 				const tools = results
 					.flatMap(({ activity }) =>
-						(activity ?? []).map(({ name, status, fileChange }) => ({
-							name,
-							status,
-							...(fileChange && { path: fileChange.path.slice(0, 256) }),
-						})),
+						(activity ?? []).map(({ name, status, fileChange }) => {
+							const file = decodeActivityPath(fileChange);
+							return {
+								name,
+								status,
+								...(file._tag === "Some" && { path: file.value.path.slice(0, 256) }),
+							};
+						}),
 					)
 					.slice(-12);
 				const uncertainEffects = results

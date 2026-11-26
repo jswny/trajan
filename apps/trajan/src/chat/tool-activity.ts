@@ -1,14 +1,10 @@
 import { clearCodeModeRun } from "@trajan/code-mode";
 import type { CodeModeActivity } from "@trajan/code-mode";
-import {
-	FileChange,
-	FilePreview,
-	ToolActivity,
-	ToolContent,
-	toolPreviewBytes,
-} from "@trajan/harness";
-import type { ToolActivityPreview, UncertainToolEffect } from "@trajan/harness";
+import { ToolContent } from "@trajan/harness";
+import type { UncertainToolEffect } from "@trajan/harness";
 import { Option, Schema } from "effect";
+import { FileChange, FilePreview, ToolActivity, toolPreviewBytes } from "./tool-presentation";
+import type { ToolActivityPreview } from "./tool-presentation";
 
 export const RECENT_TOOL_CALLS = 8;
 

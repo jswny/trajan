@@ -1,10 +1,35 @@
 import { expect, it, vi } from "@effect/vitest";
 import { Effect, Layer, Result, Schema, Stream } from "effect";
-import { runTurn, TurnModel, TurnModelError, TurnTools } from "./index";
+import {
+	completedToolResult,
+	runTurn,
+	toolResultContent,
+	ToolResult,
+	TurnModel,
+	TurnModelError,
+	TurnTools,
+} from "./index";
 import type { TurnJournal, TurnModelResponse } from "./index";
 
 const submission = { id: "s1", prompt: "Say hello" };
 const contextFormat = { adapter: "test", version: 1 };
+
+it("preserves JSON arrays and explicitly selected content across checkpoints", () => {
+	const jsonCodec = Schema.fromJsonString(ToolResult);
+	const parts = [{ type: "text", text: "ordinary data" }] as const;
+	for (const value of [[], parts]) {
+		const recorded = Schema.encodeSync(jsonCodec)(completedToolResult(value));
+		const restored = Schema.decodeSync(jsonCodec)(recorded);
+		if (restored.status !== "completed") {
+			throw new Error("Expected a completed tool result");
+		}
+		expect(toolResultContent(restored)).toEqual({ type: "json", value });
+	}
+	expect(toolResultContent(completedToolResult({ type: "tool-content", parts }))).toEqual({
+		type: "content",
+		parts,
+	});
+});
 
 const journal: TurnJournal = {
 	checkpoint: (name, schema, run) =>

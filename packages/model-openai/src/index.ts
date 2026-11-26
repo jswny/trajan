@@ -1,4 +1,4 @@
-import { ToolContent, TurnModel, TurnModelError } from "@trajan/harness";
+import { toolResultContent, TurnModel, TurnModelError } from "@trajan/harness";
 import type { TurnModelEvent } from "@trajan/harness";
 import { Effect, Schema, Stream } from "effect";
 import { decode as decodeSse } from "effect/encoding/Sse";
@@ -51,7 +51,6 @@ const UnsuccessfulEvent = Schema.Struct({
 });
 const ErrorEvent = Schema.Struct({ type: Schema.Literal("error"), message: Schema.String });
 const decodeErrorBody = Schema.decodeUnknownOption(Schema.fromJsonString(UpstreamError));
-const decodeToolContent = Schema.decodeUnknownOption(ToolContent);
 type History = Parameters<TurnModel["Service"]["stream"]>[0];
 type Tool = {
 	readonly name: string;
@@ -112,11 +111,11 @@ function scriptOutput(result: FunctionToolResult) {
 	if (result.status !== "completed") {
 		return JSON.stringify({ status: result.status, message: result.message });
 	}
-	const content = decodeToolContent(result.output);
-	if (content._tag !== "Some" || content.value.length === 0) {
-		return JSON.stringify(result.output);
+	const output = toolResultContent(result);
+	if (output.type === "json") {
+		return JSON.stringify(output.value);
 	}
-	return content.value.map((part): Schema.Json =>
+	return output.parts.map((part): Schema.Json =>
 		part.type === "image"
 			? {
 					type: "input_image",

@@ -26,47 +26,27 @@ export const ToolCall = Schema.Struct({
 	input: Schema.Json,
 });
 
-export const toolPreviewBytes = 3 * 1024;
-export const fileDiffBytes = 8 * 1024;
-export const FileChange = Schema.Struct({
-	path: Schema.NonEmptyString,
-	kind: Schema.Literals(["added", "modified", "unchanged"]),
-	diff: Schema.optionalKey(Schema.NonEmptyString.check(Schema.isMaxLength(fileDiffBytes))),
-});
-const toolPreviewFields = {
-	text: Schema.String.check(Schema.isMaxLength(toolPreviewBytes)),
-	truncated: Schema.Boolean,
-};
-export const FilePreview = Schema.Struct({
-	format: Schema.Literal("file"),
-	path: Schema.NonEmptyString,
-	...toolPreviewFields,
-});
-export const ToolActivityPreview = Schema.Union([
-	Schema.Struct({ format: Schema.Literals(["json", "text"]), ...toolPreviewFields }),
-	FilePreview,
-]);
-export const ToolActivity = Schema.Struct({
+export const ToolActivityIdentity = Schema.Struct({
 	id: Schema.NonEmptyString,
 	name: Schema.NonEmptyString,
 	status: Schema.Literals(["running", "completed", "failed", "interrupted"]),
-	input: Schema.optionalKey(ToolActivityPreview),
-	output: Schema.optionalKey(ToolActivityPreview),
-	fileChange: Schema.optionalKey(FileChange),
 });
+export const ToolActivity = Schema.StructWithRest(ToolActivityIdentity, [
+	Schema.Record(Schema.String, Schema.Json),
+]);
 const EffectSummary = Schema.Struct({
-	name: ToolActivity.fields.name,
-	message: Schema.NonEmptyString.check(Schema.isMaxLength(toolPreviewBytes)),
+	name: ToolActivityIdentity.fields.name,
+	message: Schema.NonEmptyString.check(Schema.isMaxLength(3 * 1024)),
 });
 export const UncertainToolEffect = Schema.Struct({
-	id: ToolActivity.fields.id,
+	id: ToolActivityIdentity.fields.id,
 	...EffectSummary.fields,
 });
 const toolActivityFields = {
 	activity: Schema.optionalKey(Schema.Array(ToolActivity)),
 	uncertainEffects: Schema.optionalKey(Schema.Array(UncertainToolEffect)),
 };
-export const ToolContent = Schema.Array(
+export const ToolContent = Schema.NonEmptyArray(
 	Schema.Union([
 		Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
 		Schema.Struct({
@@ -76,10 +56,18 @@ export const ToolContent = Schema.Array(
 		}),
 	]),
 );
+const RichToolOutput = Schema.Struct({
+	type: Schema.Literal("tool-content"),
+	parts: ToolContent,
+});
+const legacyContent = Schema.decodeUnknownOption(ToolContent);
+const richContent = Schema.decodeUnknownOption(RichToolOutput);
+
 export const ToolResult = Schema.Union([
 	Schema.Struct({
 		status: Schema.Literal("completed"),
 		output: Schema.Json,
+		outputFormat: Schema.optionalKey(Schema.Literal("json")),
 		...toolActivityFields,
 	}),
 	Schema.Struct({
@@ -93,6 +81,28 @@ export const ToolResult = Schema.Union([
 		...toolActivityFields,
 	}),
 ]);
+
+export function completedToolResult(output: Schema.Json) {
+	return {
+		status: "completed" as const,
+		output,
+		...(Option.isSome(legacyContent(output)) && { outputFormat: "json" as const }),
+	};
+}
+
+export function toolResultContent(
+	result: Extract<typeof ToolResult.Type, { status: "completed" }>,
+) {
+	const { output, outputFormat } = result;
+	if (outputFormat === "json") {
+		return { type: "json" as const, value: output };
+	}
+	const rich = richContent(output);
+	const content = Option.isSome(rich) ? Option.some(rich.value.parts) : legacyContent(output);
+	return Option.isSome(content)
+		? { type: "content" as const, parts: content.value }
+		: { type: "json" as const, value: output };
+}
 
 const ToolMessage = Schema.Struct({
 	role: Schema.Literal("tool"),
@@ -115,9 +125,9 @@ export const RuntimeOutcome = Schema.Struct({
 	uncertainEffects: Schema.optionalKey(Schema.Array(EffectSummary)),
 	tools: Schema.Array(
 		Schema.Struct({
-			name: ToolActivity.fields.name,
-			status: ToolActivity.fields.status,
-			path: Schema.optionalKey(FileChange.fields.path),
+			name: ToolActivityIdentity.fields.name,
+			status: ToolActivityIdentity.fields.status,
+			path: Schema.optionalKey(Schema.NonEmptyString),
 		}),
 	),
 });

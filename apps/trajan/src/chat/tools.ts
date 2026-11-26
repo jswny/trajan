@@ -1,7 +1,7 @@
 import { createCodeMode, describeTools } from "@trajan/code-mode";
 import type { CodeModeTool } from "@trajan/code-mode";
-import { TurnIoError } from "@trajan/harness";
-import type { ToolActivity, ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
+import { completedToolResult, TurnIoError } from "@trajan/harness";
+import type { ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
 import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
 import { scheduleInstructions } from "../turn-schedules";
@@ -15,6 +15,7 @@ import {
 	uncertainToolEffects,
 	writeToolActivity,
 } from "./tool-activity";
+import type { ToolActivity } from "./tool-presentation";
 
 const Code = Schema.Struct({ code: Schema.NonEmptyString });
 const Exec = Tool.make("exec", { parameters: Code, success: Schema.Json });
@@ -98,7 +99,7 @@ export function createChatTools(
 				})
 				.pipe(
 					Effect.match({
-						onSuccess: (output): typeof ToolResult.Type => ({ status: "completed", output }),
+						onSuccess: completedToolResult,
 						onFailure: (error): typeof ToolResult.Type =>
 							error._tag === "CodeModeRejected"
 								? { status: "failed", message: error.message }
@@ -131,7 +132,7 @@ export function createChatTools(
 					return [];
 				}
 				const result = saved.result
-					? { status: "completed" as const, output: saved.result.value }
+					? completedToolResult(saved.result.value)
 					: unknownOutcome("The script ended without a completed result.");
 				const uncertainEffects = uncertainToolEffects(calls);
 				return [

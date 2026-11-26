@@ -1,8 +1,8 @@
 import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
 import type { Workspace } from "@cloudflare/computer";
 import type { PiToolCall, ToolCallContext } from "@cloudflare/computer/tools/pi-ai";
-import type { FileChange } from "@trajan/harness";
-import { fileDiffBytes } from "@trajan/harness";
+import type { FileChange } from "./chat/tool-presentation";
+import { fileDiffBytes } from "./chat/tool-presentation";
 import { formatPatch, structuredPatch } from "diff";
 import { Effect, Predicate, Schema } from "effect";
 
