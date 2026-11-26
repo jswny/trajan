@@ -145,6 +145,55 @@ test("retries an uncorrelated receipt with the same operation ID and preserves a
 	await expect(page.getByRole("main").getByText("Remember milk", { exact: true })).toHaveCount(1);
 });
 
+for (const admitted of [true, false]) {
+	test(`recovers a send on reload ${admitted ? "after" : "before"} server admission`, async ({
+		page,
+	}) => {
+		if (!admitted) {
+			await page.setViewportSize({ width: 1440, height: 900 });
+		}
+		const requests: Array<typeof TurnSubmission.Type> = [];
+		let initialPaused = false;
+		let deliver: (() => Promise<void>) | undefined;
+		await page.route("**/api/chat", async (route) => {
+			requests.push(decodeSubmission(route.request().postData()));
+			if (requests.length === 1) {
+				if (admitted) {
+					const response = await route.fetch();
+					expect(decodeReceipt(await response.json()).accepted).toBe(true);
+				}
+				initialPaused = true;
+				return;
+			}
+			const response = await route.fetch();
+			expect(decodeReceipt(await response.json()).accepted).toBe(!admitted);
+			deliver = () => route.fulfill({ response });
+		});
+		const composer = await openChat(page);
+		await composer.fill("Remember the recovered send");
+		await composer.press("Enter");
+		await expect.poll(() => initialPaused).toBe(true);
+		await page.reload();
+		await expect.poll(() => deliver !== undefined).toBe(true);
+		await expect(composer).toHaveValue("Remember the recovered send");
+		await composer.fill("newer draft");
+		await deliver?.();
+		await expect(page.locator("form")).toHaveAttribute("aria-busy", "false");
+		await expect(composer).toHaveValue("newer draft");
+		const transcript = page.getByRole("main");
+		await expect(
+			transcript.getByText("Remembering the recovered send", { exact: true }),
+		).toHaveCount(1);
+		await page.reload();
+		await expect(page.locator("header").getByRole("status")).toHaveText("Live");
+		await expect(composer).toHaveValue("");
+		await expect(transcript.getByText("Remember the recovered send", { exact: true })).toHaveCount(
+			1,
+		);
+		expect(requests).toEqual([requests[0], requests[0]]);
+	});
+}
+
 test("keeps the draft when a correlated HTTP 400 receipt rejects the submission", async ({
 	page,
 }) => {

@@ -8,8 +8,9 @@ import { chatMessages, chatText, chatTool } from "./chat-view";
 
 const draftAtom = Atom.make<PromptDraft>({ text: "" }).pipe(Atom.keepAlive);
 const isTurnPrompt = Schema.is(TurnPrompt);
-const sessionAtom = Atom.make(({ registry }) =>
-	Stream.unwrap(
+const sessionAtom = Atom.make(({ registry }) => {
+	let restoredDraft = false;
+	return Stream.unwrap(
 		Effect.map(ChatSession, ({ changes, dispatch }) =>
 			Stream.map(changes, (state) => ({ state, dispatch })),
 		),
@@ -17,13 +18,19 @@ const sessionAtom = Atom.make(({ registry }) =>
 		Stream.provide(ChatSession.live),
 		Stream.tap(({ state: { submission } }) =>
 			Effect.sync(() => {
+				if (submission?.restored && !restoredDraft) {
+					restoredDraft = true;
+					if (submission.status !== "accepted" && registry.get(draftAtom).text === "") {
+						registry.set(draftAtom, submission.draft);
+					}
+				}
 				if (submission?.status === "accepted" && registry.get(draftAtom) === submission.draft) {
 					registry.set(draftAtom, { text: "" });
 				}
 			}),
 		),
-	),
-).pipe(Atom.setIdleTTL(0));
+	);
+}).pipe(Atom.setIdleTTL(0));
 const entriesAtom = Atom.make(
 	(get) =>
 		AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.page.entries ??

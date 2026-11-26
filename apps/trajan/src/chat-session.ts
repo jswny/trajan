@@ -1,4 +1,6 @@
-import { Context, Effect, Layer, Queue, Schedule, Schema, SubscriptionRef } from "effect";
+import { TurnSubmission } from "@trajan/harness";
+import { Context, Effect, Layer, Option, Queue, Schedule, Schema, SubscriptionRef } from "effect";
+import { KeyValueStore } from "effect/persistence";
 import { Socket } from "effect/socket";
 import { ChatHttp, ChatRequestError } from "./chat/http-client";
 import { ChatEvent, ChatPath, updateToolPreview } from "./chat/protocol";
@@ -9,6 +11,7 @@ type Submission = {
 	readonly id: string;
 	readonly draft: PromptDraft;
 	readonly status: "pending" | "accepted" | "unconfirmed" | "rejected";
+	readonly restored?: true;
 	readonly message?: string;
 };
 type ChatState = Omit<typeof ChatSnapshot.Type, "type"> & {
@@ -38,6 +41,7 @@ export type ChatCommand =
 	| { readonly type: "load-earlier" };
 
 const decodeFrame = Schema.decodeEffect(Schema.fromJsonString(ChatEvent));
+const pendingSendKey = "trajan:pending-send";
 
 // The server sends a bounded tail on reconnect. Keep older pages if continuity is known.
 export function mergeChatPage(
@@ -103,7 +107,17 @@ export function receiveChatEvent(state: ChatState, event: typeof ChatEvent.Type)
 const openChatSession = Effect.fn("chat.session")(function* () {
 	const http = yield* ChatHttp;
 	const socket = yield* Socket.Socket;
-	const state = yield* SubscriptionRef.make(INITIAL_CHAT);
+	const pending = KeyValueStore.toSchemaStore(yield* KeyValueStore.KeyValueStore, TurnSubmission);
+	const restored = yield* pending
+		.get(pendingSendKey)
+		.pipe(Effect.orElseSucceed(Option.none), Effect.map(Option.getOrUndefined));
+	const state = yield* SubscriptionRef.make<ChatState>({
+		...INITIAL_CHAT,
+		submission: restored
+			? { id: restored.id, draft: { text: restored.prompt }, status: "unconfirmed", restored: true }
+			: null,
+	});
+	let recoveryId = restored?.id;
 	const scope = yield* Effect.scope;
 	const commands = yield* Queue.unbounded<ChatCommand>();
 	yield* Effect.addFinalizer(() => Queue.shutdown(commands));
@@ -124,6 +138,11 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 		);
 		if ((yield* SubscriptionRef.get(state)).status !== "open") {
 			return yield* new ChatRequestError({ message: "The chat socket did not send a snapshot." });
+		}
+		if (recoveryId !== undefined) {
+			const id = recoveryId;
+			recoveryId = undefined;
+			yield* Queue.offer(commands, { type: "retry", id });
 		}
 		return yield* Effect.forever(
 			pull.pipe(Effect.flatMap(Effect.forEach(receive, { discard: true }))),
@@ -157,12 +176,15 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 		if (!submission) {
 			return;
 		}
-		yield* http.submit({ id: submission.id, prompt: submission.draft.text.trim() }).pipe(
+		const input = { id: submission.id, prompt: submission.draft.text.trim() };
+		yield* pending.set(pendingSendKey, input).pipe(Effect.ignore);
+		yield* http.submit(input).pipe(
 			Effect.filterOrFail(
 				(receipt) => receipt.submissionId === submission.id,
 				() => new ChatRequestError({ message: "The submit receipt did not match." }),
 			),
 			Effect.retry({ times: 1, schedule: Schedule.spaced("250 millis") }),
+			Effect.tap(() => pending.remove(pendingSendKey).pipe(Effect.ignore)),
 			Effect.matchEffect({
 				onFailure: () => update({ submission: { ...submission, status: "unconfirmed" } }),
 				onSuccess: (receipt) =>
@@ -257,6 +279,15 @@ const chatSocket = Socket.layerWebSocket(
 	{ openTimeout: "5 seconds" },
 ).pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal));
 
+const pendingSends = Layer.unwrap(
+	Effect.try(() => window.sessionStorage).pipe(
+		Effect.match({
+			onFailure: () => KeyValueStore.layerMemory,
+			onSuccess: (storage) => KeyValueStore.layerStorage(() => storage),
+		}),
+	),
+);
+
 export class ChatSession extends Context.Service<
 	ChatSession,
 	{
@@ -265,5 +296,5 @@ export class ChatSession extends Context.Service<
 	}
 >()("trajan/ChatSession") {
 	static readonly layer = Layer.effect(ChatSession, openChatSession());
-	static readonly live = this.layer.pipe(Layer.provide([ChatHttp.live, chatSocket]));
+	static readonly live = this.layer.pipe(Layer.provide([ChatHttp.live, chatSocket, pendingSends]));
 }

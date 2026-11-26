@@ -1,6 +1,7 @@
 import { TurnSubmission } from "@trajan/harness";
 import { Context, Effect, Exit, Layer, Option, Queue, Schema, Scope, Stream } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
+import { KeyValueStore } from "effect/persistence";
 import { Socket } from "effect/socket";
 import { TestClock } from "effect/testing";
 import { expect, test } from "vite-plus/test";
@@ -93,7 +94,11 @@ const sessionFixture = Effect.fnUntraced(function* (
 		Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)),
 	);
 	const layer = ChatSession.layer.pipe(
-		Layer.provide([ChatHttp.layer.pipe(Layer.provide(http)), Layer.succeed(Socket.Socket, socket)]),
+		Layer.provide([
+			ChatHttp.layer.pipe(Layer.provide(http)),
+			Layer.succeed(Socket.Socket, socket),
+			KeyValueStore.layerMemory,
+		]),
 	);
 	const scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
 		Scope.close(scope, Exit.void),
