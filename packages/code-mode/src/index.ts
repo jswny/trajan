@@ -1,13 +1,13 @@
 import { RpcTarget } from "cloudflare:workers";
 import { Cause, Clock, Data, Effect, Exit, Fiber, Option, Random, Schema } from "effect";
+import type { Semaphore } from "effect";
 import { loadGuest } from "./guest";
 
 export class CodeModeError extends Data.TaggedError("CodeModeError")<{
 	readonly message: string;
 }> {}
 
-export interface CodeModeTool {
-	readonly replay: "safe" | "unsafe";
+export type CodeModeTool = {
 	readonly isError?: (value: Schema.Json) => boolean;
 	readonly run: (
 		input: Schema.Json,
@@ -17,7 +17,11 @@ export interface CodeModeTool {
 			readonly recordDetails: (details: Schema.Json) => void;
 		},
 	) => Effect.Effect<Schema.Json, CodeModeError>;
-}
+} & (
+	| { readonly replay: "safe" | "unsafe" }
+	// Atomic tools may mutate only this Durable Object's storage.
+	| { readonly replay: "atomic"; readonly mutationLock: Semaphore.Semaphore }
+);
 
 export interface CodeModeActivity {
 	readonly id: string;
@@ -86,7 +90,7 @@ const ToolReply = Schema.Union([
 type ToolReply = typeof ToolReply.Type;
 const Entry = Schema.Struct({
 	request: Schema.NonEmptyString,
-	replay: Schema.Literals(["safe", "unsafe"]),
+	replay: Schema.Literals(["safe", "unsafe", "atomic"]),
 	reply: Schema.optionalKey(ToolReply),
 	details: Schema.optionalKey(boundedJson),
 });
@@ -265,35 +269,65 @@ export function createCodeMode(
 									details = Option.getOrUndefined(decodeDetails(value));
 								},
 							}),
+						).pipe(
+							Effect.flatMap(Schema.decodeEffect(boundedJson)),
+							Effect.match({
+								onSuccess: (value): ToolReply => ({ status: "returned", value }),
+								onFailure: (error) => failed(errorMessage(error)),
+							}),
 						);
-						// A provider may finish an unsafe action after abort. Keep ownership until it settles.
+						const save = (reply: ToolReply): Entry => {
+							const checkpoint = {
+								...entry,
+								reply,
+								...(reply.status === "returned" && details !== undefined && { details }),
+							};
+							storage.kv.put(callId, checkpoint);
+							return checkpoint;
+						};
+						// Take the workspace lock before entering the storage transaction.
+						const attempt =
+							tool.replay === "atomic"
+								? tool.mutationLock.withPermit(
+										Effect.tryPromise({
+											try: () =>
+												storage.transaction(async (txn) => {
+													signal.throwIfAborted();
+													const reply = await Effect.runPromiseWith(context)(invoke);
+													// A failure can be returned after a partial mutation.
+													if (
+														!open ||
+														signal.aborted ||
+														reply.status !== "returned" ||
+														tool.isError?.(reply.value)
+													) {
+														txn.rollback();
+														details = undefined;
+														return { reply, committed: undefined };
+													}
+													return { reply, committed: save(reply) };
+												}),
+											catch: ioError,
+										}),
+									)
+								: invoke.pipe(Effect.map((reply) => ({ reply, committed: undefined })));
+						// A mutation can finish after abort. Keep ownership until it settles.
 						const scopedInvoke =
 							tool.replay === "safe"
-								? invoke
+								? attempt
 								: Effect.acquireUseRelease(
 										Effect.sync(() => mutations.add(signal)),
-										() => invoke,
+										() => attempt,
 										() => Effect.sync(() => mutations.delete(signal)),
 									).pipe(Effect.uninterruptible);
-						const reply =
+						const { reply, committed } =
 							prior?.replay === "unsafe"
-								? interrupted
-								: yield* scopedInvoke.pipe(
-										Effect.flatMap(Schema.decodeEffect(boundedJson)),
-										Effect.match({
-											onSuccess: (value): ToolReply => ({ status: "returned", value }),
-											onFailure: (error) => failed(errorMessage(error)),
-										}),
-									);
+								? { reply: interrupted, committed: undefined }
+								: yield* scopedInvoke;
 						if (!open || signal.aborted) {
 							return yield* Effect.interrupt;
 						}
-						const checkpoint = {
-							...entry,
-							reply,
-							...(reply.status === "returned" && details !== undefined && { details }),
-						} satisfies Entry;
-						storage.kv.put(callId, checkpoint);
+						const checkpoint = committed ?? save(reply);
 						yield* flush;
 						yield* publishReply(reply, checkpoint.details);
 						return reply;

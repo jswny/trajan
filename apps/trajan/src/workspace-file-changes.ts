@@ -5,7 +5,6 @@ import type { FileChange } from "@trajan/harness";
 import { fileDiffBytes } from "@trajan/harness";
 import { formatPatch, structuredPatch } from "diff";
 import { Effect, Predicate, Schema } from "effect";
-import type { Semaphore } from "effect";
 
 export const FileMutationReceipt = Schema.Union([
 	Schema.Struct({
@@ -95,11 +94,7 @@ type ObservedWrite = {
 	readonly change?: typeof FileChange.Type;
 };
 
-export function workspaceFileTools(
-	workspace: Workspace,
-	root: string,
-	mutations: Semaphore.Semaphore,
-) {
+export function workspaceFileTools(workspace: Workspace, root: string) {
 	const fs = workspace.fs;
 	let observeWrite: ((write: ObservedWrite) => void) | undefined;
 	// Computer still validates arguments, confines paths, and applies the write or edit.
@@ -138,7 +133,7 @@ export function workspaceFileTools(
 
 	function execute(call: PiToolCall, context: ToolCallContext) {
 		const tracksWrite = call.name === "write" || call.name === "edit";
-		const invoke = Effect.tryPromise(async () => {
+		return Effect.tryPromise(async () => {
 			context.abortSignal?.throwIfAborted();
 			let observed: ObservedWrite | undefined;
 			if (tracksWrite) {
@@ -155,7 +150,6 @@ export function workspaceFileTools(
 				}
 			}
 		});
-		return tracksWrite || call.name === "delete" ? mutations.withPermit(invoke) : invoke;
 	}
 
 	return { tools: files.tools, execute };

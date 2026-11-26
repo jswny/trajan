@@ -12,6 +12,7 @@ Keep this file focused on durable decisions that contributors cannot infer from 
 - Scope subscriptions, timers, and in-flight work to their owning session, connection, or request. Gate actions on application readiness as well as transport connectivity.
 - Validate external data at app boundaries with Effect Schema. Correlate acknowledgments with their requests before settling the requests or clearing user input.
 - Reuse operation IDs when retrying the same action. Mark tools replay-safe only when repeating them is harmless.
+- Commit local tool mutations and their recovery checkpoints in the same transaction. Keep external side effects outside that transaction.
 - Verify the failure and recovery paths of lifecycle changes. Exercise user-facing recovery in a real browser against a local Worker.
 - Review per-chat authorization before widening Cloudflare Access.
 - Treat checked-in Worker configuration as authoritative.

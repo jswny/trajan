@@ -50,6 +50,13 @@ function openFixture() {
 	return env.CHAT_TEST.getByName(crypto.randomUUID());
 }
 
+async function waitForRestart(stub: ReturnType<typeof openFixture>, instance: string) {
+	await expect
+		.poll(async () => (await env.CHAT_TEST.get(stub.id).state()).instance)
+		.not.toBe(instance);
+	return env.CHAT_TEST.get(stub.id);
+}
+
 async function submit(stub: ReturnType<typeof openFixture>, input = submission) {
 	const receipt = await stub.submit(input);
 	if (receipt.runId === null) {
@@ -691,27 +698,21 @@ test("stopping a turn clears the active Code Mode journal", async () => {
 	).toEqual([]);
 });
 
-test("replay reports an interrupted file edit and continues with a check of the file", async () => {
+test("retries an edit rolled back by a restart before its checkpoint", async () => {
 	let stub = openFixture();
+	const { instance } = await stub.state();
 	await stub.pause("during-replay-edit");
 	const { runId } = await submit(stub, {
 		id: "edit-replay",
 		prompt: "Recover an interrupted edit.",
 	});
-	await expect
-		.poll(() => stub.state())
-		.toMatchObject({ pausedAt: "during-replay-edit", text: "seed!" });
-	const { instance } = await stub.state();
 	const readJournal = () =>
 		runInDurableObject(stub, (_, { storage }) =>
 			Array.from(storage.kv.list({ prefix: `code-mode:${encodeURIComponent(runId)}:` })),
 		);
-	expect(await readJournal()).toHaveLength(4);
-
-	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
-	stub = env.CHAT_TEST.get(stub.id);
+	stub = await waitForRestart(stub, instance);
+	expect((await stub.state()).text).toBe("seed");
 	await runDurableObjectAlarm(stub);
-	expect((await stub.state()).instance).not.toBe(instance);
 	await expect
 		.poll(() => readTurn(stub, runId))
 		.toMatchObject({
@@ -724,7 +725,7 @@ test("replay reports an interrupted file edit and continues with a check of the 
 						role: "tool",
 						result: {
 							status: "completed",
-							output: { edit: "interrupted", text: "seed!" },
+							output: { edit: "completed", text: "seed!" },
 							activity: expect.arrayContaining([
 								expect.objectContaining({
 									name: "write",
@@ -735,7 +736,15 @@ test("replay reports an interrupted file edit and continues with a check of the 
 										diff: expect.stringContaining("+seed"),
 									},
 								}),
-								expect.objectContaining({ name: "edit", status: "interrupted" }),
+								expect.objectContaining({
+									name: "edit",
+									status: "completed",
+									fileChange: {
+										path: "/workspace/turn.txt",
+										kind: "modified",
+										diff: expect.stringContaining("+seed!"),
+									},
+								}),
 								expect.objectContaining({ name: "read", status: "completed" }),
 							]),
 						},
@@ -793,22 +802,16 @@ test("rebuilds both file diffs from completed call checkpoints after a restart",
 	expect(message.result.output).toEqual(receipts);
 });
 
-test("keeps a write interrupted when the file changed before its result checkpoint", async () => {
+test("retries a write rolled back by a restart before its checkpoint", async () => {
 	let stub = openFixture();
+	const { instance } = await stub.state();
 	await stub.pause("during-replay-write");
 	const { runId } = await submit(stub, {
 		id: "write-replay",
 		prompt: "Recover an interrupted write.",
 	});
-	await expect
-		.poll(() => stub.state())
-		.toMatchObject({
-			pausedAt: "during-replay-write",
-			text: "written before the restart",
-		});
-
-	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
-	stub = env.CHAT_TEST.get(stub.id);
+	stub = await waitForRestart(stub, instance);
+	expect((await stub.state()).text).toBe("");
 	await runDurableObjectAlarm(stub);
 	await expect.poll(() => readTurn(stub, runId)).toMatchObject({ state: "completed" });
 	const message = (await readTurn(stub, runId)).result?.messages.find(
@@ -816,13 +819,54 @@ test("keeps a write interrupted when the file changed before its result checkpoi
 	);
 	expect(message?.result).toMatchObject({
 		status: "completed",
-		output: { outcome: "interrupted", text: "written before the restart" },
+		output: { outcome: "completed", text: "written before the restart" },
 		activity: [
-			{ name: "write", status: "interrupted" },
+			{ name: "write", status: "completed", fileChange: { kind: "added" } },
 			{ name: "read", status: "completed" },
 		],
 	});
+});
+
+test("retries a delete rolled back by a restart before its checkpoint", async () => {
+	let stub = openFixture();
+	const { instance } = await stub.state();
+	await stub.pause("during-replay-delete");
+	const { runId } = await submit(stub, {
+		id: "delete-replay",
+		prompt: "Recover an interrupted delete.",
+	});
+	stub = await waitForRestart(stub, instance);
+	expect((await stub.state()).text).toBe("seed");
+	await runDurableObjectAlarm(stub);
+	await expect.poll(() => readTurn(stub, runId)).toMatchObject({ state: "completed" });
+	const message = (await readTurn(stub, runId)).result?.messages.find(
+		(message) => message.role === "tool",
+	);
+	expect(message?.result).toMatchObject({
+		status: "completed",
+		output: { deleted: "/workspace/turn.txt", missing: true },
+		activity: [
+			{ name: "write", status: "completed" },
+			{ name: "delete", status: "completed" },
+			{ name: "read", status: "failed" },
+		],
+	});
+});
+
+test("rolls back an atomic write that returns a failure after touching the file", async () => {
+	const stub = openFixture();
+	await stub.pause("reject-atomic-write");
+	const { runId } = await submit(stub, {
+		id: "rejected-write",
+		prompt: "Recover an interrupted write.",
+	});
+	await expect.poll(() => readTurn(stub, runId)).toMatchObject({ state: "completed" });
+	const message = (await readTurn(stub, runId)).result?.messages.find(
+		(message) => message.role === "tool",
+	);
+	expect(message?.result.activity).toMatchObject([{ name: "write", status: "failed" }]);
 	expect(message?.result.activity?.[0]).not.toHaveProperty("fileChange");
+	expect((await stub.state()).text).toBe("");
 });
 
 test("Git replay reports interrupted branch creation and continues with a status check", async () => {

@@ -374,33 +374,23 @@ test("replays time and randomness when reopening a file after a restart", async 
 	await expect(calls.last()).toHaveText(/^read.*Succeeded/);
 });
 
-test("replay shows the interrupted stock edit and finishes without editing the file again", async ({
-	page,
-}) => {
+test("replay shows the completed edit and diff after a reset before commit", async ({ page }) => {
 	const composer = await openChat(page);
 	expect((await page.request.post(`${control}/pause-replay-edit`)).status()).toBe(204);
 	await composer.fill("Recover an interrupted edit.");
 	await composer.press("Enter");
-	await toolCards(page).last().locator(":scope > summary").click();
 	const calls = page.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
-	await expect(calls.last()).toHaveText(/edit.*Running/);
-
-	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
-	await page.reload();
 	const transcript = page.getByRole("main");
-	await expect(
-		transcript.getByText(/Recovered .*"edit":"interrupted".*"text":"seed!"/),
-	).toHaveCount(1);
+	await expect(transcript.getByText(/Recovered .*"edit":"completed".*"text":"seed!"/)).toHaveCount(
+		1,
+	);
 	await transcript.getByText("Done", { exact: true }).click();
-	const interrupted = calls.filter({ hasText: /edit.*Interrupted/ });
-	await expect(interrupted).toBeVisible();
-	await interrupted.locator("summary").press("Enter");
-	await expect(interrupted.locator("pre")).toContainText('"newText": "seed!"');
-	await expect(interrupted.getByText("Result", { exact: true })).toHaveCount(0);
-	await expect(interrupted.getByRole("region", { name: "File changes" })).toHaveCount(0);
-	await expect(
-		interrupted.getByText("The file may have changed before the call was interrupted."),
-	).toBeVisible();
+	const edit = calls.filter({ hasText: /edit.*Succeeded/ });
+	await expect(edit).toHaveCount(1);
+	await edit.locator("summary").press("Enter");
+	await expect(edit.getByRole("region", { name: "File changes" }).locator("pre")).toContainText(
+		"seed!",
+	);
 	await expect(calls.last()).toHaveText(/read.*Succeeded/);
 });
 

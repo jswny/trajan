@@ -33,6 +33,8 @@ type PausePoint =
 	| "during-replay-read"
 	| "during-replay-write"
 	| "during-replay-edit"
+	| "during-replay-delete"
+	| "reject-atomic-write"
 	| "during-replay-git"
 	| "code-mode-read"
 	| "code-mode-edit"
@@ -45,6 +47,7 @@ const replayCall = "exec-replay";
 const writeReplayPrompt = "Recover an interrupted write.";
 const editReplayPrompt = "Recover an interrupted edit.";
 const editReplayCall = "exec-replay-edit";
+const deleteReplayPrompt = "Recover an interrupted delete.";
 const gitReplayPrompt = "Recover interrupted Git branch creation.";
 const gitReplayCall = "exec-replay-git";
 const scheduledPrompt = "Check the workspace on schedule.";
@@ -103,6 +106,7 @@ function isMissing(error: unknown): boolean {
 
 export class ChatTestObject extends TrajanChatObject {
 	readonly #instance = crypto.randomUUID();
+	#atomicFault: PausePoint | undefined;
 	readonly #workspace = createTrajanWorkspace(this.ctx);
 	readonly #effectTools = this.#createTools();
 	readonly #responses = createOpenAiResponsesFixture(
@@ -156,13 +160,30 @@ export class ChatTestObject extends TrajanChatObject {
 			}).bind(this),
 		});
 		const branch = pauseAfter(git.branch, "during-replay-git");
+		const faultBeforeCommit = (tool: CodeModeTool, point: PausePoint): CodeModeTool => ({
+			...tool,
+			run: (input, context) =>
+				tool.run(input, context).pipe(
+					Effect.map((value) => {
+						if (this.#atomicFault === point && !tool.isError?.(value)) {
+							this.ctx.abort(chatFixtureReset);
+						}
+						if (point === "during-replay-write" && this.#atomicFault === "reject-atomic-write") {
+							this.#atomicFault = undefined;
+							return { text: "Fixture rejected the write.", isError: true };
+						}
+						return value;
+					}),
+				),
+		});
 		return createChatTools(this.env.LOADER, storage, this.schedules, {
 			instructions,
 			catalog: {
 				"codemode:tools": {
 					...files,
-					write: pauseAfter(files.write, "during-replay-write"),
-					edit: pauseAfter(files.edit, "during-replay-edit"),
+					write: faultBeforeCommit(files.write, "during-replay-write"),
+					edit: faultBeforeCommit(files.edit, "during-replay-edit"),
+					delete: faultBeforeCommit(files.delete, "during-replay-delete"),
 					read_first: read("first"),
 					read_second: read("second"),
 					wait_for_restart: {
@@ -365,6 +386,24 @@ export default async function () {
   const file = await read({ path });
   if (file.isError) throw new Error(file.text);
   return { outcome, text: file.text };
+}`,
+				},
+			};
+		}
+		if (last?.role === "user" && last.text === deleteReplayPrompt) {
+			return {
+				role: "tool-call",
+				id: "exec-replay-delete",
+				name: "exec",
+				input: {
+					code: `import { delete as remove, read, write } from "codemode:tools";
+export default async function () {
+  const path = ${JSON.stringify(workspaceFile)};
+  const seed = await write({ path, content: "seed" });
+  if (seed.isError) throw new Error(seed.text);
+  const deleted = await remove({ path });
+  if (deleted.isError) throw new Error(deleted.text);
+  return { deleted: deleted.details.deleted, missing: (await read({ path })).isError };
 }`,
 				},
 			};
@@ -690,6 +729,15 @@ export default async function () {
 	}
 
 	pause(point: PausePoint) {
+		if (
+			point === "during-replay-write" ||
+			point === "during-replay-edit" ||
+			point === "during-replay-delete" ||
+			point === "reject-atomic-write"
+		) {
+			this.#atomicFault = point;
+			return Promise.resolve();
+		}
 		return this.ctx.storage.put("pause", point);
 	}
 

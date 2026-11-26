@@ -104,7 +104,7 @@ export function browserToolset(
 		Effect.void,
 ) {
 	function operation<A, B extends Schema.Json>(
-		replay: CodeModeTool["replay"],
+		replay: "safe" | "unsafe",
 		inputSchema: Schema.Codec<A>,
 		run: (session: Session, input: A) => Effect.Effect<B, CodeModeError | Schema.SchemaError>,
 	) {

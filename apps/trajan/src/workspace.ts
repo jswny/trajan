@@ -20,6 +20,7 @@ export const WORKSPACE_PROMPT =
 
 const root = "/workspace";
 const replaySafeFiles = new Set(["read", "ls", "find", "grep"]);
+const atomicFiles = new Set(["write", "edit", "delete"]);
 const isFileToolError = Schema.is(Schema.Struct({ isError: Schema.Literal(true) }));
 const decodeFileRead = Schema.decodeUnknownOption(
 	Schema.Struct({
@@ -92,7 +93,7 @@ function workspaceGit(workspace: Workspace, mutations: Semaphore.Semaphore) {
 	});
 
 	function operation<A extends { readonly dir?: string }, B>(
-		replay: CodeModeTool["replay"],
+		replay: "safe" | "unsafe",
 		schema: Schema.Codec<A>,
 		call: (options: A) => Promise<B>,
 	) {
@@ -241,12 +242,14 @@ function workspaceSkills(workspace: Workspace) {
 
 export function workspaceToolset(workspace: Workspace) {
 	const mutations = Semaphore.makeUnsafe(1);
-	const files = workspaceFileTools(workspace, root, mutations);
+	const files = workspaceFileTools(workspace, root);
 	const fileTools = Object.fromEntries(
 		files.tools.map(({ name }) => [
 			name,
 			{
-				replay: replaySafeFiles.has(name) ? "safe" : "unsafe",
+				...(atomicFiles.has(name)
+					? { replay: "atomic" as const, mutationLock: mutations }
+					: { replay: replaySafeFiles.has(name) ? ("safe" as const) : ("unsafe" as const) }),
 				isError: isFileToolError,
 				run: Effect.fnUntraced(function* (input, { callId, signal, recordDetails }) {
 					const { result, observed } = yield* files
