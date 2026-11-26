@@ -28,6 +28,7 @@ const decodeBrowserViewRequest = Schema.decodeUnknownOption(
 	Schema.fromJsonString(BrowserViewRequest),
 );
 const browserViewHeaders = { "Cache-Control": "no-store" };
+const browserViewLeaseMs = 60_000;
 const browserWatchKey = "trajan:browser-watch";
 const decodeBrowserWatch = Schema.decodeUnknownOption(BrowserWatch);
 
@@ -126,7 +127,8 @@ export class Trajan extends TrajanChatObject {
 				return new Response(null, { status: 400, headers: browserViewHeaders });
 			}
 			const watch = this.browserWatch;
-			if (watch?.id !== input.value.id) {
+			const now = yield* Clock.currentTimeMillis;
+			if (watch?.id !== input.value.id || watch.expiresAt <= now) {
 				return Response.json({ status: "closed" }, { headers: browserViewHeaders });
 			}
 			const view = yield* Effect.tryPromise(() => this.#browser.liveView({ mode: "tab" }));
@@ -142,21 +144,28 @@ export class Trajan extends TrajanChatObject {
 				}
 				return Response.json({ status: "closed" }, { headers: browserViewHeaders });
 			}
+			const expiresAt = (yield* Clock.currentTimeMillis) + browserViewLeaseMs;
 			const link = yield* Effect.tryPromise(() =>
 				this.env.BROWSER.getLiveView(view.sessionId, {
 					targetId: target.targetId,
 					mode: "tab",
-					expiresInMs: 60_000,
+					expiresInMs: browserViewLeaseMs,
 					guardrails: { mode: "readonly" },
 				}),
 			);
 			if (link.options.guardrails?.mode !== "readonly") {
 				return new Response(null, { status: 502, headers: browserViewHeaders });
 			}
-			if (this.browserWatch?.id !== watch.id) {
+			const current = this.browserWatch;
+			const checkedAt = yield* Clock.currentTimeMillis;
+			if (current?.id !== watch.id || current.expiresAt <= checkedAt) {
 				return Response.json({ status: "closed" }, { headers: browserViewHeaders });
 			}
-			const payload = yield* decodeBrowserView({ status: "open", url: link.devtoolsFrontendUrl });
+			const payload = yield* decodeBrowserView({
+				status: "open",
+				url: link.devtoolsFrontendUrl,
+				expiresAt,
+			});
 			return Response.json(payload, { headers: browserViewHeaders });
 		}).pipe(
 			Effect.timeout("8 seconds"),

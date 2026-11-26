@@ -3,34 +3,10 @@ import { TurnSubmission } from "@trajan/harness";
 import type { TurnIoError } from "@trajan/harness";
 import { LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJob, LifecycleJobContext } from "agents/lifecycle";
-import { Clock, DateTime, Effect, Option, Schema, Semaphore } from "effect";
+import { Clock, DateTime, Effect, Schema, Semaphore } from "effect";
+import { nextWeeklyRun, ScheduledTurn } from "./schedule-plan";
 import { codeModeError } from "./workspace";
 
-const days = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
-const DailyTime = Schema.String.check(Schema.isPattern(/^(?:[01]\d|2[0-3]):[0-5]\d$/));
-const TimeZone = Schema.String.check(
-	Schema.makeFilter(
-		(zone) => Option.isSome(DateTime.zoneMakeNamed(zone)) || "Use an IANA time zone.",
-	),
-);
-const Weekly = Schema.Struct({
-	type: Schema.Literal("weekly"),
-	days: Schema.NonEmptyArray(Schema.Literals(days)).check(Schema.isMaxLength(days.length)),
-	time: DailyTime,
-	timeZone: TimeZone,
-});
-const Once = Schema.Struct({
-	type: Schema.Literal("once"),
-	at: Schema.String.check(
-		Schema.isPattern(
-			/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/,
-		),
-	),
-});
-const ScheduledTurn = Schema.Struct({
-	prompt: Schema.NonEmptyString.check(Schema.isTrimmed(), Schema.isMaxLength(2000)),
-	when: Schema.Union([Once, Weekly]),
-});
 const ListInput = Schema.NullOr(Schema.Struct({ offset: Schema.optionalKey(Schema.Natural) }));
 const CancelInput = Schema.Struct({ id: Schema.NonEmptyString });
 const Schedule = Schema.Struct({
@@ -49,29 +25,26 @@ const scheduleJob = "submit-scheduled-turn";
 const reportJob = "report-missed-scheduled-turn";
 const reportRetryDelayMs = 30_000;
 
-function occurrence(job: LifecycleJob, prompt: string): typeof TurnSubmission.Type {
+const JobFields = { id: Schema.NonEmptyString, time: Schema.Natural };
+const DispatchJob = Schema.Struct({
+	...JobFields,
+	fn: Schema.Literal(scheduleJob),
+	payload: ScheduledTurn,
+});
+const ReportJob = Schema.Struct({
+	...JobFields,
+	fn: Schema.Literal(reportJob),
+	payload: MissedOccurrence,
+});
+const ScheduleJob = Schema.Union([DispatchJob, ReportJob]);
+const decodeJob = Schema.decodeUnknownEffect(ScheduleJob);
+
+function occurrence(job: typeof DispatchJob.Type, prompt: string): typeof TurnSubmission.Type {
 	const date = DateTime.formatIso(DateTime.makeUnsafe(job.time));
 	return {
 		id: `scheduled:${job.id}:${job.time}`,
 		prompt: `Scheduled task for ${date}\n\n${prompt}`,
 	};
-}
-
-export function nextWeeklyRun(when: typeof Weekly.Type, after: number) {
-	const [hour, minute] = when.time.split(":").map(Number);
-	const today = DateTime.startOf(
-		DateTime.setZoneNamedUnsafe(DateTime.makeUnsafe(after), when.timeZone),
-		"day",
-	);
-	for (let offset = 0; offset <= days.length; offset++) {
-		const day = DateTime.add(today, { days: offset });
-		const candidate = DateTime.setParts(day, { hour, minute, second: 0, millisecond: 0 });
-		const time = DateTime.toEpochMillis(candidate);
-		if (time > after && when.days.includes(days[DateTime.getPart(day, "weekDay")])) {
-			return time;
-		}
-	}
-	throw new Error("The weekly schedule has no next occurrence.");
 }
 
 function describe(job: LifecycleJob, { prompt, when }: typeof ScheduledTurn.Type) {
@@ -197,10 +170,10 @@ export class TurnSchedules extends LifecycleCapability {
 
 	readonly #runJob = Effect.fn("turn-schedules.submit")(function* (
 		this: TurnSchedules,
-		job: LifecycleJob,
+		job: typeof DispatchJob.Type,
 	) {
 		yield* Effect.annotateCurrentSpan({ scheduleId: job.id, scheduledFor: job.time });
-		const plan = yield* Schema.decodeUnknownEffect(ScheduledTurn)(job.payload);
+		const plan = job.payload;
 		// The queue keeps the same due time through retries of this occurrence.
 		const receipt = yield* this.submit(occurrence(job, plan.prompt));
 		if (receipt.runId === null) {
@@ -210,10 +183,15 @@ export class TurnSchedules extends LifecycleCapability {
 	});
 
 	onJob({ job }: LifecycleJobContext) {
-		if (job.fn === reportJob) {
-			return Effect.runPromise(this.#runReport(job));
-		}
-		return Effect.runPromise(this.#runJob(job));
+		return Effect.runPromise(
+			Effect.gen({ self: this }, function* () {
+				const work = yield* decodeJob(job);
+				if (work.fn === reportJob) {
+					return yield* this.#runReport(work);
+				}
+				return yield* this.#runJob(work);
+			}),
+		);
 	}
 
 	#report(occurrence: typeof MissedOccurrence.Type, nextRun?: number) {
@@ -229,9 +207,9 @@ export class TurnSchedules extends LifecycleCapability {
 
 	readonly #runReport = Effect.fn("turn-schedules.reportMissed")(function* (
 		this: TurnSchedules,
-		job: LifecycleJob,
+		job: typeof ReportJob.Type,
 	) {
-		const missed = yield* Schema.decodeUnknownEffect(MissedOccurrence)(job.payload);
+		const missed = job.payload;
 		const next = this.lifecycle.jobs.get(missed.scheduleId)?.time;
 		yield* this.#report(
 			missed,
@@ -239,22 +217,23 @@ export class TurnSchedules extends LifecycleCapability {
 		);
 	});
 
-	onJobError({ job }: LifecycleJobContext, dispatchError: unknown) {
+	onJobError({ job: rawJob }: LifecycleJobContext, dispatchError: unknown) {
 		return Effect.runPromise(
 			Effect.gen({ self: this }, function* () {
+				const decoded = yield* Effect.result(decodeJob(rawJob));
+				if (decoded._tag === "Failure") {
+					return yield* Effect.logError("Invalid scheduled job payload", decoded.failure).pipe(
+						Effect.annotateLogs({ jobId: rawJob.id }),
+					);
+				}
+				const job = decoded.success;
 				if (job.fn === reportJob) {
-					if (Schema.isSchemaError(dispatchError)) {
-						return yield* Effect.logError(
-							"Could not decode the missed schedule report",
-							dispatchError,
-						).pipe(Effect.annotateLogs({ jobId: job.id }));
-					}
 					yield* Effect.logWarning("Retrying the missed schedule report", dispatchError).pipe(
 						Effect.annotateLogs({ jobId: job.id }),
 					);
 					return { rescheduleAt: (yield* Clock.currentTimeMillis) + reportRetryDelayMs };
 				}
-				const plan = yield* Schema.decodeUnknownEffect(ScheduledTurn)(job.payload);
+				const plan = job.payload;
 				const outcome = yield* this.#advance(plan.when, job.time);
 				const current = this.lifecycle.jobs.get(job.id);
 				if (current?.time !== job.time) {

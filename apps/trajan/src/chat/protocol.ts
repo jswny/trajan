@@ -15,6 +15,7 @@ export const BrowserViewResponse = Schema.Union([
 	Schema.Struct({ status: Schema.Literal("closed") }),
 	Schema.Struct({
 		status: Schema.Literal("open"),
+		expiresAt: Schema.Natural,
 		url: Schema.String.check(
 			Schema.makeFilter((value) => {
 				const url = URL.parse(value);

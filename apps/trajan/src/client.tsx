@@ -122,7 +122,7 @@ function App() {
 		queued,
 		requestError,
 		submission,
-		preview,
+		activity,
 		composer: { text: prompt, canSubmit, submitting },
 		editPrompt: setPrompt,
 		submit: submitPrompt,
@@ -131,8 +131,6 @@ function App() {
 		loadEarlier,
 	} = useChatSession();
 	const running = active !== null;
-	const latestTool = preview?.tools.at(-1);
-	const currentTool = latestTool?.result ? undefined : latestTool;
 	const oldestId = messages[0]?.id;
 
 	// Keep the latest reply visible as the transcript, composer, or viewport resizes.
@@ -221,24 +219,6 @@ function App() {
 	};
 
 	const synced = status === "open";
-	const browsing =
-		synced &&
-		active?.state === "running" &&
-		currentTool !== undefined &&
-		currentTool.activity.some(
-			({ name, status }) =>
-				status === "running" &&
-				(name === "browserNavigate" || name === "browserRead" || name === "browserScreenshot"),
-		);
-	const turnStatus = !running
-		? null
-		: active?.state === "stopping"
-			? "Stopping"
-			: live
-				? "Responding"
-				: currentTool
-					? `Running ${currentTool.call.name}`
-					: "Waiting for the model";
 
 	const submit = () => {
 		if (!canSubmit) {
@@ -346,7 +326,7 @@ function App() {
 									{requestError}
 								</p>
 							) : null}
-							<CurrentActivityChip turnStatus={turnStatus} browsing={browsing} connected={synced} />
+							<CurrentActivityChip activity={activity} />
 							<form
 								aria-busy={submitting}
 								onSubmit={(event) => {

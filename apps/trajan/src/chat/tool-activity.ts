@@ -53,6 +53,7 @@ function previewOutput(value: Schema.Json) {
 export function toolActivity({
 	id,
 	name,
+	category,
 	status,
 	input,
 	reply,
@@ -71,6 +72,7 @@ export function toolActivity({
 	return {
 		id,
 		name,
+		...(category === "browser" && { category }),
 		status,
 		input: preview(input),
 		...(output && { output }),

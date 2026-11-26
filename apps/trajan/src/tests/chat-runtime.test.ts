@@ -6,7 +6,7 @@ import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../chat/protocol";
 import { toolActivity } from "../chat/tool-activity";
-import { nextWeeklyRun } from "../turn-schedules";
+import { nextWeeklyRun } from "../schedule-plan";
 import { FileMutationReceipt } from "../workspace-file-changes";
 import { appendExecInput, skillExecInput } from "./chat-runtime-fixture";
 import {
@@ -367,6 +367,21 @@ test("keeps a weekly schedule on local time across daylight-saving changes", () 
 	expect(new Date(nextWeeklyRun(schedule, Date.parse("2026-10-30T12:00:00Z"))).toISOString()).toBe(
 		"2026-11-02T13:00:00.000Z",
 	);
+});
+
+test("uses the later wall time in a spring gap and runs once in a fall overlap", () => {
+	const sunday = {
+		type: "weekly",
+		days: ["sun"],
+		time: "02:30",
+		timeZone: "America/New_York",
+	} as const;
+	const gap = nextWeeklyRun(sunday, Date.parse("2026-03-07T00:00:00Z"));
+	expect(new Date(gap).toISOString()).toBe("2026-03-08T07:30:00.000Z");
+	const repeated = { ...sunday, time: "01:30" };
+	const first = nextWeeklyRun(repeated, Date.parse("2026-11-01T00:00:00Z"));
+	expect(new Date(first).toISOString()).toBe("2026-11-01T05:30:00.000Z");
+	expect(new Date(nextWeeklyRun(repeated, first)).toISOString()).toBe("2026-11-08T06:30:00.000Z");
 });
 
 test("lists and cancels schedules through Code Mode after a Durable Object restart", async () => {

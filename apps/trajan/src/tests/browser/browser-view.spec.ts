@@ -27,6 +27,7 @@ test("opens the browser in a mobile sheet and docks it on wide screens", async (
 	let finishTurn: (() => void) | undefined;
 	let expectedBrowser = "browser-one";
 	let viewRequests = 0;
+	let leaseDuration = 60_000;
 	await page.routeWebSocket("**/api/chat/live", (client) => {
 		const snapshot = {
 			type: "snapshot",
@@ -48,7 +49,14 @@ test("opens the browser in a mobile sheet and docks it on wide screens", async (
 						tools: [
 							{
 								call: { role: "tool-call", id: "exec", name: "exec", input: {} },
-								activity: [{ id: "navigation", name: "browserNavigate", status: "running" }],
+								activity: [
+									{
+										id: "navigation",
+										name: "browserNavigate",
+										category: "browser",
+										status: "running",
+									},
+								],
 							},
 						],
 					},
@@ -75,7 +83,9 @@ test("opens the browser in a mobile sheet and docks it on wide screens", async (
 		expect(route.request().method()).toBe("POST");
 		expect(route.request().postDataJSON()).toEqual({ id: expectedBrowser });
 		viewRequests += 1;
-		return route.fulfill({ json: { status: "open", url: hostedView } });
+		return route.fulfill({
+			json: { status: "open", url: hostedView, expiresAt: Date.now() + leaseDuration },
+		});
 	});
 	await page.route(hostedView, (route) =>
 		route.fulfill({ contentType: "text/html", body: "<h1>Browser page</h1>" }),
@@ -154,6 +164,18 @@ test("opens the browser in a mobile sheet and docks it on wide screens", async (
 	expectedBrowser = "browser-two";
 	setBrowser?.(expectedBrowser);
 	await expect.poll(() => viewRequests).toBe(2);
+	await expect(iframe.contentFrame().getByRole("heading", { name: "Browser page" })).toBeVisible();
+
+	leaseDuration = 0;
+	expectedBrowser = "browser-three";
+	setBrowser?.(expectedBrowser);
+	const reconnect = dialog.getByRole("button", { name: "Reconnect live view" });
+	await expect(reconnect).toBeVisible();
+	await expect(iframe.contentFrame().getByRole("heading", { name: "Browser page" })).toBeVisible();
+	leaseDuration = 60_000;
+	await reconnect.click();
+	await expect.poll(() => viewRequests).toBe(4);
+	await expect(reconnect).toHaveCount(0);
 	await expect(iframe.contentFrame().getByRole("heading", { name: "Browser page" })).toBeVisible();
 	setBrowser?.(null);
 	await dialog.getByRole("button", { name: "Close live browser view" }).click();

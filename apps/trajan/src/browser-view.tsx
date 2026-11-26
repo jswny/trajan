@@ -1,7 +1,7 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { useAtom, useAtomRefresh, useAtomValue } from "@effect/atom-react";
 import { IconX } from "@pierre/icons/beta";
-import { Effect } from "effect";
+import { Clock, Effect, Stream } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
@@ -16,6 +16,23 @@ const viewAtom = Atom.make((get) => {
 		: Effect.succeed(null);
 }).pipe(Atom.setIdleTTL(0));
 
+const leaseExpired = Atom.make((get) => {
+	const view = AsyncResult.getOrElse(get(viewAtom), () => null);
+	if (view?.status !== "open") {
+		return Stream.succeed(false);
+	}
+	return Stream.unwrap(
+		Effect.map(Clock.currentTimeMillis, (now) =>
+			view.expiresAt <= now
+				? Stream.succeed(true)
+				: Stream.concat(
+						Stream.succeed(false),
+						Stream.fromEffect(Effect.sleep(view.expiresAt - now).pipe(Effect.as(true))),
+					),
+		),
+	);
+});
+
 const desktopQuery = "(min-width: 64rem)";
 function desktopMatches() {
 	return window.matchMedia(desktopQuery).matches;
@@ -29,6 +46,7 @@ function watchDesktop(change: () => void) {
 function BrowserFeed() {
 	const result = useAtomValue(viewAtom);
 	const refresh = useAtomRefresh(viewAtom);
+	const expired = AsyncResult.getOrElse(useAtomValue(leaseExpired), () => false);
 	const available = useAtomValue(browserWatchId) !== null;
 	const view = AsyncResult.getOrElse(result, () => null);
 	if (!available) {
@@ -69,12 +87,23 @@ function BrowserFeed() {
 		);
 	}
 	return view?.status === "open" ? (
-		<iframe
-			className="min-h-0 w-full flex-1 border-0"
-			title="Trajan’s live browser"
-			src={view.url}
-			referrerPolicy="no-referrer"
-		/>
+		<>
+			{expired ? (
+				<button
+					type="button"
+					onClick={refresh}
+					className="chat-button m-2 self-end px-3 py-1 text-xs text-muted"
+				>
+					Reconnect live view
+				</button>
+			) : null}
+			<iframe
+				className="min-h-0 w-full flex-1 border-0"
+				title="Trajan’s live browser"
+				src={view.url}
+				referrerPolicy="no-referrer"
+			/>
+		</>
 	) : null;
 }
 

@@ -23,6 +23,7 @@ export const ToolActivityPreview = Schema.Union([
 ]);
 export const ToolActivity = Schema.Struct({
 	...ToolActivityIdentity.fields,
+	category: Schema.optionalKey(Schema.Literal("browser")),
 	input: Schema.optionalKey(ToolActivityPreview),
 	output: Schema.optionalKey(ToolActivityPreview),
 	fileChange: Schema.optionalKey(FileChange),

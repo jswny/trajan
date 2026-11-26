@@ -113,6 +113,7 @@ export function browserToolset(
 		run: (session: Session, input: A) => Effect.Effect<B, CodeModeError | Schema.SchemaError>,
 	) {
 		return defineTool({
+			category: "browser",
 			replay,
 			input,
 			output,

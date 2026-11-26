@@ -77,11 +77,42 @@ export const browserWatchId = Atom.make((get) =>
 	AsyncResult.getOrElse(get(activeBrowserAtom), () => null),
 );
 
+export type ChatActivity =
+	| { readonly kind: "browser"; readonly working: boolean; readonly inspectable: boolean }
+	| { readonly kind: "waiting" | "responding" | "stopping" }
+	| { readonly kind: "tool"; readonly name: string };
+
+const activityAtom = Atom.make((get): ChatActivity | null => {
+	const state = AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state ?? INITIAL_CHAT;
+	const browserOpen = get(browserWatchId) !== null;
+	const inspectable = browserOpen && state.status === "open";
+	if (!state.active) {
+		return browserOpen ? { kind: "browser", working: false, inspectable } : null;
+	}
+	if (state.active.state === "stopping") {
+		return { kind: "stopping" };
+	}
+	const latest = state.preview?.tools.at(-1);
+	const tool = latest?.result ? undefined : latest;
+	if (
+		state.status === "open" &&
+		state.active.state === "running" &&
+		tool?.activity.some(({ category, status }) => category === "browser" && status === "running")
+	) {
+		return { kind: "browser", working: true, inspectable };
+	}
+	if (state.preview?.text) {
+		return { kind: "responding" };
+	}
+	return tool ? { kind: "tool", name: tool.call.name } : { kind: "waiting" };
+});
+
 export function useChatSession() {
 	const session = AsyncResult.getOrElse(useAtomValue(sessionAtom), () => undefined);
 	const state = session?.state ?? INITIAL_CHAT;
 	const [draft, setDraft] = useAtom(draftAtom);
 	const messages = useAtomValue(timelineAtom);
+	const activity = useAtomValue(activityAtom);
 	const submitting = state.submission?.status === "pending";
 	const canSubmit =
 		state.status === "open" &&
@@ -92,6 +123,7 @@ export function useChatSession() {
 	return {
 		...state,
 		messages,
+		activity,
 		loading: state.historyRequest?.status === "pending",
 		stopping: state.stopRequest?.status === "pending" || state.stopRequest?.status === "requested",
 		requestError:

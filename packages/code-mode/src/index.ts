@@ -24,6 +24,7 @@ type ToolContext<D = Schema.Json> = {
 
 export type CodeModeTool = ToolPolicy & {
 	readonly parameters?: unknown;
+	readonly category?: string;
 	readonly description?: string;
 	readonly describeUncertainty?: (input: Schema.Json) => string | undefined;
 	readonly isError?: (value: Schema.Json) => boolean;
@@ -38,6 +39,7 @@ export function defineTool<A, B extends Schema.Json, D extends Schema.Json = nev
 		readonly input: Schema.Codec<A>;
 		readonly output: Schema.Codec<B>;
 		readonly details?: Schema.Codec<D>;
+		readonly category?: string;
 		readonly description?: string;
 		readonly normalizeInput?: (input: Schema.Json) => Schema.Json;
 		readonly recovery?: (input: A) => string;
@@ -87,6 +89,7 @@ export function defineTool<A, B extends Schema.Json, D extends Schema.Json = nev
 export interface CodeModeActivity {
 	readonly id: string;
 	readonly name: string;
+	readonly category?: string;
 	readonly status: "running" | "completed" | "failed" | "interrupted";
 	readonly input: Schema.Json;
 	readonly reply?: ToolReply;
@@ -206,6 +209,7 @@ const activity = (
 	id: string,
 	call: ToolCall,
 	status: CodeModeActivity["status"],
+	category: string | undefined,
 	reply?: ToolReply,
 	details?: Schema.Json,
 	uncertainty?: string,
@@ -216,6 +220,7 @@ const activity = (
 			? call.name
 			: `${call.module.slice("codemode:".length)}.${call.name}`,
 	status,
+	...(category && { category }),
 	input: call.input,
 	...(reply && { reply }),
 	...(details !== undefined && { details }),
@@ -268,6 +273,7 @@ export function createCodeMode(
 						callId,
 						call,
 						replyStatus(tool, reply),
+						tool?.category,
 						reply,
 						entry.details,
 						reply.status === "interrupted" ? tool?.describeUncertainty?.(call.input) : undefined,
@@ -358,8 +364,9 @@ export function createCodeMode(
 					) =>
 						Effect.suspend(
 							() =>
-								options.onActivity?.(activity(callId, input, status, reply, details)) ??
-								Effect.void,
+								options.onActivity?.(
+									activity(callId, input, status, tool.category, reply, details),
+								) ?? Effect.void,
 						).pipe(
 							Effect.catchCauseIf(
 								(cause) => !Cause.hasInterruptsOnly(cause),
