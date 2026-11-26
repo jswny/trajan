@@ -1,4 +1,4 @@
-import { Context, Effect, Option, Schema, Stream } from "effect";
+import { Cause, Context, Effect, Option, Schema, Stream } from "effect";
 
 export const TurnPrompt = Schema.NonEmptyString.check(
 	Schema.isMaxLength(32_000),
@@ -238,6 +238,17 @@ export class TurnTools extends Context.Service<
 	}
 >()("@trajan/harness/TurnTools") {}
 
+/** Live updates can fail independently of the work and its checkpoints. */
+export function publishUpdate<E>(event: string, send: () => Effect.Effect<void, E>) {
+	return Effect.suspend(send).pipe(
+		Effect.catchCauseIf(
+			(cause) => !Cause.hasInterruptsOnly(cause),
+			(cause) =>
+				Effect.logWarning("Live update failed", cause).pipe(Effect.annotateLogs({ event })),
+		),
+	);
+}
+
 /** Run a turn until the model replies, with a checkpoint for each decision and tool result. */
 export const runTurn = Effect.fn("harness.runTurn")(function* (
 	submission: typeof TurnSubmission.Type,
@@ -246,6 +257,7 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 	publish: (event: TurnProgress) => Effect.Effect<void> = () => Effect.void,
 	modelContext?: Schema.Json,
 ) {
+	const notify = (event: TurnProgress) => publishUpdate(event.type, () => publish(event));
 	const model = yield* TurnModel;
 	const tools = yield* TurnTools;
 	const history: Array<TurnHistoryEntry> = [{ role: "user", text: submission.prompt }];
@@ -257,14 +269,14 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 			allowTools ? ModelResponse : ModelReply,
 			() =>
 				Effect.gen(function* () {
-					yield* publish({ type: "reset" });
+					yield* notify({ type: "reset" });
 					const last = yield* model
 						.stream([...context, ...history], {
 							allowTools,
 							...(modelContext !== undefined && { modelContext }),
 						})
 						.pipe(
-							Stream.tap((event) => (event.type === "text-delta" ? publish(event) : Effect.void)),
+							Stream.tap((event) => (event.type === "text-delta" ? notify(event) : Effect.void)),
 							Stream.runLast,
 						);
 					if (Option.isNone(last) || last.value.type !== "response") {
@@ -273,7 +285,7 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 						});
 					}
 					return last.value.response;
-				}).pipe(Effect.tapError(() => publish({ type: "reset" }))),
+				}).pipe(Effect.tapError(() => notify({ type: "reset" }))),
 		);
 
 		if (decision.role === "assistant") {
@@ -292,15 +304,15 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 
 		const { continuation: _continuation, ...call } = decision;
 		const result = yield* journal.checkpoint(`tool:${index}`, ToolResult, (attempt) =>
-			publish({ type: "tool", call }).pipe(
+			notify({ type: "tool", call }).pipe(
 				Effect.andThen(
 					tools.execute(call, attempt, (activity) =>
-						publish({ type: "tool-activity", callId: call.id, activity }),
+						notify({ type: "tool-activity", callId: call.id, activity }),
 					),
 				),
 			),
 		);
-		yield* publish({ type: "tool-result", call, result });
+		yield* notify({ type: "tool-result", call, result });
 		history.push(decision, { role: "tool", callId: call.id, result });
 	}
 });

@@ -1,5 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
-import { runTurn, TurnIoError, TurnModel, TurnModelError, TurnSubmission } from "@trajan/harness";
+import {
+	publishUpdate,
+	runTurn,
+	TurnIoError,
+	TurnModel,
+	TurnModelError,
+	TurnSubmission,
+} from "@trajan/harness";
 import type { TurnJournal, TurnMessage, TurnProgress, TurnTools } from "@trajan/harness";
 import { Lifecycle, LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
@@ -193,12 +200,18 @@ export abstract class CloudflareHarness<
 		return lifecycleEffect("get turn task", () => this.#tasks.handle(turnDefinition).get(runId));
 	}
 
+	#notifyState(runId?: string) {
+		return publishUpdate("conversation state", () =>
+			Effect.sync(() => this.onStateChange?.(runId)),
+		);
+	}
+
 	onStart() {
 		this.#conversation.initialize();
-		this.onStateChange?.();
-		if (this.#conversation.head() && !this.#inbox.hasWake()) {
-			return Effect.runPromise(this.#inbox.wake());
-		}
+		const wake = this.#conversation.head() && !this.#inbox.hasWake();
+		return Effect.runPromise(
+			(wake ? this.#inbox.wake() : Effect.void).pipe(Effect.andThen(this.#notifyState())),
+		);
 	}
 
 	#drainInbox = Effect.fn("harness.drainInbox")(function* (this: CloudflareHarness<Bindings>) {
@@ -222,7 +235,7 @@ export abstract class CloudflareHarness<
 				return { rescheduleAt: (yield* Clock.currentTimeMillis) + 250 };
 			}
 			yield* conversationEffect("cancel turn", () => this.#conversation.cancel(runId));
-			yield* Effect.sync(() => this.onStateChange?.(runId));
+			yield* this.#notifyState(runId);
 			return "yield" as const;
 		}
 		if (!task) {
@@ -240,7 +253,7 @@ export abstract class CloudflareHarness<
 				task.state === "failed" ? task.error.message : "The turn ended without a transcript.";
 			const code = task.state === "failed" ? failureCode(task.error.name) : task.state;
 			yield* conversationEffect("fail turn", () => this.#conversation.fail(runId, message));
-			yield* Effect.sync(() => this.onStateChange?.(runId));
+			yield* this.#notifyState(runId);
 			yield* Effect.logWarning("Harness turn ended without a transcript").pipe(
 				Effect.annotateLogs({ runId, code }),
 			);
@@ -260,7 +273,7 @@ export abstract class CloudflareHarness<
 		if (row.state !== "running") {
 			return;
 		}
-		yield* Effect.sync(() => this.onStateChange?.());
+		yield* this.#notifyState();
 		const through = row.context_through;
 		if (through === null) {
 			return yield* new TurnIoError({
@@ -300,7 +313,7 @@ export abstract class CloudflareHarness<
 		yield* conversationEffect("commit turn", () =>
 			this.#conversation.commit(runId, transcript, outcomesThrough),
 		);
-		yield* Effect.sync(() => this.onStateChange?.(runId));
+		yield* this.#notifyState(runId);
 		yield* Effect.promise(async (signal) => this.onTurnPhase?.("after-commit", signal));
 		yield* this.#inbox.wake();
 	});
@@ -333,13 +346,9 @@ export abstract class CloudflareHarness<
 	protected submitEffect(input: unknown) {
 		return Schema.decodeUnknownEffect(TurnSubmission)(input).pipe(
 			Effect.flatMap((submission) =>
-				this.#withInbox("admit turn", () => {
-					const receipt = this.#conversation.admit(submission);
-					if (receipt.accepted) {
-						this.onStateChange?.();
-					}
-					return receipt;
-				}),
+				this.#withInbox("admit turn", () => this.#conversation.admit(submission)).pipe(
+					Effect.tap(({ accepted }) => (accepted ? this.#notifyState() : Effect.void)),
+				),
 			),
 			Effect.catchTag("SchemaError", (error) =>
 				Effect.succeed({ accepted: false as const, runId: null, error: error.message }),
@@ -348,21 +357,19 @@ export abstract class CloudflareHarness<
 	}
 
 	protected recordUnadmittedSubmission(submission: typeof TurnSubmission.Type, text: string) {
-		return conversationEffect("record missed submission", () => {
-			if (this.#conversation.recordUnadmittedSubmission(submission, text)) {
-				this.onStateChange?.();
-			}
-		});
+		return conversationEffect("record missed submission", () =>
+			this.#conversation.recordUnadmittedSubmission(submission, text),
+		).pipe(
+			Effect.tap((recorded) => (recorded ? this.#notifyState() : Effect.void)),
+			Effect.asVoid,
+		);
 	}
 
 	protected stopEffect(runId: string) {
-		return this.#withInbox("request turn stop", () => {
-			const stopped = this.#conversation.requestStop(runId);
-			if (stopped) {
-				this.onStateChange?.();
-			}
-			return { runId, stopped };
-		});
+		return this.#withInbox("request turn stop", () => this.#conversation.requestStop(runId)).pipe(
+			Effect.tap((stopped) => (stopped ? this.#notifyState() : Effect.void)),
+			Effect.map((stopped) => ({ runId, stopped })),
+		);
 	}
 
 	submit(input: unknown) {

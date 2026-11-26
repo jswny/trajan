@@ -81,6 +81,31 @@ it.effect("stores a direct reply without calling a tool", () =>
 	}),
 );
 
+it.effect("continues after publication fails for a completed tool", () =>
+	Effect.gen(function* () {
+		const result = yield* runTurn(submission, journal, [], (event) =>
+			Effect.sync(() => {
+				if (event.type === "tool-result") {
+					throw new Error("Observer failed");
+				}
+			}),
+		).pipe(
+			Effect.provide(
+				turnLayer(
+					(history) =>
+						Effect.succeed(
+							history.at(-1)?.role === "tool"
+								? { role: "assistant", text: "Done" }
+								: { role: "tool-call", name: "exec", id: "call-1", input: null },
+						),
+					() => Effect.succeed({ status: "completed", output: "recorded" }),
+				),
+			),
+		);
+		expect(result.messages.at(-1)).toEqual({ role: "assistant", text: "Done" });
+	}),
+);
+
 it.effect("publishes draft text but fails when the stream has no terminal response", () =>
 	Effect.gen(function* () {
 		const publish = vi.fn(() => Effect.void);

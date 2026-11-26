@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 import { CodeModeError, defineTool } from "@trajan/code-mode";
+import { publishUpdate } from "@trajan/harness";
 import type { BrowserSession, BrowserSessionReport } from "agents/browser";
 import { Effect, Result, Schema } from "effect";
 import { codeModeError } from "./workspace";
@@ -102,6 +103,9 @@ export function browserToolset(
 	onPage: (status: "open" | "reopened" | "closed") => Effect.Effect<void, CodeModeError> = () =>
 		Effect.void,
 ) {
+	const notifyPage = (status: Parameters<typeof onPage>[0]) =>
+		publishUpdate("browser availability", () => onPage(status));
+
 	function operation<A, B extends Schema.Json>(
 		replay: "safe" | "unsafe",
 		input: Schema.Codec<A>,
@@ -127,7 +131,7 @@ export function browserToolset(
 						}),
 				);
 				if (replay === "safe" && (report?.restarted || report?.tabClosed)) {
-					yield* onPage("closed");
+					yield* notifyPage("closed");
 					return yield* new CodeModeError({
 						message:
 							"The browser lost its previous page. Use browserNavigate to open the page again.",
@@ -136,7 +140,7 @@ export function browserToolset(
 				if (Result.isFailure(result)) {
 					return yield* result.failure;
 				}
-				yield* onPage(report?.restarted || report?.tabClosed ? "reopened" : "open");
+				yield* notifyPage(report?.restarted || report?.tabClosed ? "reopened" : "open");
 				return result.success;
 			}),
 		});
@@ -208,7 +212,7 @@ export function browserToolset(
 					try: () => browser.close(),
 					catch: codeModeError,
 				});
-				yield* onPage("closed");
+				yield* notifyPage("closed");
 				return { closed };
 			}),
 		}),
