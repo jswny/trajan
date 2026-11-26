@@ -9,8 +9,10 @@ import type {
 import { Schema } from "effect";
 import type { ChatPage } from "./chat/protocol";
 import { ToolActivity } from "./chat/tool-presentation";
+import { execName, ExecInput } from "./exec-contract";
 
 const decodeActivity = Schema.decodeUnknownOption(ToolActivity);
+const decodeScript = Schema.decodeUnknownOption(ExecInput);
 
 export type ChatText = {
 	readonly id: string;
@@ -22,12 +24,16 @@ export type ChatTool = {
 	readonly id: string;
 	readonly role: "tool";
 	readonly name: string;
-	readonly input?: Schema.Json;
+	readonly argument?: {
+		readonly type: "script" | "json";
+		readonly source: string;
+	};
 	readonly activity: ReadonlyArray<typeof ToolActivity.Type>;
 	readonly result?: {
 		readonly status: (typeof ToolResult.Type)["status"];
-		readonly format: "json" | "text";
-		readonly content: typeof ToolContent.Type;
+		readonly content: ReadonlyArray<
+			(typeof ToolContent.Type)[number] | { readonly type: "json"; readonly text: string }
+		>;
 		readonly uncertainEffects?: ReadonlyArray<typeof UncertainToolEffect.Type>;
 	};
 };
@@ -53,11 +59,16 @@ export function chatTool(
 	result?: typeof ToolResult.Type,
 	activity: ReadonlyArray<typeof ToolActivityEntry.Type> = [],
 ): ChatTool {
+	const script = call?.name === execName ? decodeScript(call.input) : undefined;
+	const argument =
+		script?._tag === "Some"
+			? { type: "script" as const, source: script.value.code }
+			: call && { type: "json" as const, source: JSON.stringify(call.input, null, 2) };
 	const tool = {
 		id: `tool:${JSON.stringify([submissionId, callId])}`,
 		role: "tool" as const,
 		name: call?.name ?? "Tool",
-		...(call && { input: call.input }),
+		...(argument && { argument }),
 		activity: (result?.activity ?? activity).map((entry) => {
 			const parsed = decodeActivity(entry);
 			return parsed._tag === "Some"
@@ -73,24 +84,17 @@ export function chatTool(
 		return tool;
 	}
 	const output = result.status === "completed" ? toolResultContent(result) : null;
-	const content: typeof ToolContent.Type =
+	const content =
 		output?.type === "content"
 			? output.parts
-			: [
-					{
-						type: "text",
-						text:
-							result.status !== "completed"
-								? result.message
-								: JSON.stringify(result.output, null, 2),
-					},
-				];
+			: result.status === "completed"
+				? [{ type: "json" as const, text: JSON.stringify(result.output, null, 2) }]
+				: [{ type: "text" as const, text: result.message }];
 
 	return {
 		...tool,
 		result: {
 			status: result.status,
-			format: output?.type === "json" ? "json" : "text",
 			content,
 			...(result.uncertainEffects && { uncertainEffects: result.uncertainEffects }),
 		},
@@ -107,15 +111,20 @@ export function chatMessages(entries: (typeof ChatPage.Type)["entries"]): Array<
 			case "notice":
 				return [{ id: key, ...message }];
 			case "tool-call": {
-				const next = entries[index + 1]?.message;
+				const next =
+					entries[index + 1]?.submissionId === submissionId
+						? entries[index + 1].message
+						: undefined;
 				if (next?.role === "tool" && next.callId === message.id) {
 					return [];
 				}
 				return [chatTool(submissionId, message.id, message)];
 			}
 			case "tool": {
-				// The harness writes each call and result together. A page may start at the result.
-				const previous = entries[index - 1]?.message;
+				const previous =
+					entries[index - 1]?.submissionId === submissionId
+						? entries[index - 1].message
+						: undefined;
 				const call =
 					previous?.role === "tool-call" && previous.id === message.callId ? previous : undefined;
 				return [chatTool(submissionId, message.callId, call, message.result)];

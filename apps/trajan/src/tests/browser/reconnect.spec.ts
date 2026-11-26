@@ -284,7 +284,7 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	await composer.press("Enter");
 	await expect(page.getByText("Running exec", { exact: true })).toBeVisible();
 	await toolCards(page).last().locator(":scope > summary").click();
-	const activity = page.getByRole("list", { name: "Recent tool calls" });
+	const activity = page.getByRole("list", { name: "Tool calls" });
 	await expect(activity.getByRole("listitem").filter({ hasText: /write.*Succeeded/ })).toHaveCount(
 		1,
 	);
@@ -358,7 +358,7 @@ test("keeps the same tool card open through recovery, streaming, and commit", as
 	await composer.press("Enter");
 	const card = toolCards(page).last();
 	const summary = card.locator(":scope > summary");
-	const calls = card.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
+	const calls = card.getByRole("list", { name: "Tool calls" }).getByRole("listitem");
 	await summary.click();
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Running/]);
 
@@ -431,7 +431,7 @@ test("restores compacted model context and completes exec after a restart", asyn
 	await composer.press("Enter");
 	await expect(transcript.getByText("Saved amber-heron-795.", { exact: true })).toBeVisible();
 	await transcript.getByText("Done", { exact: true }).click();
-	await expect(transcript.getByRole("list", { name: "Recent tool calls" })).toContainText("write");
+	await expect(transcript.getByRole("list", { name: "Tool calls" })).toContainText("write");
 });
 
 test("replays time and randomness when reopening a file after a restart", async ({ page }) => {
@@ -440,7 +440,7 @@ test("replays time and randomness when reopening a file after a restart", async 
 	await composer.fill("Recover a file named with time and randomness.");
 	await composer.press("Enter");
 	await toolCards(page).last().locator(":scope > summary").click();
-	const calls = page.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
+	const calls = page.getByRole("list", { name: "Tool calls" }).getByRole("listitem");
 	await expect(calls).toHaveText([
 		/runtime\.now.*Succeeded/,
 		/runtime\.randomUUID.*Succeeded/,
@@ -467,7 +467,7 @@ test("replay shows the completed edit and diff after a reset before commit", asy
 	expect((await page.request.post(`${control}/pause-replay-edit`)).status()).toBe(204);
 	await composer.fill("Recover an interrupted edit.");
 	await composer.press("Enter");
-	const calls = page.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
+	const calls = page.getByRole("list", { name: "Tool calls" }).getByRole("listitem");
 	const transcript = page.getByRole("main");
 	await expect(transcript.getByText(/Recovered .*"edit":"completed".*"text":"seed!"/)).toHaveCount(
 		1,
@@ -543,7 +543,7 @@ test("replay completes Git branch creation after a reset before commit", async (
 	const transcript = page.getByRole("main");
 	await expect(transcript.getByText(/^Recovered .*"branchExists":true/)).toHaveCount(1);
 	await transcript.getByText("Done", { exact: true }).click();
-	const calls = transcript.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
+	const calls = transcript.getByRole("list", { name: "Tool calls" }).getByRole("listitem");
 	const branch = calls.filter({ has: page.getByText("git.branch", { exact: true }) });
 	await expect(branch).toHaveText(/Succeeded/);
 	await expect(calls.filter({ hasText: /git\.status.*Succeeded/ })).toBeVisible();
@@ -730,7 +730,7 @@ test("keeps separate outcomes for concurrent calls to the same tool", async ({ p
 	await expect(transcript.getByText(/Wrote .*42/)).toBeVisible();
 	await page.reload();
 	await transcript.getByText("Done", { exact: true }).click();
-	const calls = transcript.getByRole("list", { name: "Recent tool calls" }).getByRole("listitem");
+	const calls = transcript.getByRole("list", { name: "Tool calls" }).getByRole("listitem");
 	await expect(calls).toHaveCount(3);
 	await expect(calls.filter({ hasText: /write.*Succeeded/ })).toBeVisible();
 	const found = calls.filter({ hasText: /read.*Succeeded/ });
@@ -933,7 +933,7 @@ test("keeps the collapsed tool card compact and opens it without scrolling its s
 	await expect.poll(width).toBeCloseTo(contentWidth, 0);
 	await expect(card).toHaveCSS("border-top-left-radius", `${collapsedCorners.top}px`);
 	await expect(card.getByText("Result", { exact: true })).toBeVisible();
-	await expect(card.getByRole("list", { name: "Recent tool calls" })).toBeVisible();
+	await expect(card.getByRole("list", { name: "Tool calls" })).toBeVisible();
 	const blocks = card.locator("pre code");
 	const themedToken = "span[style*='light-dark(']";
 	await expect(blocks.nth(0).locator(themedToken).first()).toBeAttached();

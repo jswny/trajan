@@ -40,6 +40,7 @@ const EntryRow = Schema.Struct({
 	...MessageRow.fields,
 	seq: SubmissionRow.fields.seq,
 	submission_id: SubmissionRow.fields.submission_id,
+	role: Schema.NonEmptyString,
 });
 const decodeAdmission = Schema.decodeUnknownSync(Schema.UndefinedOr(AdmissionRow));
 const decodeSubmission = Schema.decodeUnknownSync(SubmissionRow);
@@ -59,6 +60,22 @@ const decodeOutcomeRow = Schema.decodeUnknownSync(
 const decodeActivityPath = Schema.decodeUnknownOption(
 	Schema.Struct({ path: Schema.NonEmptyString }),
 );
+
+function splitsToolCall(
+	newer: typeof EntryRow.Type | undefined,
+	older: typeof EntryRow.Type | undefined,
+) {
+	if (
+		newer?.role !== "tool" ||
+		older?.role !== "tool-call" ||
+		newer.submission_id !== older.submission_id
+	) {
+		return false;
+	}
+	const result = Schema.decodeSync(messageJson)(newer.message);
+	const call = Schema.decodeSync(messageJson)(older.message);
+	return result.role === "tool" && call.role === "tool-call" && result.callId === call.id;
+}
 
 export class ConversationStore {
 	constructor(
@@ -424,23 +441,25 @@ export class ConversationStore {
 		const rows = this.storage.sql
 			.exec(
 				`
-			SELECT entries.seq, submissions.submission_id, entries.message
+			SELECT entries.seq, submissions.submission_id, entries.message, entries.role
 			FROM harness_entries AS entries JOIN harness_submissions AS submissions ON submissions.seq = entries.submission_seq
 			WHERE entries.seq < ? ORDER BY entries.seq DESC LIMIT ?
 		`,
 				before ?? Number.MAX_SAFE_INTEGER,
-				limit + 1,
+				limit + 2,
 			)
 			.toArray()
 			.map((row) => decodeEntry(row));
-		const entries = rows.slice(0, limit).reverse();
+		// A call and its result form one chat card, so include its call at the page edge.
+		const pageSize = splitsToolCall(rows[limit - 1], rows[limit]) ? limit + 1 : limit;
+		const entries = rows.slice(0, pageSize).reverse();
 		return {
 			entries: entries.map(({ seq, submission_id, message }) => ({
 				id: seq,
 				submissionId: submission_id,
 				message,
 			})),
-			nextBefore: rows.length > limit ? entries[0].seq : null,
+			nextBefore: rows.length > pageSize ? entries[0].seq : null,
 		};
 	}
 

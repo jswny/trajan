@@ -4,6 +4,7 @@ import { completedToolResult, TurnIoError } from "@trajan/harness";
 import type { ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
 import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
+import { execName, ExecInput } from "../exec-contract";
 import { scheduleInstructions } from "../turn-schedules";
 import {
 	RECENT_TOOL_CALLS,
@@ -14,8 +15,7 @@ import {
 } from "./tool-activity";
 import type { ToolActivity } from "./tool-presentation";
 
-const Code = Schema.Struct({ code: Schema.NonEmptyString });
-const Exec = Tool.make("exec", { parameters: Code, success: Schema.Json });
+const Exec = Tool.make(execName, { parameters: ExecInput, success: Schema.Json });
 
 function executionError(cause: unknown) {
 	return new TurnIoError({
@@ -59,7 +59,7 @@ export function createChatTools(
 			if (call.name !== Exec.name) {
 				return { status: "failed" as const, message: `Unknown tool: ${call.name}` };
 			}
-			const { code } = yield* Schema.decodeUnknownEffect(Code)(call.input);
+			const { code } = yield* Schema.decodeUnknownEffect(ExecInput)(call.input);
 			const { runId, idempotencyKey: executionId } = attempt;
 			yield* Effect.try({
 				try: () => recordExecution(storage, runId, executionId, call.id),

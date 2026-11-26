@@ -257,7 +257,7 @@ export function createCodeMode(
 				break;
 			}
 			const call = Option.getOrUndefined(readCall(entry.request));
-			if (!call || call.module === runtimeModule) {
+			if (!call) {
 				continue;
 			}
 			const reply = entry.reply ?? (entry.replay === "unsafe" ? interrupted : undefined);
@@ -356,11 +356,10 @@ export function createCodeMode(
 						reply?: ToolReply,
 						details?: Schema.Json,
 					) =>
-						Effect.suspend(() =>
-							input.module === runtimeModule
-								? Effect.void
-								: (options.onActivity?.(activity(callId, input, status, reply, details)) ??
-									Effect.void),
+						Effect.suspend(
+							() =>
+								options.onActivity?.(activity(callId, input, status, reply, details)) ??
+								Effect.void,
 						).pipe(
 							Effect.catchCauseIf(
 								(cause) => !Cause.hasInterruptsOnly(cause),

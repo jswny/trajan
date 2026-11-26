@@ -798,6 +798,27 @@ test("a chat socket restores a completed transcript from durable history", async
 	}
 });
 
+test("keeps an exec script and its result on the same history page", async () => {
+	const stub = openFixture();
+	const { runId } = await submit(stub);
+	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "completed" });
+
+	const page = await stub.history({ limit: 2 });
+	expect(page.entries.map(({ message }) => Schema.decodeSync(messageJson)(message))).toMatchObject([
+		toolCall,
+		{ role: "tool", callId: toolCall.id, result: completedTool },
+		{ role: "assistant" },
+	]);
+	if (page.nextBefore === null) {
+		throw new Error("Expected the user message on the preceding page");
+	}
+	const earlier = await stub.history({ before: page.nextBefore, limit: 1 });
+	expect(earlier.entries.map(({ message }) => Schema.decodeSync(messageJson)(message))).toEqual([
+		prompt,
+	]);
+	expect(earlier.nextBefore).toBeNull();
+});
+
 test.each([
 	{
 		name: "reattaches to the completed tool after a restart before its checkpoint",
