@@ -174,8 +174,12 @@ for (const admitted of [true, false]) {
 		await composer.press("Enter");
 		await expect.poll(() => initialPaused).toBe(true);
 		await page.reload();
-		await expect.poll(() => deliver !== undefined).toBe(true);
-		await expect(composer).toHaveValue("Remember the recovered send");
+		if (admitted) {
+			await expect(composer).toHaveValue("");
+		} else {
+			await expect.poll(() => deliver !== undefined).toBe(true);
+			await expect(composer).toHaveValue("Remember the recovered send");
+		}
 		await composer.fill("newer draft");
 		await deliver?.();
 		await expect(page.locator("form")).toHaveAttribute("aria-busy", "false");
@@ -190,7 +194,7 @@ for (const admitted of [true, false]) {
 		await expect(transcript.getByText("Remember the recovered send", { exact: true })).toHaveCount(
 			1,
 		);
-		expect(requests).toEqual([requests[0], requests[0]]);
+		expect(requests).toEqual(admitted ? [requests[0]] : [requests[0], requests[0]]);
 	});
 }
 

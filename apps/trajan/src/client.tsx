@@ -110,6 +110,7 @@ function App() {
 		messages,
 		earlier,
 		loading,
+		stopping,
 		live,
 		active,
 		queued,
@@ -362,7 +363,7 @@ function App() {
 									<button
 										type="button"
 										aria-label="Stop"
-										disabled={!synced || active?.state === "stopping"}
+										disabled={!synced || stopping || active?.state === "stopping"}
 										className="chat-button chat-floating-surface size-(--chat-control-height)"
 										onClick={stop}
 									>

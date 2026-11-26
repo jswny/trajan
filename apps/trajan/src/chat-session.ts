@@ -10,15 +10,18 @@ export type PromptDraft = { readonly text: string };
 type Submission = {
 	readonly id: string;
 	readonly draft: PromptDraft;
-	readonly status: "pending" | "accepted" | "unconfirmed" | "rejected";
 	readonly restored?: true;
-	readonly message?: string;
-};
+} & (
+	| { readonly status: "pending" | "accepted" | "unconfirmed" }
+	| { readonly status: "rejected"; readonly message: string }
+);
+type HistoryRequest = { readonly before: number; readonly status: "pending" | "failed" };
+type StopRequest = { readonly runId: string; readonly status: "pending" | "requested" | "failed" };
 type ChatState = Omit<typeof ChatSnapshot.Type, "type"> & {
 	readonly status: "connecting" | "open" | "reconnecting";
 	readonly submission: Submission | null;
-	readonly loading: boolean;
-	readonly requestError: string | null;
+	readonly historyRequest: HistoryRequest | null;
+	readonly stopRequest: StopRequest | null;
 };
 
 export const INITIAL_CHAT: ChatState = {
@@ -30,8 +33,8 @@ export const INITIAL_CHAT: ChatState = {
 	catalog: [],
 	browserWatch: null,
 	submission: null,
-	loading: false,
-	requestError: null,
+	historyRequest: null,
+	stopRequest: null,
 };
 
 export type ChatCommand =
@@ -70,12 +73,19 @@ export function receiveChatEvent(state: ChatState, event: typeof ChatEvent.Type)
 							text: event.preview.text,
 						}
 					: (event.preview ?? (previous && { ...previous, text: "" }));
+			const page = mergeChatPage(state.page, event.page);
 			return {
 				...state,
 				...event,
 				status: "open",
-				page: mergeChatPage(state.page, event.page),
+				page,
 				preview,
+				historyRequest:
+					state.historyRequest?.before === page.nextBefore ? state.historyRequest : null,
+				stopRequest:
+					state.stopRequest?.runId === event.active?.runId && event.active?.state !== "stopping"
+						? state.stopRequest
+						: null,
 			};
 		}
 		case "reset":
@@ -124,10 +134,33 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 
 	const update = (patch: Partial<ChatState>) =>
 		SubscriptionRef.update(state, (state) => ({ ...state, ...patch }));
+	const reconcileDelivery = SubscriptionRef.updateEffect(state, (current) => {
+		const submission = current.submission;
+		if (submission?.status !== "unconfirmed") {
+			return Effect.succeed(current);
+		}
+		const prompt = submission.draft.text.trim();
+		const admitted =
+			current.active?.submissionId === submission.id && current.active.prompt === prompt;
+		const recorded = current.page.entries.some(
+			({ submissionId, message }) =>
+				submissionId === submission.id && message.role === "user" && message.text === prompt,
+		);
+		return admitted || recorded
+			? pending
+					.remove(pendingSendKey)
+					.pipe(
+						Effect.ignore,
+						Effect.as({ ...current, submission: { ...submission, status: "accepted" as const } }),
+					)
+			: Effect.succeed(current);
+	});
 	const receive = (frame: string) =>
 		decodeFrame(frame).pipe(
 			Effect.flatMap((event) =>
-				SubscriptionRef.update(state, (current) => receiveChatEvent(current, event)),
+				SubscriptionRef.update(state, (current) => receiveChatEvent(current, event)).pipe(
+					Effect.andThen(event.type === "snapshot" ? reconcileDelivery : Effect.void),
+				),
 			),
 		);
 	const connection = Effect.gen(function* () {
@@ -186,7 +219,10 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 			Effect.retry({ times: 1, schedule: Schedule.spaced("250 millis") }),
 			Effect.tap(() => pending.remove(pendingSendKey).pipe(Effect.ignore)),
 			Effect.matchEffect({
-				onFailure: () => update({ submission: { ...submission, status: "unconfirmed" } }),
+				onFailure: () =>
+					update({ submission: { ...submission, status: "unconfirmed" } }).pipe(
+						Effect.andThen(reconcileDelivery),
+					),
 				onSuccess: (receipt) =>
 					update({
 						submission:
@@ -199,51 +235,59 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 	});
 
 	const loadEarlier = Effect.fn("chat.loadEarlier")(function* () {
-		const before = yield* SubscriptionRef.modify(state, (current) => {
+		const before = yield* SubscriptionRef.modify(state, (current): [number | null, ChatState] => {
 			const cursor = current.page.nextBefore;
-			return current.loading || current.status !== "open" || cursor === null
+			return current.historyRequest?.status === "pending" ||
+				current.status !== "open" ||
+				cursor === null
 				? [null, current]
-				: [cursor, { ...current, loading: true, requestError: null }];
+				: [cursor, { ...current, historyRequest: { before: cursor, status: "pending" } }];
 		});
 		if (before === null) {
 			return;
 		}
-		yield* http.history({ before }).pipe(
-			Effect.matchEffect({
-				onFailure: () => update({ requestError: "Couldn’t load earlier messages." }),
-				onSuccess: (page) =>
-					SubscriptionRef.update(state, (current) =>
-						current.page.nextBefore === before
-							? {
-									...current,
-									page: {
-										entries: [...page.entries, ...current.page.entries],
-										nextBefore: page.nextBefore,
-									},
-								}
-							: current,
-					),
-			}),
-			Effect.ensuring(update({ loading: false })),
-		);
+		const result = yield* Effect.result(http.history({ before }));
+		yield* SubscriptionRef.update(state, (current): ChatState => {
+			if (current.historyRequest?.before !== before || current.page.nextBefore !== before) {
+				return current;
+			}
+			return result._tag === "Failure"
+				? { ...current, historyRequest: { before, status: "failed" } }
+				: {
+						...current,
+						historyRequest: null,
+						page: {
+							entries: [...result.success.entries, ...current.page.entries],
+							nextBefore: result.success.nextBefore,
+						},
+					};
+		});
+		yield* reconcileDelivery;
 	});
 
 	const stop = Effect.fn("chat.stop")(function* (runId: string) {
-		const current = yield* SubscriptionRef.get(state);
-		if (
-			current.status !== "open" ||
-			current.active?.runId !== runId ||
-			current.active.state === "stopping"
-		) {
+		const admitted = yield* SubscriptionRef.modify(state, (current): [boolean, ChatState] => {
+			if (
+				current.status !== "open" ||
+				current.active?.runId !== runId ||
+				current.active.state === "stopping" ||
+				(current.stopRequest?.runId === runId && current.stopRequest.status !== "failed")
+			) {
+				return [false, current];
+			}
+			return [true, { ...current, stopRequest: { runId, status: "pending" } }];
+		});
+		if (!admitted) {
 			return;
 		}
-		yield* update({ requestError: null });
-		yield* http.stop({ runId }).pipe(
-			Effect.filterOrFail(
-				(receipt) => receipt.runId === runId,
-				() => new ChatRequestError({ message: "The stop receipt did not match." }),
-			),
-			Effect.catch(() => update({ requestError: "Couldn’t confirm that Trajan stopped." })),
+		const acknowledged = yield* http.stop({ runId }).pipe(
+			Effect.map((receipt) => receipt.runId === runId && receipt.stopped),
+			Effect.orElseSucceed(() => false),
+		);
+		yield* SubscriptionRef.update(state, (current): ChatState =>
+			current.stopRequest?.runId === runId
+				? { ...current, stopRequest: { runId, status: acknowledged ? "requested" : "failed" } }
+				: current,
 		);
 	});
 

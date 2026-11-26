@@ -92,6 +92,14 @@ export function useChatSession() {
 	return {
 		...state,
 		messages,
+		loading: state.historyRequest?.status === "pending",
+		stopping: state.stopRequest?.status === "pending" || state.stopRequest?.status === "requested",
+		requestError:
+			state.stopRequest?.status === "failed"
+				? "Couldn’t confirm that Trajan stopped."
+				: state.historyRequest?.status === "failed"
+					? "Couldn’t load earlier messages."
+					: null,
 		earlier: state.page.nextBefore !== null,
 		live: state.preview?.text
 			? chatText(state.preview.runId, "assistant", state.preview.text)
