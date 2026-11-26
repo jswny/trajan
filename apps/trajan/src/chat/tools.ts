@@ -60,13 +60,18 @@ export function createChatTools(
 			}
 			const { code } = yield* Schema.decodeUnknownEffect(Code)(call.input);
 			const { runId, idempotencyKey: executionId } = attempt;
-			const saved = yield* Effect.try({
-				try: () => {
-					recordExecution(storage, runId, executionId, call.id);
-					return readToolActivity(storage, runId);
-				},
+			yield* Effect.try({
+				try: () => recordExecution(storage, runId, executionId, call.id),
 				catch: executionError,
 			});
+			const saved = yield* Effect.try({
+				try: () => readToolActivity(storage, runId),
+				catch: executionError,
+			}).pipe(
+				Effect.catch((error) =>
+					Effect.logWarning("Could not read live tool activity", error).pipe(Effect.as(undefined)),
+				),
+			);
 			let recent = saved?.executionId === executionId ? markInterrupted(saved.activity) : [];
 			if (recent.length > 0) {
 				yield* publishActivity(recent);
@@ -93,7 +98,10 @@ export function createChatTools(
 				.pipe(
 					Effect.match({
 						onSuccess: (output): typeof ToolResult.Type => ({ status: "completed", output }),
-						onFailure: ({ message }) => unknownOutcome(message),
+						onFailure: (error): typeof ToolResult.Type =>
+							error._tag === "CodeModeRejected"
+								? { status: "failed", message: error.message }
+								: unknownOutcome(error.message),
 					}),
 				);
 			const uncertainEffects = yield* Effect.try({
@@ -106,15 +114,11 @@ export function createChatTools(
 				...(uncertainEffects.length > 0 && { uncertainEffects }),
 			};
 		},
-		Effect.catch((error) =>
-			Effect.succeed(
-				error instanceof TurnIoError
-					? unknownOutcome(error.message)
-					: {
-							status: "failed" as const,
-							message: "Provide non-empty JavaScript source in the code argument.",
-						},
-			),
+		Effect.catchTag("SchemaError", () =>
+			Effect.succeed({
+				status: "failed" as const,
+				message: "Provide non-empty JavaScript source in the code argument.",
+			}),
 		),
 	);
 

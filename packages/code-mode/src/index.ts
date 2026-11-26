@@ -7,6 +7,10 @@ export class CodeModeError extends Data.TaggedError("CodeModeError")<{
 	readonly message: string;
 }> {}
 
+export class CodeModeRejected extends Data.TaggedError("CodeModeRejected")<{
+	readonly message: string;
+}> {}
+
 export type CodeModeTool = {
 	readonly isError?: (value: Schema.Json) => boolean;
 	readonly run: (
@@ -198,7 +202,9 @@ export function createCodeMode(
 		source: string,
 		options: RunOptions = {},
 	) {
-		yield* Schema.decodeEffect(boundedJson)(source).pipe(Effect.mapError(ioError));
+		yield* Schema.decodeEffect(boundedJson)(source).pipe(
+			Effect.mapError((error) => new CodeModeRejected({ message: error.message })),
+		);
 		const context = yield* Effect.context<never>();
 		const key = `${runPrefix(options.scope ?? id)}${encodeURIComponent(id)}`;
 		const entries = `${key}:call:`;
@@ -268,7 +274,17 @@ export function createCodeMode(
 						status: CodeModeActivity["status"],
 						reply?: ToolReply,
 						details?: Schema.Json,
-					) => options.onActivity?.(activity(callId, input, status, reply, details)) ?? Effect.void;
+					) =>
+						Effect.suspend(
+							() =>
+								options.onActivity?.(activity(callId, input, status, reply, details)) ??
+								Effect.void,
+						).pipe(
+							Effect.catchCauseIf(
+								(cause) => !Cause.hasInterruptsOnly(cause),
+								(cause) => Effect.logWarning("Code Mode activity publication failed", cause),
+							),
+						);
 					const publishReply = (reply: ToolReply, details?: Schema.Json) =>
 						publish(replyStatus(tool, reply), reply, details);
 					next++;

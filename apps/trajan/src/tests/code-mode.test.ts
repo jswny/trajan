@@ -296,3 +296,16 @@ test("rejects direct filesystem and shell imports and denies outbound network ac
 		value: expect.stringContaining("not permitted to access the internet"),
 	});
 });
+test("returns a committed call result even if activity publication fails", async () => {
+	const stub = env.CHAT_TEST.getByName(crypto.randomUUID());
+	await stub.seedCodeMode();
+	const source = `
+import { read } from "codemode:tools";
+export default () => read({ label: "published" });
+`;
+	await expect(stub.runCodeMode("activity", source, false, true)).resolves.toEqual({
+		value: "seed",
+	});
+	await expect(stub.runCodeMode("activity", source)).resolves.toEqual({ value: "seed" });
+	expect((await stub.codeModeState()).receipts.published).toHaveLength(1);
+});

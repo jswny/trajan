@@ -770,14 +770,23 @@ export default async function () {
 		this.#codeModeAbort.abort();
 	}
 
-	async runCodeMode(id: string, source: string, cancellable = false) {
+	async runCodeMode(id: string, source: string, cancellable = false, failActivity = false) {
 		const exit = await Effect.runPromiseExit(
-			this.#codeMode.run(id, source).pipe(
-				Effect.match({
-					onFailure: ({ message }) => ({ error: message }),
-					onSuccess: (value) => ({ value }),
-				}),
-			),
+			this.#codeMode
+				.run(id, source, {
+					...(failActivity && {
+						onActivity: (event) =>
+							event.status === "completed"
+								? Effect.fail(codeModeError("Fixture activity error"))
+								: Effect.void,
+					}),
+				})
+				.pipe(
+					Effect.match({
+						onFailure: ({ message }) => ({ error: message }),
+						onSuccess: (value) => ({ value }),
+					}),
+				),
 			cancellable ? { signal: this.#codeModeAbort.signal } : undefined,
 		);
 		return Exit.isSuccess(exit)
