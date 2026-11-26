@@ -53,6 +53,7 @@ export function ToolCode({
 		() => (language ? highlighting?.highlight(text, language) : undefined),
 		[highlighting, language, text],
 	);
+	const lineBreaks = lines && text.includes("\r\n") ? text.match(/\r?\n/g) : null;
 	return (
 		<pre
 			className={`max-h-40 overflow-auto rounded-(--chat-inset-radius) bg-canvas p-2.5 text-xs leading-5 ${preserveLines ? "whitespace-pre" : "whitespace-pre-wrap wrap-anywhere"}`}
@@ -60,7 +61,7 @@ export function ToolCode({
 			<code>
 				{lines?.map((line, index) => (
 					<Fragment key={index}>
-						{index > 0 ? "\n" : null}
+						{index > 0 ? (lineBreaks?.[index - 1] ?? "\n") : null}
 						{line.map(({ content, offset, htmlStyle }) => (
 							<span key={offset} style={{ color: htmlStyle?.color }}>
 								{content}

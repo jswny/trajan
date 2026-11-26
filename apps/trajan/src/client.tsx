@@ -16,6 +16,7 @@ import { BrowserViewer } from "./browser-view";
 import { ChatMarkdown, ToolCode } from "./chat-markdown";
 import type { ChatMessage, ChatText, ChatTool } from "./chat-view";
 import { CurrentActivityChip } from "./current-activity";
+import { ExecScript } from "./exec-script";
 import { themePreference } from "./theme";
 import { useChatSession } from "./use-chat-session";
 import "./styles.css";
@@ -70,6 +71,14 @@ const toolResultLabel = { completed: "Done", failed: "Failed", unknown: "Outcome
 function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => void }) {
 	const [open, setOpen] = useState(false);
 	const { input, name, result, activity } = message;
+	const script =
+		name === "exec" &&
+		input &&
+		typeof input === "object" &&
+		"code" in input &&
+		typeof input.code === "string"
+			? input.code
+			: undefined;
 	const text = result?.content
 		.filter((part) => part.type === "text")
 		.map((part) => part.text)
@@ -122,7 +131,9 @@ function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => 
 						className="max-w-full rounded-(--chat-inset-radius)"
 					/>
 				))}
-				{input !== undefined ? (
+				{script !== undefined ? (
+					<ExecScript source={script} open={open} onInspect={onInspect} />
+				) : input !== undefined ? (
 					<div>
 						<p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
 							Arguments

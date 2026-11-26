@@ -700,9 +700,25 @@ test("wraps a long prompt and keeps a wide code block scrollable inside the tran
 	).toBe(0);
 });
 
+const formatterPath = "/src/format-exec-script.ts";
+const workspaceModuleSource = `import { read, write } from "codemode:tools";
+export default async function () {
+  const path = "/workspace/module.txt";
+  const written = await write({ path, content: "hello" });
+  const [found, missing] = await Promise.all([read({ path }), read({ path: "/workspace/missing.txt" })]);
+  if (written.isError || found.isError || !missing.isError) throw new Error("Unexpected tool result");
+  return 42;
+}`;
+
 test("keeps the collapsed tool card compact and opens it without scrolling its summary away", async ({
 	page,
 }) => {
+	let formatterRequested = false;
+	page.on("request", (request) => {
+		if (new URL(request.url()).pathname === formatterPath) {
+			formatterRequested = true;
+		}
+	});
 	await page.setViewportSize({ ...devices["iPhone 17 Pro"].viewport, height: 352 });
 	const composer = await openChat(page);
 	const transcript = page.getByRole("main");
@@ -740,9 +756,11 @@ test("keeps the collapsed tool card compact and opens it without scrolling its s
 		collapsedCorners.height,
 	);
 	const top = await summary.evaluate((element) => element.getBoundingClientRect().top);
+	expect(formatterRequested).toBe(false);
 
 	await summary.press("Enter");
-	await expect(card.getByText("Arguments", { exact: true })).toBeVisible();
+	const scriptHeading = card.getByText("Script", { exact: true });
+	await expect(scriptHeading).toBeVisible();
 	await expect.poll(width).toBeCloseTo(contentWidth, 0);
 	await expect(card).toHaveCSS("border-top-left-radius", `${collapsedCorners.top}px`);
 	await expect(card.getByText("Result", { exact: true })).toBeVisible();
@@ -750,11 +768,14 @@ test("keeps the collapsed tool card compact and opens it without scrolling its s
 	const blocks = card.locator("pre code");
 	const themedToken = "span[style*='light-dark(']";
 	await expect(blocks.nth(0).locator(themedToken).first()).toBeAttached();
-	await expect(blocks.nth(1).locator(themedToken).first()).toBeAttached();
 	await expect(blocks.nth(0)).toHaveText("42");
-	expect(JSON.parse((await blocks.nth(1).textContent()) ?? "null")).toMatchObject({
-		code: expect.stringContaining("return 42;"),
-	});
+	const script = blocks.nth(1);
+	await expect(script.locator(themedToken).filter({ hasText: "import" })).toBeAttached();
+	const original = card.getByRole("button", { name: "Original", exact: true });
+	await expect(original).toHaveAttribute("aria-pressed", "false");
+	expect(formatterRequested).toBe(true);
+	const formatted = await script.textContent();
+	expect(formatted).toContain("await Promise.all([\n    read({ path }),");
 	const expandedTop = await summary.evaluate(async (element) => {
 		await new Promise<void>((resolve) => {
 			requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
@@ -762,9 +783,37 @@ test("keeps the collapsed tool card compact and opens it without scrolling its s
 		return element.getBoundingClientRect().top;
 	});
 	expect(Math.abs(expandedTop - top)).toBeLessThanOrEqual(1);
+	await original.click();
+	await expect(original).toHaveAttribute("aria-pressed", "true");
+	expect(await script.textContent()).toBe(workspaceModuleSource);
+	await original.click();
+	await expect(original).toHaveAttribute("aria-pressed", "false");
+	expect(await script.textContent()).toBe(formatted);
 	await summary.press("Enter");
-	await expect(card.getByText("Arguments", { exact: true })).toBeHidden();
+	await expect(scriptHeading).toBeHidden();
 	await expect.poll(width).toBeCloseTo(collapsedWidth, 0);
+});
+
+test("shows the original exec script if the formatter cannot load", async ({ page }) => {
+	await page.route(
+		(url) => url.pathname === formatterPath,
+		(route) => route.abort(),
+	);
+	const composer = await openChat(page);
+	await composer.fill("Run a workspace module.");
+	await composer.press("Enter");
+	const card = toolCards(page).first();
+	await expect(card.locator(":scope > summary")).toHaveText("execDone");
+	const formatterFailure = page.waitForEvent(
+		"requestfailed",
+		(request) => new URL(request.url()).pathname === formatterPath,
+	);
+	await card.locator(":scope > summary").click();
+	await formatterFailure;
+	const script = card.locator("pre code").last();
+	await expect(script.locator("span[style]").filter({ hasText: "import" })).toBeVisible();
+	expect(await script.textContent()).toBe(workspaceModuleSource);
+	await expect(card.getByRole("button", { name: "Original", exact: true })).toHaveCount(0);
 });
 
 test("fits Markdown frames to their tables and scrolls wide tables on mobile", async ({ page }) => {
