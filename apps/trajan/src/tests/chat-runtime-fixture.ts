@@ -638,8 +638,21 @@ export default async function () {
 		Layer.succeed(TurnTools, TurnTools.of({ execute: (...args) => this.#execute(...args) })),
 	);
 
-	protected override onTurnPhase(phase: "before-task" | "after-commit", signal: AbortSignal) {
-		return this.#pauseAt(phase, signal);
+	protected override async onTurnPhase(phase: "before-task" | "after-commit", signal: AbortSignal) {
+		if (phase === "before-task") {
+			const kv = this.ctx.storage.kv;
+			const remaining = kv.get<number>("inbox-wake-faults") ?? 0;
+			if (remaining > 0) {
+				kv.put("inbox-wake-faults", remaining - 1);
+				await this.ctx.storage.sync();
+				throw new Error("Fixture failed to start the inbox task.");
+			}
+		}
+		await this.#pauseAt(phase, signal);
+	}
+
+	failInboxWake(attempts: number) {
+		return this.ctx.storage.put("inbox-wake-faults", attempts);
 	}
 
 	onRequest(request: Request) {

@@ -1151,6 +1151,67 @@ test("recovers the inbox if the object restarts before starting the accepted tas
 	});
 });
 
+test("the inbox backs off across a restart after each group of dispatch retries fails", async () => {
+	let stub = openFixture();
+	await stub.failInboxWake(6);
+	const input = remember("the inbox wake recovered");
+	const { runId } = await submit(stub, input);
+	const wakeState = () =>
+		runInDurableObject(stub, async (_, { storage }) => ({
+			jobs: storage.sql
+				.exec("SELECT time FROM cf_agents_jobs WHERE capability = 'harness-inbox'")
+				.toArray(),
+			alarm: await storage.getAlarm(),
+			backoffMs: storage.kv.get<number>("harness-inbox:wake-backoff"),
+			remaining: storage.kv.get<number>("inbox-wake-faults"),
+		}));
+	const makeWakeDue = () =>
+		runInDurableObject(stub, async (instance, { storage }) => {
+			// Advance only this job's deadline so the test can drive the actual Lifecycle alarm.
+			storage.sql.exec(
+				"UPDATE cf_agents_jobs SET time = ? WHERE capability = 'harness-inbox'",
+				Date.now(),
+			);
+			await instance.lifecycle.rearmAlarm();
+		});
+
+	await expect.poll(wakeState).toMatchObject({
+		jobs: [{ time: expect.any(Number) }],
+		alarm: expect.any(Number),
+		backoffMs: 30_000,
+		remaining: 3,
+	});
+	const firstWake = await wakeState();
+	expect(firstWake.jobs).toEqual([{ time: firstWake.alarm }]);
+	expect(await stub.taskState(runId)).toBe("missing");
+	const { instance } = await stub.state();
+	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+	stub = await waitForRestart(stub, instance);
+	await stub.history({});
+	expect(await wakeState()).toEqual(firstWake);
+
+	await makeWakeDue();
+	await runDurableObjectAlarm(stub);
+	await expect.poll(wakeState).toMatchObject({
+		jobs: [{ time: expect.any(Number) }],
+		alarm: expect.any(Number),
+		backoffMs: 60_000,
+		remaining: 0,
+	});
+	expect(await stub.taskState(runId)).toBe("missing");
+	expect(await stub.turn(runId)).toMatchObject({ state: "pending" });
+
+	await makeWakeDue();
+	await runDurableObjectAlarm(stub);
+	await expect.poll(() => readTurn(stub, runId)).toMatchObject({ state: "completed" });
+	await expect.poll(wakeState).toMatchObject({ jobs: [], backoffMs: undefined });
+	const { entries } = await stub.history({});
+	expect(entries.map(({ message }) => Schema.decodeSync(messageJson)(message))).toEqual([
+		{ role: "user", text: input.prompt },
+		{ role: "assistant", text: "Remembering the inbox wake recovered" },
+	]);
+});
+
 test("a turn committed before the task settles appears once in history and in the next turn's context", async () => {
 	const phrase = crypto.randomUUID();
 	const input = remember(phrase);

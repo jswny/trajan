@@ -592,6 +592,33 @@ test("loads older messages without replacing the recent transcript", async ({ pa
 	await expect(transcript.getByText("Remembering page 25", { exact: true })).toHaveCount(1);
 });
 
+test("an accepted send recovers after inbox wake retries fail with the chat closed", async ({
+	page,
+	context,
+}) => {
+	test.setTimeout(50_000);
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/fail-inbox-wake`)).status()).toBe(204);
+	await composer.fill("Remember the inbox wake recovered");
+	const admitted = page.waitForResponse(
+		(response) => new URL(response.url()).pathname === ChatPath && response.status() === 202,
+	);
+	await composer.press("Enter");
+	await admitted;
+	await page.close();
+
+	// No connection or request can revive the inbox during the first backoff.
+	await setTimeout(32_000);
+	const history = await context.request.get(`${ChatPath}/history`);
+	expect(history.ok()).toBe(true);
+	expect(await history.text()).toContain("Remembering the inbox wake recovered");
+	const reopened = await context.newPage();
+	await openChat(reopened);
+	await expect(
+		reopened.getByRole("main").getByText("Remembering the inbox wake recovered", { exact: true }),
+	).toHaveCount(1);
+});
+
 test("runs a scheduled turn once across a restart with the chat closed", async ({
 	page,
 	context,

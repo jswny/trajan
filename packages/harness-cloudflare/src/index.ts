@@ -1,18 +1,22 @@
 import { DurableObject } from "cloudflare:workers";
 import { runTurn, TurnIoError, TurnModel, TurnModelError, TurnSubmission } from "@trajan/harness";
 import type { TurnJournal, TurnMessage, TurnProgress, TurnTools } from "@trajan/harness";
-import { Lifecycle } from "agents/lifecycle";
+import { Lifecycle, LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
 import { Tasks } from "agents/tasks";
 import type { TaskStep } from "agents/tasks";
-import { Clock, Effect, Schema } from "effect";
+import { Clock, Effect, Option, Schema } from "effect";
 import type { Layer } from "effect";
 import { ConversationStore } from "./conversation-store";
 import type { HistoryQuery } from "./conversation-store";
 
 // Tasks and jobs use these names to look up work persisted by prior isolates.
 const turnDefinition = "turn@v3";
-const inboxJob = "harness-inbox";
+const inboxWakeJob = "harness-inbox:wake";
+const inboxBackoffKey = "harness-inbox:wake-backoff";
+const inboxHeartbeatMs = 30_000;
+const maxInboxBackoffMs = 10 * 60_000;
+const decodeInboxBackoff = Schema.decodeUnknownOption(Schema.Natural);
 const TurnTaskInput = Schema.Struct({ runId: Schema.NonEmptyString });
 
 class TurnTaskInputError extends Schema.TaggedError<
@@ -32,6 +36,60 @@ function lifecycleEffect<A>(operation: string, run: () => Promise<A>) {
 		catch: (cause) =>
 			cause instanceof TurnIoError ? cause : new TurnIoError({ operation, cause }),
 	});
+}
+
+class InboxWake extends LifecycleCapability {
+	constructor(private readonly drain: () => Effect.Effect<LifecycleJobOutcome, TurnIoError>) {
+		super("harness-inbox");
+	}
+
+	hasWake() {
+		return this.lifecycle.jobs.get(inboxWakeJob) !== undefined;
+	}
+
+	readonly wake = Effect.fnUntraced(function* (this: InboxWake) {
+		const time = yield* Clock.currentTimeMillis;
+		yield* lifecycleEffect("wake inbox", () =>
+			this.lifecycle.jobs.push({ id: inboxWakeJob, fn: "wake", time }),
+		);
+	});
+
+	onJob({ job }: LifecycleJobContext) {
+		if (job.id === inboxWakeJob) {
+			return Effect.runPromise(
+				this.drain().pipe(
+					Effect.tap(() =>
+						Effect.sync(() => {
+							const kv = this.lifecycle.storage.kv;
+							if (kv.get(inboxBackoffKey) !== undefined) {
+								kv.delete(inboxBackoffKey);
+							}
+						}),
+					),
+				),
+			);
+		}
+	}
+
+	onJobError({ job, attempt }: LifecycleJobContext, error: unknown) {
+		if (job.id === inboxWakeJob) {
+			return Effect.runPromise(
+				Effect.gen({ self: this }, function* () {
+					const now = yield* Clock.currentTimeMillis;
+					const kv = this.lifecycle.storage.kv;
+					// Keep backoff outside the job so a new submission can wake it immediately.
+					const previous = Option.getOrUndefined(decodeInboxBackoff(kv.get(inboxBackoffKey)));
+					const backoffMs =
+						previous === undefined ? inboxHeartbeatMs : Math.min(previous * 2, maxInboxBackoffMs);
+					kv.put(inboxBackoffKey, backoffMs);
+					yield* Effect.logWarning("Inbox wake failed. Retrying after backoff.", error).pipe(
+						Effect.annotateLogs({ attempt, backoffMs }),
+					);
+					return { rescheduleAt: now + backoffMs };
+				}),
+			);
+		}
+	}
 }
 
 function failureCode(name: string) {
@@ -112,8 +170,9 @@ export abstract class CloudflareHarness<
 	readonly #conversation = new ConversationStore(this.ctx.storage, (runId, outcome) =>
 		this.settleRunState?.(runId, outcome),
 	);
+	readonly #inbox = new InboxWake(() => this.#drainInbox());
 	readonly #tasks = new Tasks({
-		onError: () => Effect.runPromise(this.#wakeInbox()),
+		onError: () => Effect.runPromise(this.#inbox.wake()),
 		definitions: {
 			[turnDefinition]: (input: unknown, step: TaskStep) =>
 				Effect.runPromise(
@@ -127,7 +186,7 @@ export abstract class CloudflareHarness<
 				),
 		},
 	});
-	readonly lifecycle = Lifecycle.install(this).use(this.#tasks);
+	readonly lifecycle = Lifecycle.install(this).use(this.#tasks).use(this.#inbox);
 	readonly #start = lifecycleEffect("start lifecycle", () => this.lifecycle.start());
 
 	#getTask(runId: string) {
@@ -137,21 +196,8 @@ export abstract class CloudflareHarness<
 	onStart() {
 		this.#conversation.initialize();
 		this.onStateChange?.();
-		if (this.#conversation.head() && !this.lifecycle.jobs.get(inboxJob)) {
-			return Effect.runPromise(this.#wakeInbox());
-		}
-	}
-
-	#wakeInbox = Effect.fnUntraced(function* (this: CloudflareHarness<Bindings>) {
-		const time = yield* Clock.currentTimeMillis;
-		yield* lifecycleEffect("wake inbox", () =>
-			this.lifecycle.jobs.push({ id: inboxJob, fn: inboxJob, time }),
-		);
-	});
-
-	onJob({ job }: LifecycleJobContext): Promise<LifecycleJobOutcome> | undefined {
-		if (job.fn === inboxJob) {
-			return Effect.runPromise(this.#drainInbox());
+		if (this.#conversation.head() && !this.#inbox.hasWake()) {
+			return Effect.runPromise(this.#inbox.wake());
 		}
 	}
 
@@ -201,7 +247,7 @@ export abstract class CloudflareHarness<
 			return "yield" as const;
 		}
 		// A task that terminates before committing may never signal the inbox.
-		return { rescheduleAt: (yield* Clock.currentTimeMillis) + 30_000 };
+		return { rescheduleAt: (yield* Clock.currentTimeMillis) + inboxHeartbeatMs };
 	});
 
 	#runSubmission = Effect.fn("harness.runSubmission")(function* (
@@ -242,7 +288,7 @@ export abstract class CloudflareHarness<
 		yield* conversationEffect("commit turn", () => this.#conversation.commit(runId, transcript));
 		yield* Effect.sync(() => this.onStateChange?.(runId));
 		yield* Effect.promise(async (signal) => this.onTurnPhase?.("after-commit", signal));
-		yield* this.#wakeInbox();
+		yield* this.#inbox.wake();
 	});
 
 	protected snapshot() {
@@ -265,7 +311,7 @@ export abstract class CloudflareHarness<
 		// Schedule the wake before changing the inbox, under the same input gate.
 		return yield* lifecycleEffect(operation, () =>
 			this.ctx.blockConcurrencyWhile(() =>
-				runPromise(this.#wakeInbox().pipe(Effect.andThen(conversationEffect(operation, run)))),
+				runPromise(this.#inbox.wake().pipe(Effect.andThen(conversationEffect(operation, run)))),
 			),
 		);
 	});
