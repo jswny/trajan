@@ -27,6 +27,12 @@ export const ToolCall = Schema.Struct({
 });
 
 export const toolPreviewBytes = 3 * 1024;
+export const fileDiffBytes = 8 * 1024;
+export const FileChange = Schema.Struct({
+	path: Schema.NonEmptyString,
+	kind: Schema.Literals(["added", "modified", "unchanged"]),
+	diff: Schema.optionalKey(Schema.NonEmptyString.check(Schema.isMaxLength(fileDiffBytes))),
+});
 const toolPreviewFields = {
 	text: Schema.String.check(Schema.isMaxLength(toolPreviewBytes)),
 	truncated: Schema.Boolean,
@@ -45,6 +51,7 @@ export const ToolActivity = Schema.Struct({
 	status: Schema.Literals(["running", "completed", "failed", "interrupted"]),
 	input: Schema.optionalKey(ToolActivityPreview),
 	output: Schema.optionalKey(ToolActivityPreview),
+	fileChange: Schema.optionalKey(FileChange),
 });
 const toolActivityFields = { activity: Schema.optionalKey(Schema.Array(ToolActivity)) };
 export const ToolContent = Schema.Array(

@@ -397,7 +397,64 @@ test("replay shows the interrupted stock edit and finishes without editing the f
 	await interrupted.locator("summary").press("Enter");
 	await expect(interrupted.locator("pre")).toContainText('"newText": "seed!"');
 	await expect(interrupted.getByText("Result", { exact: true })).toHaveCount(0);
+	await expect(interrupted.getByRole("region", { name: "File changes" })).toHaveCount(0);
+	await expect(
+		interrupted.getByText("The file may have changed before the call was interrupted."),
+	).toBeVisible();
 	await expect(calls.last()).toHaveText(/read.*Succeeded/);
+});
+
+test("restores the write and edit diffs after a restart and follows the chat theme", async ({
+	page,
+}) => {
+	await page.emulateMedia({ colorScheme: "dark" });
+	const composer = await openChat(page);
+	await composer.fill("Recover file diffs.");
+	await composer.press("Enter");
+	const card = toolCards(page).last();
+	await card.locator(":scope > summary").click();
+	const calls = card.getByRole("listitem");
+	await expect(calls.last()).toHaveText(/wait_for_restart.*Running/);
+
+	const openDiff = async (name: string) => {
+		const row = calls.filter({ has: page.getByText(name, { exact: true }) });
+		await row.locator(":scope > details > summary").click();
+		return row.getByRole("region", { name: "File changes" }).locator("diffs-container");
+	};
+	const before = await openDiff("edit");
+	await expect(before.locator("pre")).toContainText("ready: true");
+	const original = await before.locator("pre").textContent();
+
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await page.reload();
+	await expect(page.getByText("Updated the report.", { exact: true })).toBeVisible();
+	await card.locator(":scope > summary").click();
+	const written = await openDiff("write");
+	const edited = await openDiff("edit");
+	await expect(written.locator("pre")).toContainText("ready: false");
+	await expect(edited.locator("pre")).toContainText("ready: true");
+	expect(await edited.locator("pre").textContent()).toBe(original);
+	const writeRow = calls.filter({ has: page.getByText("write", { exact: true }) });
+	await expect(writeRow.getByText("Result", { exact: true })).toBeHidden();
+	await writeRow.getByText("Arguments and receipt", { exact: true }).click();
+	await expect(writeRow.getByText(/"bytesWritten": 68/)).toBeVisible();
+	await writeRow.getByText("Arguments and receipt", { exact: true }).click();
+
+	const setTheme = async (name: string) => {
+		await page.getByRole("button", { name: "Chat settings" }).click();
+		await page.getByRole("menuitemradio", { name, exact: true }).click();
+	};
+	await setTheme("Light");
+	await expect(written).toHaveCSS("color-scheme", "light");
+	await expect(edited).toHaveCSS("color-scheme", "light");
+	await setTheme("Dark");
+	await expect(edited).toHaveCSS("color-scheme", "dark");
+	await setTheme("Auto");
+	await expect(page.locator("html")).toHaveAttribute("data-theme", "auto");
+
+	expect(
+		await page.locator(".chat-transcript").evaluate((el) => el.scrollWidth - el.clientWidth),
+	).toBeLessThanOrEqual(1);
 });
 
 test("replay shows the interrupted Git call and a successful status check", async ({ page }) => {

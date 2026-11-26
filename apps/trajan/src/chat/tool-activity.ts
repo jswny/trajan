@@ -1,6 +1,6 @@
 import { clearCodeModeRun } from "@trajan/code-mode";
 import type { CodeModeActivity } from "@trajan/code-mode";
-import { ToolActivity, ToolContent, toolPreviewBytes } from "@trajan/harness";
+import { FileChange, ToolActivity, ToolContent, toolPreviewBytes } from "@trajan/harness";
 import type { ToolActivityPreview } from "@trajan/harness";
 import { Schema } from "effect";
 
@@ -12,6 +12,7 @@ const ExecutionActivity = Schema.Struct({
 });
 const decodeActivity = Schema.decodeUnknownSync(Schema.UndefinedOr(ExecutionActivity));
 const decodeContent = Schema.decodeUnknownOption(ToolContent);
+const decodeFileChange = Schema.decodeUnknownOption(FileChange);
 const decodeFileRead = Schema.decodeUnknownOption(
 	Schema.Struct({
 		isError: Schema.Literal(false),
@@ -86,6 +87,7 @@ export function toolActivity({
 	status,
 	input,
 	reply,
+	details,
 }: CodeModeActivity): typeof ToolActivity.Type {
 	const output =
 		reply?.status === "returned"
@@ -93,7 +95,15 @@ export function toolActivity({
 			: reply?.status === "failed"
 				? preview(reply.message)
 				: undefined;
-	return { id, name, status, input: preview(input), ...(output && { output }) };
+	const change = status === "completed" ? decodeFileChange(details) : undefined;
+	return {
+		id,
+		name,
+		status,
+		input: preview(input),
+		...(output && { output }),
+		...(change?._tag === "Some" && { fileChange: change.value }),
+	};
 }
 
 export function toolActivityKey(runId: string) {

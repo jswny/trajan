@@ -1,7 +1,6 @@
 import { resolve } from "node:path/posix";
 import { Workspace } from "@cloudflare/computer";
 import { createGitClient } from "@cloudflare/computer/git";
-import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
 import { CodeModeError } from "@trajan/code-mode";
 import type { CodeModeTool } from "@trajan/code-mode";
 import {
@@ -11,7 +10,9 @@ import {
 	workspace as skillSource,
 } from "agents/skills";
 import type { SkillCatalog } from "agents/skills";
-import { Effect, Predicate, Schema } from "effect";
+import { Effect, Predicate, Schema, Semaphore } from "effect";
+import { workspaceFileTools } from "./workspace-file-changes";
+import type { FileMutationReceipt } from "./workspace-file-changes";
 
 export const WORKSPACE_PROMPT =
 	"You are Trajan, a concise and capable assistant. You have a durable workspace at /workspace. Use exec to compose tools when they can answer the request, and explain their results plainly.";
@@ -37,7 +38,7 @@ const pathList = Schema.mutable(Schema.Array(Schema.NonEmptyString));
 const ref = Schema.optionalKey(Schema.NonEmptyString);
 const depth = Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0)));
 
-function workspaceGit(workspace: Workspace) {
+function workspaceGit(workspace: Workspace, mutations: Semaphore.Semaphore) {
 	const git = workspace.git;
 
 	const confinedDirectory = Effect.fnUntraced(function* (
@@ -87,24 +88,28 @@ function workspaceGit(workspace: Workspace) {
 		schema: Schema.Codec<A>,
 		call: (options: A) => Promise<B>,
 	) {
+		const invoke = Effect.fnUntraced(
+			function* (input: Schema.Json, { signal }: Parameters<CodeModeTool["run"]>[1]) {
+				const args = yield* Schema.decodeUnknownEffect(schema)(input ?? {});
+				const dir = yield* confinedDirectory(args.dir, signal);
+				const value = yield* Effect.tryPromise({
+					try: () => {
+						signal.throwIfAborted();
+						return call({ ...args, dir });
+					},
+					catch: codeModeError,
+				});
+				return yield* Schema.decodeUnknownEffect(Schema.Json)(value ?? null);
+			},
+			Effect.catchTag("SchemaError", (error) => Effect.fail(codeModeError(error))),
+		);
 		return {
 			replay,
 			schema,
-			run: Effect.fnUntraced(
-				function* (input: Schema.Json, { signal }: Parameters<CodeModeTool["run"]>[1]) {
-					const args = yield* Schema.decodeUnknownEffect(schema)(input ?? {});
-					const dir = yield* confinedDirectory(args.dir, signal);
-					const value = yield* Effect.tryPromise({
-						try: () => {
-							signal.throwIfAborted();
-							return call({ ...args, dir });
-						},
-						catch: codeModeError,
-					});
-					return yield* Schema.decodeUnknownEffect(Schema.Json)(value ?? null);
-				},
-				Effect.catchTag("SchemaError", (error) => Effect.fail(codeModeError(error))),
-			),
+			run: (input, context) => {
+				const effect = invoke(input, context);
+				return replay === "unsafe" ? mutations.withPermit(effect) : effect;
+			},
 		} satisfies CodeModeTool & { readonly schema: Schema.Constraint };
 	}
 
@@ -219,24 +224,42 @@ function workspaceSkills(workspace: Workspace) {
 }
 
 export function workspaceToolset(workspace: Workspace) {
-	const files = createPiTools({ workspace, root, exec: { backends: {} } });
+	const mutations = Semaphore.makeUnsafe(1);
+	const files = workspaceFileTools(workspace, root, mutations);
 	const fileTools = Object.fromEntries(
 		files.tools.map(({ name }) => [
 			name,
 			{
 				replay: replaySafeFiles.has(name) ? "safe" : "unsafe",
 				isError: isFileToolError,
-				run: Effect.fnUntraced(function* (input, { callId, signal }) {
-					const result = yield* Effect.tryPromise({
-						try: () => {
-							signal.throwIfAborted();
-							return files.execute({ id: callId, name, arguments: input }, { abortSignal: signal });
-						},
-						catch: codeModeError,
-					});
+				run: Effect.fnUntraced(function* (input, { callId, signal, recordDetails }) {
+					const { result, observed } = yield* files
+						.execute({ id: callId, name, arguments: input }, { abortSignal: signal })
+						.pipe(Effect.mapError(({ cause }) => codeModeError(cause)));
 					const text = result.content
 						.flatMap((item) => (item.type === "text" ? [item.text] : []))
 						.join("\n");
+					if (name === "write" || name === "edit") {
+						if (result.isError) {
+							return { text, isError: true } satisfies typeof FileMutationReceipt.Type;
+						}
+						if (!observed) {
+							return yield* new CodeModeError({
+								message:
+									"The file tool returned without a write receipt. Inspect the workspace before retrying.",
+							});
+						}
+						const { path, bytesWritten, change } = observed;
+						const details = { path, bytesWritten };
+						if (change) {
+							recordDetails(change);
+						}
+						return {
+							text: JSON.stringify(details),
+							isError: false,
+							details,
+						} satisfies typeof FileMutationReceipt.Type;
+					}
 					const details = yield* Schema.decodeUnknownEffect(Schema.Json)(result.details).pipe(
 						Effect.orElseSucceed(() => null),
 					);
@@ -245,10 +268,11 @@ export function workspaceToolset(workspace: Workspace) {
 			} satisfies CodeModeTool,
 		]),
 	);
-	const gitTools = workspaceGit(workspace);
+	const gitTools = workspaceGit(workspace, mutations);
 	const tools = Object.assign(fileTools, workspaceSkills(workspace));
 	const instructions = [
 		"Import named file tools from codemode:tools. Each takes an object and returns { text, isError, details? }. Check isError before using its result.",
+		"Successful write and edit calls both return details: { path, bytesWritten }.",
 		...files.tools.map(
 			({ name, description, parameters }) =>
 				`${name}: ${description}\nArguments: ${JSON.stringify(parameters)}`,

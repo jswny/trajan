@@ -11,7 +11,11 @@ export interface CodeModeTool {
 	readonly isError?: (value: Schema.Json) => boolean;
 	readonly run: (
 		input: Schema.Json,
-		context: { readonly callId: string; readonly signal: AbortSignal },
+		context: {
+			readonly callId: string;
+			readonly signal: AbortSignal;
+			readonly recordDetails: (details: Schema.Json) => void;
+		},
 	) => Effect.Effect<Schema.Json, CodeModeError>;
 }
 
@@ -21,6 +25,7 @@ export interface CodeModeActivity {
 	readonly status: "running" | "completed" | "failed" | "interrupted";
 	readonly input: Schema.Json;
 	readonly reply?: ToolReply;
+	readonly details?: Schema.Json;
 }
 
 interface RunOptions {
@@ -83,6 +88,7 @@ const Entry = Schema.Struct({
 	request: Schema.NonEmptyString,
 	replay: Schema.Literals(["safe", "unsafe"]),
 	reply: Schema.optionalKey(ToolReply),
+	details: Schema.optionalKey(boundedJson),
 });
 type Entry = typeof Entry.Type;
 const Run = Schema.Struct({
@@ -91,6 +97,7 @@ const Run = Schema.Struct({
 });
 type Run = typeof Run.Type;
 const decodeEntry = Schema.decodeUnknownOption(Schema.UndefinedOr(Entry));
+const decodeDetails = Schema.decodeUnknownOption(boundedJson);
 const decodeRun = Schema.decodeUnknownEffect(Schema.UndefinedOr(Run));
 
 function runPrefix(scope: string) {
@@ -206,15 +213,20 @@ export function createCodeMode(
 						input.module === "codemode:tools"
 							? input.name
 							: `${input.module.slice("codemode:".length)}.${input.name}`;
-					const publish = (status: CodeModeActivity["status"], reply?: ToolReply) =>
+					const publish = (
+						status: CodeModeActivity["status"],
+						reply?: ToolReply,
+						details?: Schema.Json,
+					) =>
 						options.onActivity?.({
 							id: callId,
 							name,
 							status,
 							input: input.input,
 							...(reply && { reply }),
+							...(details !== undefined && { details }),
 						}) ?? Effect.void;
-					const publishReply = (reply: ToolReply) =>
+					const publishReply = (reply: ToolReply, details?: Schema.Json) =>
 						publish(
 							reply.status === "returned"
 								? tool.isError?.(reply.value)
@@ -222,10 +234,11 @@ export function createCodeMode(
 									: "completed"
 								: reply.status,
 							reply,
+							details,
 						);
 					next++;
 					if (prior?.reply) {
-						yield* publishReply(prior.reply);
+						yield* publishReply(prior.reply, prior.details);
 						return prior.reply;
 					}
 
@@ -243,7 +256,16 @@ export function createCodeMode(
 						if (signal.aborted) {
 							return yield* Effect.interrupt;
 						}
-						const invoke = Effect.suspend(() => tool.run(input.input, { callId, signal }));
+						let details: Schema.Json | undefined;
+						const invoke = Effect.suspend(() =>
+							tool.run(input.input, {
+								callId,
+								signal,
+								recordDetails: (value) => {
+									details = Option.getOrUndefined(decodeDetails(value));
+								},
+							}),
+						);
 						// A provider may finish an unsafe action after abort. Keep ownership until it settles.
 						const scopedInvoke =
 							tool.replay === "safe"
@@ -266,9 +288,14 @@ export function createCodeMode(
 						if (!open || signal.aborted) {
 							return yield* Effect.interrupt;
 						}
-						storage.kv.put(callId, { ...entry, reply } satisfies Entry);
+						const checkpoint = {
+							...entry,
+							reply,
+							...(reply.status === "returned" && details !== undefined && { details }),
+						} satisfies Entry;
+						storage.kv.put(callId, checkpoint);
 						yield* flush;
-						yield* publishReply(reply);
+						yield* publishReply(reply, checkpoint.details);
 						return reply;
 					}).pipe(
 						Effect.ensuring(

@@ -10,7 +10,7 @@ import {
 	IconSquircleFill,
 } from "@pierre/icons/beta";
 import type { ToolActivity, ToolActivityPreview } from "@trajan/harness";
-import { useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserViewer } from "./browser-view";
 import { ChatMarkdown, ToolCode } from "./chat-markdown";
@@ -22,6 +22,7 @@ import "./styles.css";
 
 /** How close to the bottom (px) still counts as "at the bottom". */
 const BOTTOM_THRESHOLD = 32;
+const FileDiff = lazy(() => import("./file-diff"));
 
 function ChatSettingsMenu() {
 	const [mode, setMode] = useAtom(themePreference);
@@ -186,7 +187,13 @@ function ToolActivityRow({
 	onInspect: () => void;
 }) {
 	const [open, setOpen] = useState(false);
-	const { name, status, input, output } = entry;
+	const { name, status, input, output, fileChange } = entry;
+	const previews = (
+		<>
+			{input ? <ToolActivityDetail label="Arguments" preview={input} /> : null}
+			{output ? <ToolActivityDetail label="Result" preview={output} /> : null}
+		</>
+	);
 	const heading = (
 		<>
 			<span className="min-w-0 flex-1 truncate font-medium">{name}</span>
@@ -195,7 +202,7 @@ function ToolActivityRow({
 			</span>
 		</>
 	);
-	return input || output ? (
+	return input || output || fileChange ? (
 		<details
 			className="group/call rounded-(--chat-inset-radius) border border-transparent open:border-line"
 			onToggle={(event) => setOpen(event.currentTarget.open)}
@@ -213,8 +220,47 @@ function ToolActivityRow({
 			</summary>
 			{open ? (
 				<div className="space-y-3 px-2.5 pb-2.5">
-					{input ? <ToolActivityDetail label="Arguments" preview={input} /> : null}
-					{output ? <ToolActivityDetail label="Result" preview={output} /> : null}
+					{fileChange ? (
+						<section
+							aria-label="File changes"
+							className="max-h-56 min-w-0 overflow-auto rounded-(--chat-inset-radius) bg-canvas [--diffs-font-size:0.75rem]"
+						>
+							{fileChange.diff ? (
+								<Suspense
+									fallback={<p className="px-2.5 py-2 text-xs text-muted">Loading diff…</p>}
+								>
+									<FileDiff patch={fileChange.diff} />
+								</Suspense>
+							) : (
+								<div className="space-y-1 px-2.5 py-2 text-xs">
+									<p className="font-mono wrap-anywhere">{fileChange.path}</p>
+									<p className="text-muted">
+										{fileChange.kind === "unchanged"
+											? "No content changes"
+											: "Diff preview unavailable"}
+									</p>
+								</div>
+							)}
+						</section>
+					) : null}
+					{status === "interrupted" && (name === "write" || name === "edit") ? (
+						<p className="text-xs text-muted">
+							The file may have changed before the call was interrupted.
+						</p>
+					) : null}
+					{fileChange && (input || output) ? (
+						<details>
+							<summary
+								className="w-fit cursor-pointer rounded-(--chat-inset-radius) px-2.5 py-1.5 text-xs text-muted hover:bg-hover focus-visible:outline-2 focus-visible:outline-focus-ring"
+								onClick={onInspect}
+							>
+								Arguments and receipt
+							</summary>
+							<div className="mt-2 space-y-3">{previews}</div>
+						</details>
+					) : (
+						previews
+					)}
 				</div>
 			) : null}
 		</details>

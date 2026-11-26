@@ -31,6 +31,7 @@ type PausePoint =
 	| "waiting-for-restart"
 	| "after-commit"
 	| "during-replay-read"
+	| "during-replay-write"
 	| "during-replay-edit"
 	| "during-replay-git"
 	| "code-mode-read"
@@ -41,11 +42,14 @@ type PausePoint =
 const workspaceFile = "/workspace/turn.txt";
 const replayPrompt = "Replay two reads.";
 const replayCall = "exec-replay";
+const writeReplayPrompt = "Recover an interrupted write.";
 const editReplayPrompt = "Recover an interrupted edit.";
 const editReplayCall = "exec-replay-edit";
 const gitReplayPrompt = "Recover interrupted Git branch creation.";
 const gitReplayCall = "exec-replay-git";
 const scheduledPrompt = "Check the workspace on schedule.";
+const diffPrompt = "Show file diffs.";
+const recoverDiffPrompt = "Recover file diffs.";
 const decodeSubmission = Schema.decodeUnknownOption(TurnSubmission);
 export function appendExecInput(text: string) {
 	return {
@@ -157,6 +161,7 @@ export class ChatTestObject extends TrajanChatObject {
 			catalog: {
 				"codemode:tools": {
 					...files,
+					write: pauseAfter(files.write, "during-replay-write"),
 					edit: pauseAfter(files.edit, "during-replay-edit"),
 					read_first: read("first"),
 					read_second: read("second"),
@@ -246,6 +251,25 @@ export class ChatTestObject extends TrajanChatObject {
 		if (last?.role === "user" && last.text.startsWith("Remember ")) {
 			return { role: "assistant", text: `Remembering ${last.text.slice("Remember ".length)}` };
 		}
+		if (last?.role === "user" && (last.text === diffPrompt || last.text === recoverDiffPrompt)) {
+			return {
+				role: "tool-call",
+				id: "exec-file-diffs",
+				name: "exec",
+				input: {
+					code: `import { edit, write, wait_for_restart } from "codemode:tools";
+export default async function () {
+  const path = "/workspace/report.ts";
+  const written = await write({ path, content: 'export const report = {\\n  title: "Weekly brief",\\n  ready: false,\\n};\\n' });
+  if (written.isError) throw new Error(written.text);
+  const edited = await edit({ path, edits: [{ oldText: "ready: false", newText: "ready: true" }] });
+  if (edited.isError) throw new Error(edited.text);
+  ${last.text === recoverDiffPrompt ? "await wait_for_restart();" : ""}
+  return [written, edited];
+}`,
+				},
+			};
+		}
 		if (
 			last?.role === "user" &&
 			(last.text === "Save the weekly brief skill." || last.text === "Use the weekly brief skill.")
@@ -317,6 +341,30 @@ export default async function () {
   const result = await read({ path });
   if (result.isError) throw new Error(result.text);
   return { edit: outcome, text: result.text };
+}`,
+				},
+			};
+		}
+		if (last?.role === "user" && last.text === writeReplayPrompt) {
+			return {
+				role: "tool-call",
+				id: "exec-replay-write",
+				name: "exec",
+				input: {
+					code: `import { read, write } from "codemode:tools";
+export default async function () {
+  const path = ${JSON.stringify(workspaceFile)};
+  let outcome = "completed";
+  try {
+    const written = await write({ path, content: "written before the restart" });
+    if (written.isError) throw new Error(written.text);
+  } catch (error) {
+    if (error.code !== "interrupted") throw error;
+    outcome = error.code;
+  }
+  const file = await read({ path });
+  if (file.isError) throw new Error(file.text);
+  return { outcome, text: file.text };
 }`,
 				},
 			};
@@ -440,6 +488,9 @@ export default async function () {
 			return { role: "assistant", text: earlier.map(({ text }) => text).join(", ") || "None." };
 		}
 		if (last?.role === "tool") {
+			if (last.callId === "exec-file-diffs" && last.result.status === "completed") {
+				return { role: "assistant", text: "Updated the report." };
+			}
 			if (user?.text === "Retry after append.") {
 				const alreadyFailed = yield* Effect.promise(() =>
 					this.ctx.storage.get<boolean>("retry-once"),

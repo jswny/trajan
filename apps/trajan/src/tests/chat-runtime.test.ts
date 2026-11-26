@@ -4,8 +4,9 @@ import { ToolResult, TurnMessage, TurnTranscript, toolPreviewBytes } from "@traj
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../chat/protocol";
-import { readToolActivity, toolActivity } from "../chat/tool-activity";
+import { readToolActivity, toolActivity, toolActivityKey } from "../chat/tool-activity";
 import { nextWeeklyRun } from "../turn-schedules";
+import { FileMutationReceipt } from "../workspace-file-changes";
 import { appendExecInput, skillExecInput } from "./chat-runtime-fixture";
 import {
 	compactReference,
@@ -705,6 +706,15 @@ test("replay reports an interrupted file edit and continues with a check of the 
 							status: "completed",
 							output: { edit: "interrupted", text: "seed!" },
 							activity: expect.arrayContaining([
+								expect.objectContaining({
+									name: "write",
+									status: "completed",
+									fileChange: {
+										path: "/workspace/turn.txt",
+										kind: "added",
+										diff: expect.stringContaining("+seed"),
+									},
+								}),
 								expect.objectContaining({ name: "edit", status: "interrupted" }),
 								expect.objectContaining({ name: "read", status: "completed" }),
 							]),
@@ -716,6 +726,83 @@ test("replay reports an interrupted file edit and continues with a check of the 
 		});
 	expect((await stub.state()).text).toBe("seed!");
 	expect(await readJournal()).toEqual([]);
+});
+
+test("rebuilds both file diffs from completed call checkpoints after a restart", async () => {
+	let stub = openFixture();
+	const { runId } = await submit(stub, { id: "file-diffs", prompt: "Recover file diffs." });
+	await expect.poll(() => stub.state()).toMatchObject({ pausedAt: "waiting-for-restart" });
+	const before = await runInDurableObject(stub, (_, { storage }) => {
+		const snapshot = readToolActivity(storage, runId);
+		storage.kv.delete(toolActivityKey(runId));
+		return snapshot?.activity;
+	});
+	const changes = before?.filter((entry) => entry.name === "write" || entry.name === "edit");
+	expect(changes).toMatchObject([
+		{
+			name: "write",
+			fileChange: { kind: "added", diff: expect.stringContaining("+  ready: false,") },
+		},
+		{
+			name: "edit",
+			fileChange: {
+				kind: "modified",
+				diff: expect.stringContaining("-  ready: false,\n+  ready: true,"),
+			},
+		},
+	]);
+
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
+	await runDurableObjectAlarm(stub);
+	await expect.poll(() => readTurn(stub, runId)).toMatchObject({ state: "completed" });
+	const message = (await readTurn(stub, runId)).result?.messages.find(
+		({ role }) => role === "tool",
+	);
+	if (message?.role !== "tool" || message.result.status !== "completed") {
+		throw new Error("Expected a completed exec");
+	}
+	expect(message.result.activity?.slice(0, 2)).toEqual(changes);
+	const receipts = Schema.decodeUnknownSync(Schema.Array(FileMutationReceipt))(
+		message.result.output,
+	);
+	expect(receipts).toMatchObject([
+		{ isError: false, details: { path: "/workspace/report.ts", bytesWritten: 68 } },
+		{ isError: false, details: { path: "/workspace/report.ts", bytesWritten: 67 } },
+	]);
+	expect(message.result.output).toEqual(receipts);
+});
+
+test("keeps a write interrupted when the file changed before its result checkpoint", async () => {
+	let stub = openFixture();
+	await stub.pause("during-replay-write");
+	const { runId } = await submit(stub, {
+		id: "write-replay",
+		prompt: "Recover an interrupted write.",
+	});
+	await expect
+		.poll(() => stub.state())
+		.toMatchObject({
+			pausedAt: "during-replay-write",
+			text: "written before the restart",
+		});
+
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	stub = env.CHAT_TEST.get(stub.id);
+	await runDurableObjectAlarm(stub);
+	await expect.poll(() => readTurn(stub, runId)).toMatchObject({ state: "completed" });
+	const message = (await readTurn(stub, runId)).result?.messages.find(
+		(message) => message.role === "tool",
+	);
+	expect(message?.result).toMatchObject({
+		status: "completed",
+		output: { outcome: "interrupted", text: "written before the restart" },
+		activity: [
+			{ name: "write", status: "interrupted" },
+			{ name: "read", status: "completed" },
+		],
+	});
+	expect(message?.result.activity?.[0]).not.toHaveProperty("fileChange");
 });
 
 test("Git replay reports interrupted branch creation and continues with a status check", async () => {
