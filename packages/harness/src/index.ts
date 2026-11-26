@@ -54,7 +54,18 @@ export const ToolActivity = Schema.Struct({
 	output: Schema.optionalKey(ToolActivityPreview),
 	fileChange: Schema.optionalKey(FileChange),
 });
-const toolActivityFields = { activity: Schema.optionalKey(Schema.Array(ToolActivity)) };
+const EffectSummary = Schema.Struct({
+	name: ToolActivity.fields.name,
+	message: Schema.NonEmptyString.check(Schema.isMaxLength(toolPreviewBytes)),
+});
+export const UncertainToolEffect = Schema.Struct({
+	id: ToolActivity.fields.id,
+	...EffectSummary.fields,
+});
+const toolActivityFields = {
+	activity: Schema.optionalKey(Schema.Array(ToolActivity)),
+	uncertainEffects: Schema.optionalKey(Schema.Array(UncertainToolEffect)),
+};
 export const ToolContent = Schema.Array(
 	Schema.Union([
 		Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
@@ -101,6 +112,7 @@ export const RuntimeOutcome = Schema.Struct({
 	status: TurnNotice.fields.status,
 	text: Schema.String,
 	request: Schema.String,
+	uncertainEffects: Schema.optionalKey(Schema.Array(EffectSummary)),
 	tools: Schema.Array(
 		Schema.Struct({
 			name: ToolActivity.fields.name,

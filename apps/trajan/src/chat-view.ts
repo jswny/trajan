@@ -1,5 +1,5 @@
 import { ToolContent } from "@trajan/harness";
-import type { ToolActivity, ToolCall, ToolResult } from "@trajan/harness";
+import type { ToolActivity, ToolCall, ToolResult, UncertainToolEffect } from "@trajan/harness";
 import { Schema } from "effect";
 import type { ChatPage } from "./chat/protocol";
 
@@ -21,6 +21,7 @@ export type ChatTool = {
 		readonly status: (typeof ToolResult.Type)["status"];
 		readonly format: "json" | "text";
 		readonly content: typeof ToolContent.Type;
+		readonly uncertainEffects?: ReadonlyArray<typeof UncertainToolEffect.Type>;
 	};
 };
 
@@ -74,6 +75,7 @@ export function chatTool(
 			status: result.status,
 			format: result.status === "completed" && decoded?._tag !== "Some" ? "json" : "text",
 			content,
+			...(result.uncertainEffects && { uncertainEffects: result.uncertainEffects }),
 		},
 	};
 }

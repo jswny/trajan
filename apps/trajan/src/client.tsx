@@ -84,7 +84,8 @@ function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => 
 		.map((part) => part.text)
 		.join("\n");
 	const images = result?.content.filter((part) => part.type === "image") ?? [];
-	const failed = result?.status === "failed" || result?.status === "unknown";
+	const uncertain = (result?.uncertainEffects?.length ?? 0) > 0;
+	const failed = result?.status === "failed" || result?.status === "unknown" || uncertain;
 	const step = !result && activity.at(-1);
 	return (
 		<details
@@ -100,7 +101,7 @@ function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => 
 					{step ? <span className="truncate text-muted">{step.name}</span> : null}
 				</span>
 				<span className="chat-badge" data-tone={failed ? "danger" : undefined}>
-					{result ? toolResultLabel[result.status] : "Running"}
+					{uncertain ? "Outcome unknown" : result ? toolResultLabel[result.status] : "Running"}
 				</span>
 				<IconChevron
 					size={12}
@@ -109,6 +110,14 @@ function ToolCard({ message, onInspect }: { message: ChatTool; onInspect: () => 
 				/>
 			</summary>
 			<div className="space-y-3 border-t border-line px-3 py-3">
+				{result?.uncertainEffects?.map(({ id, name, message }) => (
+					<p
+						key={id}
+						className="wrap-anywhere rounded-(--chat-inset-radius) bg-danger/10 px-2.5 py-2 text-xs text-danger"
+					>
+						{name}. {message}
+					</p>
+				))}
 				{open && activity.length > 0 ? (
 					<ToolActivityList activity={activity} onInspect={onInspect} />
 				) : null}
@@ -253,11 +262,6 @@ function ToolActivityRow({
 								</div>
 							)}
 						</section>
-					) : null}
-					{status === "interrupted" && (name === "write" || name === "edit") ? (
-						<p className="text-xs text-muted">
-							The file may have changed before the call was interrupted.
-						</p>
 					) : null}
 					{fileChange && (input || output) ? (
 						<details>

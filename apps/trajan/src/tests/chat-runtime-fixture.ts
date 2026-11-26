@@ -20,6 +20,7 @@ import {
 	compactResumePrompt,
 	compactSetupPrompt,
 	createOpenAiResponsesFixture,
+	remotePushRecoveryPrompt,
 	scheduleOutcomePrompt,
 } from "./openai-responses-fixture";
 
@@ -37,6 +38,7 @@ type PausePoint =
 	| "during-replay-delete"
 	| "reject-atomic-write"
 	| "during-replay-git"
+	| "during-remote-push"
 	| "during-replay-schedule"
 	| "code-mode-read"
 	| "code-mode-edit"
@@ -219,6 +221,21 @@ export class ChatTestObject extends TrajanChatObject {
 					},
 					"codemode:git": {
 						...git,
+						push: {
+							...git.push,
+							run: (_input, { signal }) =>
+								Effect.tryPromise({
+									try: async () => {
+										storage.kv.put(
+											"git-push-attempts",
+											(storage.kv.get<number>("git-push-attempts") ?? 0) + 1,
+										);
+										await this.#pauseAt("during-remote-push", signal);
+										return null;
+									},
+									catch: codeModeError,
+								}),
+						},
 						branch: {
 							...branch,
 							run: (input, context) =>
@@ -637,6 +654,7 @@ export default async function () {
 					if (
 						user?.text === compactSetupPrompt ||
 						user?.text === compactResumePrompt ||
+						user?.text === remotePushRecoveryPrompt ||
 						user?.text === scheduleOutcomePrompt
 					) {
 						return this.#responses.stream(messages, options);

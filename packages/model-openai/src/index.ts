@@ -106,7 +106,9 @@ function transportError(cause: unknown) {
 	});
 }
 
-function toolOutput(result: Extract<History[number], { role: "tool" }>["result"]) {
+type FunctionToolResult = Extract<History[number], { role: "tool" }>["result"];
+
+function scriptOutput(result: FunctionToolResult) {
 	if (result.status !== "completed") {
 		return JSON.stringify({ status: result.status, message: result.message });
 	}
@@ -123,6 +125,20 @@ function toolOutput(result: Extract<History[number], { role: "tool" }>["result"]
 				}
 			: { type: "input_text", text: part.text },
 	);
+}
+
+function toolOutput(result: FunctionToolResult) {
+	const output = scriptOutput(result);
+	if (!result.uncertainEffects?.length) {
+		return output;
+	}
+	return [
+		{
+			type: "input_text",
+			text: `Trajan runtime reported uncertain effects\n${JSON.stringify(result.uncertainEffects.map(({ name, message }) => ({ name, message })))}`,
+		},
+		...(typeof output === "string" ? [{ type: "input_text", text: output }] : output),
+	];
 }
 
 function compactWindow(items: ReadonlyArray<Item>) {

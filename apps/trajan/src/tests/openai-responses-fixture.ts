@@ -7,6 +7,19 @@ export const compactSetupPrompt = "Prepare the compacted reference.";
 export const compactResumePrompt = "Recall the compacted reference and save it using exec.";
 export const compactReference = "amber-heron-795";
 export const scheduleOutcomePrompt = "What happened to the scheduled workspace check?";
+export const remotePushRecoveryPrompt = "Recover the interrupted remote push.";
+export const remotePushRecoveryCode = `import { push } from "codemode:git";
+import { read_first } from "codemode:tools";
+export default async function () {
+  try {
+    await push({ dir: "/workspace/repo", remote: "upstream", remoteRef: "refs/heads/review" });
+  } catch (error) {
+    if (error.code !== "interrupted") throw error;
+  }
+  for (let index = 0; index < 9; index++) await read_first();
+  return "script finished";
+}`;
+const remotePushCallId = "call_remote_push";
 const compaction = { type: "compaction", encrypted_content: "opaque-fixture-compaction" };
 const betweenCallAndOutput = {
 	type: "compaction",
@@ -57,6 +70,32 @@ export function createOpenAiResponsesFixture(
 				const last = input.at(-1);
 				if (last?.content === compactSetupPrompt) {
 					return sseResponse([assistant("Reference saved."), compaction], "Reference saved.");
+				}
+				if (last?.content === remotePushRecoveryPrompt) {
+					return sseResponse([
+						{
+							type: "function_call",
+							name: "exec",
+							call_id: remotePushCallId,
+							arguments: JSON.stringify({ code: remotePushRecoveryCode }),
+						},
+					]);
+				}
+				if (last?.type === "function_call_output" && last.call_id === remotePushCallId) {
+					const parts = Schema.decodeUnknownSync(
+						Schema.Array(
+							Schema.Struct({ type: Schema.Literal("input_text"), text: Schema.String }),
+						),
+					)(last.output);
+					if (
+						!parts[0]?.text.startsWith("Trajan runtime reported uncertain effects") ||
+						!parts[0].text.includes("refs/heads/review") ||
+						!parts[0].text.includes("upstream") ||
+						parts[1]?.text !== JSON.stringify("script finished")
+					) {
+						throw new Error("Expected remote uncertainty and the original script output.");
+					}
+					return sseResponse([assistant("Verify the remote branch before retrying the push.")]);
 				}
 				if (input[0]?.encrypted_content !== compaction.encrypted_content) {
 					throw new Error("Expected the durable compaction item at the start of the request.");

@@ -12,6 +12,7 @@ import {
 	readToolActivity,
 	recordExecution,
 	toolActivity,
+	uncertainToolEffects,
 	writeToolActivity,
 } from "./tool-activity";
 
@@ -95,7 +96,15 @@ export function createChatTools(
 						onFailure: ({ message }) => unknownOutcome(message),
 					}),
 				);
-			return recent.length > 0 ? { ...result, activity: markInterrupted(recent) } : result;
+			const uncertainEffects = yield* Effect.try({
+				try: () => uncertainToolEffects(codeMode.readExecution(executionId, runId).calls),
+				catch: executionError,
+			});
+			return {
+				...result,
+				...(recent.length > 0 && { activity: markInterrupted(recent) }),
+				...(uncertainEffects.length > 0 && { uncertainEffects }),
+			};
 		},
 		Effect.catch((error) =>
 			Effect.succeed(
@@ -119,9 +128,18 @@ export function createChatTools(
 				const result = saved.result
 					? { status: "completed" as const, output: saved.result.value }
 					: unknownOutcome("The script ended without a completed result.");
+				const uncertainEffects = uncertainToolEffects(calls);
 				return [
 					{ role: "tool-call", id: callId, name: Exec.name, input: { code: saved.source } },
-					{ role: "tool", callId, result: { ...result, activity: calls.map(toolActivity) } },
+					{
+						role: "tool",
+						callId,
+						result: {
+							...result,
+							activity: calls.map(toolActivity),
+							...(uncertainEffects.length > 0 && { uncertainEffects }),
+						},
+					},
 				];
 			});
 		},

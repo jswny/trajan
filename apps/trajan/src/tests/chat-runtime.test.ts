@@ -12,6 +12,7 @@ import {
 	compactReference,
 	compactResumePrompt,
 	compactSetupPrompt,
+	remotePushRecoveryPrompt,
 	scheduleOutcomePrompt,
 } from "./openai-responses-fixture";
 
@@ -26,6 +27,52 @@ const toolCall = {
 const completedTool = { status: "completed", output: "hello" };
 const unknownMessage = expect.stringContaining("Inspect it before repeating the action.");
 const unknownTool = { status: "unknown", message: unknownMessage };
+
+test("a recovered exec reports an interrupted push even after its activity preview rolls off", async () => {
+	let stub = openFixture();
+	const { instance } = await stub.state();
+	await stub.pause("during-remote-push");
+	const { runId } = await submit(stub, { id: "recover-push", prompt: remotePushRecoveryPrompt });
+	await expect.poll(() => stub.state()).toMatchObject({ pausedAt: "during-remote-push" });
+	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+	stub = await waitForRestart(stub, instance);
+	await runDurableObjectAlarm(stub);
+	await expect
+		.poll(() => readTurn(stub, runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: remotePushRecoveryPrompt },
+					{ role: "tool-call", id: "call_remote_push" },
+					{
+						role: "tool",
+						result: {
+							status: "completed",
+							output: "script finished",
+							uncertainEffects: [
+								{
+									name: "git.push",
+									message: expect.stringContaining(
+										'Verify ref "refs/heads/review" on remote "upstream"',
+									),
+								},
+							],
+						},
+					},
+					{ role: "assistant", text: "Verify the remote branch before retrying the push." },
+				],
+			},
+		});
+	const run = await readTurn(stub, runId);
+	const tool = run.result?.messages.find((message) => message.role === "tool");
+	expect(tool?.result.activity?.map(({ name }) => name)).toEqual(
+		Array.from({ length: 8 }, () => "read_first"),
+	);
+	expect(
+		await runInDurableObject(stub, (_, { storage }) => storage.kv.get("git-push-attempts")),
+	).toBe(1);
+});
 
 test("bounds tool previews without splitting multibyte text and summarizes image data", () => {
 	const input = `a${"📝".repeat(toolPreviewBytes)}`;

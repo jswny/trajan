@@ -549,6 +549,34 @@ test("replay completes Git branch creation after a reset before commit", async (
 	await expect(calls.filter({ hasText: /git\.status.*Succeeded/ })).toBeVisible();
 });
 
+test("shows an unknown remote outcome after an exec catches the interruption", async ({ page }) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/pause-remote-push`)).status()).toBe(204);
+	await composer.fill("Recover the interrupted remote push.");
+	await composer.press("Enter");
+	await expect
+		.poll(async () => {
+			const response = await page.request.post(`${control}/state`);
+			return Schema.decodeUnknownSync(
+				Schema.Struct({ pausedAt: Schema.optionalKey(Schema.String) }),
+			)(await response.json()).pausedAt;
+		})
+		.toBe("during-remote-push");
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await page.reload();
+	const card = toolCards(page).last();
+	await expect(card.getByText("Outcome unknown", { exact: true })).toBeVisible();
+	await card.locator(":scope > summary").click();
+	await expect(
+		card.getByText(/Remote outcome unknown.*refs\/heads\/review.*upstream/),
+	).toBeVisible();
+	await expect(
+		page
+			.getByRole("main")
+			.getByText("Verify the remote branch before retrying the push.", { exact: true }),
+	).toBeVisible();
+});
+
 test("stops the active reply and continues a follow-up submitted from another tab", async ({
 	page,
 	context,

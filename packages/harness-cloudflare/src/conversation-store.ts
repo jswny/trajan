@@ -235,7 +235,7 @@ export class ConversationStore {
 				if (message.role !== "notice") {
 					return [];
 				}
-				const tools = this.storage.sql
+				const results = this.storage.sql
 					.exec(
 						"SELECT message FROM harness_entries WHERE submission_seq = ? AND role = 'tool' ORDER BY seq",
 						row.submission_seq,
@@ -243,14 +243,21 @@ export class ConversationStore {
 					.toArray()
 					.flatMap((raw) => {
 						const entry = Schema.decodeSync(messageJson)(decodeMessage(raw).message);
-						return entry.role === "tool"
-							? (entry.result.activity ?? []).map(({ name, status, fileChange }) => ({
-									name,
-									status,
-									...(fileChange && { path: fileChange.path.slice(0, 256) }),
-								}))
-							: [];
-					})
+						return entry.role === "tool" ? [entry.result] : [];
+					});
+				const tools = results
+					.flatMap(({ activity }) =>
+						(activity ?? []).map(({ name, status, fileChange }) => ({
+							name,
+							status,
+							...(fileChange && { path: fileChange.path.slice(0, 256) }),
+						})),
+					)
+					.slice(-12);
+				const uncertainEffects = results
+					.flatMap(({ uncertainEffects }) =>
+						(uncertainEffects ?? []).map(({ name, message }) => ({ name, message })),
+					)
 					.slice(-12);
 				return [
 					{
@@ -259,6 +266,7 @@ export class ConversationStore {
 						text: message.text.slice(0, 512),
 						request: row.prompt.slice(0, 512),
 						tools,
+						...(uncertainEffects.length > 0 && { uncertainEffects }),
 					} satisfies typeof RuntimeOutcome.Type,
 				];
 			}),
