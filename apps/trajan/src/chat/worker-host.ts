@@ -20,7 +20,7 @@ import type {
 	ChatToolInfo,
 	ChatToolPreview,
 } from "./protocol";
-import { clearToolState } from "./tool-activity";
+import { clearToolState, RECENT_TOOL_CALLS } from "./tool-activity";
 
 const chatEventJson = Schema.encodeSync(Schema.fromJsonString(ChatEvent));
 const chatTag = "chat";
@@ -99,9 +99,16 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 				}
 				break;
 			}
-			case "tool-result":
-				this.#publishTool(draft, { call: event.call, activity: [], result: event.result });
+			case "tool-result": {
+				const { result } = event;
+				const activity = result.activity?.slice(-RECENT_TOOL_CALLS);
+				this.#publishTool(draft, {
+					call: event.call,
+					activity: [],
+					result: { ...result, ...(activity && { activity }) },
+				});
 				break;
+			}
 			case "text-delta":
 				this.#draft = { ...draft, text: draft.text + event.text };
 				this.#broadcast({ ...event, runId });

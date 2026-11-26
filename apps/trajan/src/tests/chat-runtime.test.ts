@@ -5,7 +5,7 @@ import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/harness";
 import { Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../chat/protocol";
-import { readToolActivity, toolActivity, toolActivityKey } from "../chat/tool-activity";
+import { toolActivity } from "../chat/tool-activity";
 import { nextWeeklyRun } from "../turn-schedules";
 import { FileMutationReceipt } from "../workspace-file-changes";
 import { appendExecInput, skillExecInput } from "./chat-runtime-fixture";
@@ -29,7 +29,7 @@ const completedTool = { status: "completed", output: "hello" };
 const unknownMessage = expect.stringContaining("Inspect it before repeating the action.");
 const unknownTool = { status: "unknown", message: unknownMessage };
 
-test("a recovered exec reports an interrupted push even after its activity preview rolls off", async () => {
+test("a recovered exec retains a push that aged out of the live preview", async () => {
 	let stub = openFixture();
 	const { instance } = await stub.state();
 	await stub.pause("during-remote-push");
@@ -67,9 +67,10 @@ test("a recovered exec reports an interrupted push even after its activity previ
 		});
 	const run = await readTurn(stub, runId);
 	const tool = run.result?.messages.find((message) => message.role === "tool");
-	expect(tool?.result.activity?.map(({ name }) => name)).toEqual(
-		Array.from({ length: 8 }, () => "read_first"),
-	);
+	expect(tool?.result.activity?.map(({ name }) => name)).toEqual([
+		"git.push",
+		...Array.from({ length: 9 }, () => "read_first"),
+	]);
 	expect(
 		await runInDurableObject(stub, (_, { storage }) => storage.kv.get("git-push-attempts")),
 	).toBe(1);
@@ -949,9 +950,6 @@ test("a read-only exec replays a completed call and retries an interrupted call 
 			},
 		});
 	expect(await stub.state()).toMatchObject({ text: "" });
-	expect(
-		await runInDurableObject(stub, (_, { storage }) => readToolActivity(storage, runId)),
-	).toBeUndefined();
 });
 
 test("stopping a turn archives its committed write even without live tool activity", async () => {
@@ -962,7 +960,6 @@ test("stopping a turn archives its committed write even without live tool activi
 	if (executionId === undefined) {
 		throw new Error("Expected the active Computer execution ID");
 	}
-	await runInDurableObject(stub, (_, { storage }) => storage.kv.delete(toolActivityKey(runId)));
 	expect(await stub.stop(runId)).toEqual({ runId, stopped: true });
 	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "cancelled" });
 	expect((await stub.state()).text).toBe("once");
@@ -998,9 +995,6 @@ test("stopping a turn archives its committed write even without live tool activi
 		},
 		{ role: "notice", status: "cancelled", text: "Stopped" },
 	]);
-	expect(
-		await runInDurableObject(restarted, (_, { storage }) => readToolActivity(storage, runId)),
-	).toBeUndefined();
 	expect(
 		await runInDurableObject(restarted, (_, { storage }) =>
 			Array.from(storage.kv.list({ prefix: `code-mode:${encodeURIComponent(runId)}:` })),
@@ -1130,12 +1124,11 @@ test("rebuilds both file diffs from completed call checkpoints after a restart",
 	let stub = openFixture();
 	const { runId } = await submit(stub, { id: "file-diffs", prompt: "Recover file diffs." });
 	await expect.poll(() => stub.state()).toMatchObject({ pausedAt: "waiting-for-restart" });
-	const before = await runInDurableObject(stub, (_, { storage }) => {
-		const snapshot = readToolActivity(storage, runId);
-		storage.kv.delete(toolActivityKey(runId));
-		return snapshot?.activity;
-	});
-	const changes = before?.filter((entry) => entry.name === "write" || entry.name === "edit");
+	const before = (await stub.readSettledTools(runId)).find(({ role }) => role === "tool");
+	const changes =
+		before?.role === "tool"
+			? before.result.activity?.filter((entry) => entry.name === "write" || entry.name === "edit")
+			: undefined;
 	expect(changes).toMatchObject([
 		{
 			name: "write",

@@ -3,16 +3,11 @@ import type { CodeModeActivity } from "@trajan/code-mode";
 import { ToolContent } from "@trajan/harness";
 import type { UncertainToolEffect } from "@trajan/harness";
 import { Option, Schema } from "effect";
-import { FileChange, FilePreview, ToolActivity, toolPreviewBytes } from "./tool-presentation";
-import type { ToolActivityPreview } from "./tool-presentation";
+import { FileChange, FilePreview, toolPreviewBytes } from "./tool-presentation";
+import type { ToolActivity, ToolActivityPreview } from "./tool-presentation";
 
 export const RECENT_TOOL_CALLS = 8;
 
-const ExecutionActivity = Schema.Struct({
-	executionId: Schema.NonEmptyString,
-	activity: Schema.Array(ToolActivity).check(Schema.isMaxLength(RECENT_TOOL_CALLS)),
-});
-const decodeActivity = Schema.decodeUnknownSync(Schema.UndefinedOr(ExecutionActivity));
 const decodeContent = Schema.decodeUnknownOption(ToolContent);
 const decodeFileChange = Schema.decodeUnknownOption(FileChange);
 const decodeFilePreview = Schema.decodeUnknownOption(FilePreview);
@@ -94,10 +89,6 @@ export function uncertainToolEffects(calls: ReadonlyArray<CodeModeActivity>) {
 	);
 }
 
-export function toolActivityKey(runId: string) {
-	return `chat-tool-activity:${runId}`;
-}
-
 const executionsKey = (runId: string) => `chat-tool-executions:${runId}`;
 const decodeExecutions = Schema.decodeUnknownSync(
 	Schema.UndefinedOr(
@@ -124,19 +115,6 @@ export function recordExecution(
 }
 
 export function clearToolState(storage: DurableObjectStorage, runId: string) {
-	storage.kv.delete(toolActivityKey(runId));
 	storage.kv.delete(executionsKey(runId));
 	clearCodeModeRun(storage, runId);
-}
-
-export function readToolActivity(storage: DurableObjectStorage, runId: string) {
-	return decodeActivity(storage.kv.get(toolActivityKey(runId)));
-}
-
-export function writeToolActivity(
-	storage: DurableObjectStorage,
-	runId: string,
-	snapshot: typeof ExecutionActivity.Type,
-) {
-	storage.kv.put(toolActivityKey(runId), snapshot);
 }

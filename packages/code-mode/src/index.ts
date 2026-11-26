@@ -356,10 +356,11 @@ export function createCodeMode(
 						reply?: ToolReply,
 						details?: Schema.Json,
 					) =>
-						Effect.suspend(
-							() =>
-								options.onActivity?.(activity(callId, input, status, reply, details)) ??
-								Effect.void,
+						Effect.suspend(() =>
+							input.module === runtimeModule
+								? Effect.void
+								: (options.onActivity?.(activity(callId, input, status, reply, details)) ??
+									Effect.void),
 						).pipe(
 							Effect.catchCauseIf(
 								(cause) => !Cause.hasInterruptsOnly(cause),

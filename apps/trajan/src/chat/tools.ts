@@ -1,19 +1,16 @@
 import { createCodeMode, describeTools } from "@trajan/code-mode";
-import type { CodeModeTool } from "@trajan/code-mode";
+import type { CodeModeActivity, CodeModeTool } from "@trajan/code-mode";
 import { completedToolResult, TurnIoError } from "@trajan/harness";
 import type { ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
 import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
 import { scheduleInstructions } from "../turn-schedules";
-import { codeModeError } from "../workspace";
 import {
 	RECENT_TOOL_CALLS,
 	readExecutions,
-	readToolActivity,
 	recordExecution,
 	toolActivity,
 	uncertainToolEffects,
-	writeToolActivity,
 } from "./tool-activity";
 import type { ToolActivity } from "./tool-presentation";
 
@@ -35,10 +32,12 @@ function unknownOutcome(message: string): Extract<typeof ToolResult.Type, { stat
 	};
 }
 
-function markInterrupted(activity: ReadonlyArray<typeof ToolActivity.Type>) {
-	return activity.map((entry) =>
-		entry.status === "running" ? { ...entry, status: "interrupted" as const } : entry,
-	);
+function settledActivity(calls: ReadonlyArray<CodeModeActivity>) {
+	const uncertainEffects = uncertainToolEffects(calls);
+	return {
+		...(calls.length > 0 && { activity: calls.map(toolActivity) }),
+		...(uncertainEffects.length > 0 && { uncertainEffects }),
+	};
 }
 
 export function createChatTools(
@@ -66,36 +65,18 @@ export function createChatTools(
 				try: () => recordExecution(storage, runId, executionId, call.id),
 				catch: executionError,
 			});
-			const saved = yield* Effect.try({
-				try: () => readToolActivity(storage, runId),
-				catch: executionError,
-			}).pipe(
-				Effect.catch((error) =>
-					Effect.logWarning("Could not read live tool activity", error).pipe(Effect.as(undefined)),
-				),
-			);
-			let recent = saved?.executionId === executionId ? markInterrupted(saved.activity) : [];
-			if (recent.length > 0) {
-				yield* publishActivity(recent);
-			}
+			let recent: ReadonlyArray<typeof ToolActivity.Type> = [];
 			const result = yield* codeMode
 				.run(executionId, code, {
 					scope: runId,
 					recovering: attempt.recovering,
 					onActivity: (entry) =>
-						Effect.tryPromise({
-							try: () => {
-								recent = [...recent.filter(({ id }) => id !== entry.id), toolActivity(entry)].slice(
-									-RECENT_TOOL_CALLS,
-								);
-								writeToolActivity(storage, runId, { executionId, activity: recent });
-								return storage.sync();
-							},
-							catch: codeModeError,
-						}).pipe(
-							Effect.flatMap(() => publishActivity(recent)),
-							Effect.mapError(codeModeError),
-						),
+						Effect.suspend(() => {
+							recent = [...recent.filter(({ id }) => id !== entry.id), toolActivity(entry)].slice(
+								-RECENT_TOOL_CALLS,
+							);
+							return publishActivity(recent);
+						}),
 				})
 				.pipe(
 					Effect.match({
@@ -106,15 +87,11 @@ export function createChatTools(
 								: unknownOutcome(error.message),
 					}),
 				);
-			const uncertainEffects = yield* Effect.try({
-				try: () => uncertainToolEffects(codeMode.readExecution(executionId, runId).calls),
+			const { calls } = yield* Effect.try({
+				try: () => codeMode.readExecution(executionId, runId),
 				catch: executionError,
 			});
-			return {
-				...result,
-				...(recent.length > 0 && { activity: markInterrupted(recent) }),
-				...(uncertainEffects.length > 0 && { uncertainEffects }),
-			};
+			return { ...result, ...settledActivity(calls) };
 		},
 		Effect.catchTag("SchemaError", () =>
 			Effect.succeed({
@@ -134,7 +111,6 @@ export function createChatTools(
 				const result = saved.result
 					? completedToolResult(saved.result.value)
 					: unknownOutcome("The script ended without a completed result.");
-				const uncertainEffects = uncertainToolEffects(calls);
 				return [
 					{ role: "tool-call", id: callId, name: Exec.name, input: { code: saved.source } },
 					{
@@ -142,8 +118,7 @@ export function createChatTools(
 						callId,
 						result: {
 							...result,
-							activity: calls.map(toolActivity),
-							...(uncertainEffects.length > 0 && { uncertainEffects }),
+							...settledActivity(calls),
 						},
 					},
 				];
