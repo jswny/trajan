@@ -11,9 +11,8 @@ import {
 } from "@trajan/harness";
 import type { TurnModelEvent, TurnModelResponse } from "@trajan/harness";
 import { Cause, Effect, Exit, Layer, Option, Predicate, Schema, Stream } from "effect";
-import { clearToolState } from "../chat/tool-activity";
 import { TrajanChatObject } from "../chat/worker-host";
-import { createChatTools } from "../chat/tools";
+import { createChatExec } from "../chat/exec";
 import { codeModeError, createTrajanWorkspace, workspaceToolset } from "../workspace";
 import {
 	compactReference,
@@ -113,9 +112,9 @@ export class ChatTestObject extends TrajanChatObject {
 	readonly #instance = crypto.randomUUID();
 	#atomicFault: PausePoint | undefined;
 	readonly #workspace = createTrajanWorkspace(this.ctx);
-	readonly #effectTools = this.#createTools();
+	protected readonly chatExec = this.#createTools();
 	readonly #responses = createOpenAiResponsesFixture(
-		this.#effectTools.declaration,
+		this.chatExec.declaration,
 		appendExecInput(compactReference),
 	);
 	readonly #codeMode = createCodeModeFixture(
@@ -124,8 +123,8 @@ export class ChatTestObject extends TrajanChatObject {
 		this.env.LOADER,
 		(point, signal) => this.#pauseAt(point, signal),
 	);
-	override readSettledTools(runId: string) {
-		return this.#effectTools.readSettledTools(runId);
+	readSettledTools(runId: string) {
+		return this.chatExec.readSettledTools(runId);
 	}
 
 	#createTools() {
@@ -171,7 +170,7 @@ export class ChatTestObject extends TrajanChatObject {
 		const branch = faultBeforeCommit(git.branch, "during-replay-git");
 		const scheduleTools = this.schedules.tools;
 		const schedule = faultBeforeCommit(scheduleTools.scheduleTurn, "during-replay-schedule");
-		return createChatTools(
+		return createChatExec(
 			this.env.LOADER,
 			storage,
 			{
@@ -321,7 +320,7 @@ export class ChatTestObject extends TrajanChatObject {
 		if (call.id === "exec-interrupt") {
 			yield* Effect.promise(() => this.ctx.storage.put("executionId", attempt.idempotencyKey));
 		}
-		const result = yield* this.#effectTools.service.execute(...args);
+		const result = yield* this.chatExec.service.execute(...args);
 		if (result.status === "completed") {
 			// Pause after Code Mode settles while the turn's checkpoint is still open.
 			yield* Effect.tryPromise({
@@ -808,7 +807,7 @@ export default async function () {
 
 	workspaceTool(name: string, input: Schema.Json, recovering = false): Promise<string> {
 		const runId = crypto.randomUUID();
-		const tools = createChatTools(
+		const tools = createChatExec(
 			this.env.LOADER,
 			this.ctx.storage,
 			this.schedules.tools,
@@ -823,7 +822,7 @@ export default async function () {
 				)
 				.pipe(
 					Effect.flatMap(Schema.encodeEffect(Schema.fromJsonString(ToolResult))),
-					Effect.ensuring(Effect.sync(() => clearToolState(this.ctx.storage, runId))),
+					Effect.ensuring(Effect.sync(() => tools.settleRun(runId, "completed"))),
 				),
 		);
 	}

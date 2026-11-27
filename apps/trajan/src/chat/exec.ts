@@ -1,5 +1,5 @@
 import { describeTools } from "@trajan/code-mode";
-import { createCloudflareCodeMode } from "@trajan/code-mode-cloudflare";
+import { clearCodeModeRun, createCloudflareCodeMode } from "@trajan/code-mode-cloudflare";
 import type { CodeModeActivity, CodeModeCatalog, CodeModeTool } from "@trajan/code-mode";
 import { completedToolResult, TurnIoError } from "@trajan/harness";
 import type { ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
@@ -7,13 +7,7 @@ import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
 import { execName, ExecInput } from "../exec-contract";
 import { scheduleInstructions } from "../turn-schedules";
-import {
-	RECENT_TOOL_CALLS,
-	readExecutions,
-	recordExecution,
-	toolActivity,
-	uncertainToolEffects,
-} from "./tool-activity";
+import { RECENT_TOOL_CALLS, toolActivity, uncertainToolEffects } from "./tool-activity";
 import type { ToolActivity } from "./tool-presentation";
 
 const Exec = Tool.make(execName, { parameters: ExecInput, success: Schema.Json });
@@ -41,7 +35,32 @@ function settledActivity(calls: ReadonlyArray<CodeModeActivity>) {
 	};
 }
 
-export function createChatTools(
+const executionsKey = (runId: string) => `chat-tool-executions:${runId}`;
+const decodeExecutions = Schema.decodeUnknownSync(
+	Schema.UndefinedOr(
+		Schema.Array(
+			Schema.Struct({ executionId: Schema.NonEmptyString, callId: Schema.NonEmptyString }),
+		),
+	),
+);
+
+function readExecutions(storage: DurableObjectStorage, runId: string) {
+	return decodeExecutions(storage.kv.get(executionsKey(runId))) ?? [];
+}
+
+function recordExecution(
+	storage: DurableObjectStorage,
+	runId: string,
+	executionId: string,
+	callId: string,
+) {
+	const executions = readExecutions(storage, runId);
+	if (!executions.some((entry) => entry.executionId === executionId)) {
+		storage.kv.put(executionsKey(runId), [...executions, { executionId, callId }]);
+	}
+}
+
+export function createChatExec(
 	loader: WorkerLoader,
 	storage: DurableObjectStorage,
 	scheduleTools: Readonly<Record<string, CodeModeTool>>,
@@ -99,28 +118,36 @@ export function createChatTools(
 		),
 	);
 
-	return {
-		readSettledTools(runId: string): Array<typeof TurnMessage.Type> {
-			return readExecutions(storage, runId).flatMap(({ executionId, callId }) => {
-				const { saved, calls } = codeMode.readExecution(executionId, runId);
-				if (!saved || (!saved.result && calls.length === 0)) {
-					return [];
-				}
-				const result = saved.result
-					? completedToolResult(saved.result.value)
-					: unknownOutcome("The script ended without a completed result.");
-				return [
-					{ role: "tool-call", id: callId, name: Exec.name, input: { code: saved.source } },
-					{
-						role: "tool",
-						callId,
-						result: {
-							...result,
-							...settledActivity(calls),
-						},
+	function readSettledTools(runId: string): Array<typeof TurnMessage.Type> {
+		return readExecutions(storage, runId).flatMap(({ executionId, callId }) => {
+			const { saved, calls } = codeMode.readExecution(executionId, runId);
+			if (!saved || (!saved.result && calls.length === 0)) {
+				return [];
+			}
+			const result = saved.result
+				? completedToolResult(saved.result.value)
+				: unknownOutcome("The script ended without a completed result.");
+			return [
+				{ role: "tool-call", id: callId, name: Exec.name, input: { code: saved.source } },
+				{
+					role: "tool",
+					callId,
+					result: {
+						...result,
+						...settledActivity(calls),
 					},
-				];
-			});
+				},
+			];
+		});
+	}
+
+	return {
+		readSettledTools,
+		settleRun(runId: string, outcome: "completed" | "failed" | "cancelled") {
+			const messages = outcome === "completed" ? undefined : readSettledTools(runId);
+			storage.kv.delete(executionsKey(runId));
+			clearCodeModeRun(storage, runId);
+			return messages;
 		},
 		declaration: {
 			name: Exec.name,

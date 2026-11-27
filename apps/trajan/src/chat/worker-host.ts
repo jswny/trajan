@@ -1,5 +1,5 @@
 import { TurnSubmission } from "@trajan/harness";
-import type { TurnMessage, TurnProgress } from "@trajan/harness";
+import type { TurnProgress } from "@trajan/harness";
 import { CloudflareHarness } from "@trajan/harness-cloudflare";
 import { WebSockets } from "agents/websockets";
 import { Effect, Schema } from "effect";
@@ -14,7 +14,8 @@ import {
 	updateToolPreview,
 } from "./protocol";
 import type { BrowserWatch, ChatPreview, ChatSnapshot, ChatToolPreview } from "./protocol";
-import { clearToolState, describeRecoveredTool, RECENT_TOOL_CALLS } from "./tool-activity";
+import type { createChatExec } from "./exec";
+import { describeRecoveredTool, RECENT_TOOL_CALLS } from "./tool-activity";
 
 const chatEventJson = Schema.encodeSync(Schema.fromJsonString(ChatEvent));
 const chatTag = "chat";
@@ -59,13 +60,11 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 		this.lifecycle.use(this.#sockets).use(this.schedules);
 	}
 
-	protected abstract readSettledTools(runId: string): ReadonlyArray<typeof TurnMessage.Type>;
+	protected abstract readonly chatExec: Pick<ReturnType<typeof createChatExec>, "settleRun">;
 	protected override describeRecoveredTool = describeRecoveredTool;
 
 	protected override settleRunState(runId: string, outcome: "completed" | "failed" | "cancelled") {
-		const tools = outcome === "completed" ? undefined : this.readSettledTools(runId);
-		clearToolState(this.ctx.storage, runId);
-		return tools;
+		return this.chatExec.settleRun(runId, outcome);
 	}
 
 	protected override onStateChange({

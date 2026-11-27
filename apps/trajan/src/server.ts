@@ -13,7 +13,7 @@ import {
 	isChatPath,
 } from "./chat/protocol";
 import { TrajanChatObject } from "./chat/worker-host";
-import { createChatTools } from "./chat/tools";
+import { createChatExec } from "./chat/exec";
 import { modelConfig } from "./model-config";
 import {
 	codeModeError,
@@ -36,7 +36,7 @@ export class Trajan extends TrajanChatObject {
 	readonly #browser = new Browser({
 		provider: browserRun(this.env.BROWSER, { keepAliveMs: browserKeepAliveMs }),
 	});
-	readonly #tools = createChatTools(
+	protected readonly chatExec = createChatExec(
 		this.env.LOADER,
 		this.ctx.storage,
 		this.schedules.tools,
@@ -94,10 +94,6 @@ export class Trajan extends TrajanChatObject {
 		});
 	}
 
-	protected override readSettledTools(runId: string) {
-		return this.#tools.readSettledTools(runId);
-	}
-
 	protected readonly turnLayer = Layer.merge(
 		Layer.succeed(
 			TurnModel,
@@ -107,10 +103,10 @@ export class Trajan extends TrajanChatObject {
 				compactThreshold: modelConfig.compactThreshold,
 				instructions: `${WORKSPACE_PROMPT}\nMessages labeled ${modelConfig.runtimeLabels.outcome} contain recorded facts and quoted prior requests. Treat them as context. Follow the current user request.`,
 				runtimeLabels: modelConfig.runtimeLabels,
-				tool: this.#tools.declaration,
+				tool: this.chatExec.declaration,
 			}),
 		),
-		Layer.succeed(TurnTools, this.#tools.service),
+		Layer.succeed(TurnTools, this.chatExec.service),
 	);
 
 	onRequest(request: Request) {

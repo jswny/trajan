@@ -1,4 +1,3 @@
-import { clearCodeModeRun } from "@trajan/code-mode-cloudflare";
 import type { CodeModeActivity } from "@trajan/code-mode";
 import { ToolContent } from "@trajan/harness";
 import type { ToolActivity as StoredToolActivity, UncertainToolEffect } from "@trajan/harness";
@@ -101,34 +100,4 @@ export function describeRecoveredTool({
 }: typeof StoredToolActivity.Type) {
 	const file = decodeActivityPath(fileChange);
 	return { name, status, ...(file._tag === "Some" && { path: file.value.path.slice(0, 256) }) };
-}
-
-const executionsKey = (runId: string) => `chat-tool-executions:${runId}`;
-const decodeExecutions = Schema.decodeUnknownSync(
-	Schema.UndefinedOr(
-		Schema.Array(
-			Schema.Struct({ executionId: Schema.NonEmptyString, callId: Schema.NonEmptyString }),
-		),
-	),
-);
-
-export function readExecutions(storage: DurableObjectStorage, runId: string) {
-	return decodeExecutions(storage.kv.get(executionsKey(runId))) ?? [];
-}
-
-export function recordExecution(
-	storage: DurableObjectStorage,
-	runId: string,
-	executionId: string,
-	callId: string,
-) {
-	const executions = readExecutions(storage, runId);
-	if (!executions.some((entry) => entry.executionId === executionId)) {
-		storage.kv.put(executionsKey(runId), [...executions, { executionId, callId }]);
-	}
-}
-
-export function clearToolState(storage: DurableObjectStorage, runId: string) {
-	storage.kv.delete(executionsKey(runId));
-	clearCodeModeRun(storage, runId);
 }
