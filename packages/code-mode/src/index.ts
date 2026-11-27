@@ -155,6 +155,9 @@ export function describeTools(catalog: CodeModeCatalog) {
 const maxCalls = 64;
 const maxConcurrentCalls = 8;
 const maxValueBytes = 64 * 1024;
+const executionBudgetMs = 25_000;
+const deadlineExpired = () =>
+	new CodeModeError({ message: "The Code Mode execution deadline expired." });
 const interrupted: ToolReply = {
 	status: "interrupted",
 	message:
@@ -507,8 +510,21 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 		if (!saved) {
 			yield* journal.start({ source, vm });
 		}
-		return yield* runGuest(guest, journal, key, vm, history, previous, options).pipe(
-			Effect.timeout("30 seconds"),
+		// The journaled start time makes every attempt share the same execution budget.
+		const remaining = vm.startedAt + executionBudgetMs - (yield* Clock.currentTimeMillis);
+		if (remaining <= 0) {
+			return yield* deadlineExpired();
+		}
+		return yield* runGuest(
+			guest,
+			journal,
+			key,
+			{ vm, timeoutMs: remaining },
+			history,
+			previous,
+			options,
+		).pipe(
+			Effect.timeoutOrElse({ duration: remaining, orElse: () => Effect.fail(deadlineExpired()) }),
 			Effect.flatMap(Schema.decodeUnknownEffect(boundedJson)),
 			Effect.mapError(codeModeError),
 			Effect.tap((value) => journal.finish({ source, vm, result: { value } })),
@@ -651,7 +667,7 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 		guest: PreparedGuest,
 		journal: CodeModeJournal,
 		key: string,
-		vm: NonNullable<RunCheckpoint["vm"]>,
+		{ vm, timeoutMs }: { vm: NonNullable<RunCheckpoint["vm"]>; timeoutMs: number },
 		history: ReplayCheckpoint | undefined,
 		previous: ReadonlyArray<CallCheckpoint>,
 		options: RunOptions,
@@ -666,7 +682,7 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 			};
 			const session = yield* Effect.acquireRelease(
 				Effect.try({
-					try: () => guest.start(key, { ...vm, timeoutMs: 25_000, onEvent: emit }),
+					try: () => guest.start(key, { ...vm, timeoutMs, onEvent: emit }),
 					catch: codeModeError,
 				}),
 				(session) =>

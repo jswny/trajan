@@ -1,5 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import { Deferred, Effect, Option } from "effect";
+import { TestClock } from "effect/testing";
 import { createCodeMode } from "./index";
 import type {
 	CallCheckpoint,
@@ -27,6 +28,7 @@ function testHost({
 	disconnectAfterDelivery?: boolean;
 } = {}) {
 	const calls = new Map<number, CallCheckpoint>();
+	const timeouts: Array<number> = [];
 	let run: RunCheckpoint | undefined;
 	let replay: Parameters<CodeModeJournal["recordReplay"]>[0] | undefined;
 	let attempt = 0;
@@ -58,7 +60,8 @@ function testHost({
 		prepareGuest: () =>
 			Effect.succeed({
 				programId: vm.programId,
-				start: (_, { onEvent }) => {
+				start: (_, { onEvent, timeoutMs }) => {
+					timeouts.push(timeoutMs);
 					attempt++;
 					const done = Deferred.makeUnsafe<Extract<GuestEvent, { type: "done" | "error" }>>();
 					onEvent({ type: "started", fingerprint });
@@ -82,13 +85,13 @@ function testHost({
 				},
 			}),
 	};
-	return { calls, journal, host };
+	return { calls, journal, host, timeouts };
 }
 
 it.effect("replays the same delivery after a disconnect before the VM acknowledges it", () =>
 	Effect.gen(function* () {
 		let invocations = 0;
-		const { host, calls, journal } = testHost({ disconnectAfterDelivery: true });
+		const { host, calls, journal, timeouts } = testHost({ disconnectAfterDelivery: true });
 		const catalog = {
 			[module]: {
 				mutate: {
@@ -107,9 +110,11 @@ it.effect("replays the same delivery after a disconnect before the VM acknowledg
 		expect(interrupted.message).toBe("Guest disconnected before acknowledgment.");
 		expect(Option.getOrUndefined(journal.readReplay())?.issuedAfter).toEqual([1]);
 
+		yield* TestClock.adjust("10 seconds");
 		const recovered = createCodeMode(host, catalog);
 		const reply = yield* recovered.run("run", source, { recovering: true });
 		expect(reply).toEqual({ status: "returned", value: "done" });
+		expect(timeouts).toEqual([25_000, 15_000]);
 		expect(Option.getOrUndefined(journal.readReplay())?.issuedAfter).toEqual([1, 1]);
 		expect(recovered.readExecution("run", "run").calls).toEqual([
 			{
@@ -121,7 +126,29 @@ it.effect("replays the same delivery after a disconnect before the VM acknowledg
 				details: { path: "report.txt" },
 			},
 		]);
+		yield* TestClock.adjust("15 seconds");
+		expect(yield* recovered.run("run", source, { recovering: true })).toEqual(reply);
+		expect(timeouts).toHaveLength(2);
 		expect(invocations).toBe(1);
+	}),
+);
+
+it.effect("leaves an expired execution's receipts available without starting the VM", () =>
+	Effect.gen(function* () {
+		const { host, journal, timeouts } = testHost();
+		yield* journal.start({ source, vm });
+		yield* journal.recordReplay({ fingerprint: "test-quickjs", deliveries: [], issuedAfter: [1] });
+		yield* journal.recordCall(0, {
+			request: JSON.stringify(input),
+			replay: "unsafe",
+			started: true,
+		});
+		yield* TestClock.adjust(25_100);
+		const codeMode = createCodeMode(host, {});
+		const error = yield* codeMode.run("run", source, { recovering: true }).pipe(Effect.flip);
+		expect(error.message).toBe("The Code Mode execution deadline expired.");
+		expect(timeouts).toEqual([]);
+		expect(codeMode.readExecution("run", "run").calls).toMatchObject([{ status: "interrupted" }]);
 	}),
 );
 
