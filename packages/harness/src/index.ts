@@ -205,6 +205,7 @@ export class TurnModelError extends Schema.TaggedError<
 	{ readonly brand: unique symbol }
 >()("TurnModelError", {
 	message: Schema.String,
+	retryable: Schema.Boolean,
 	cause: Schema.optionalKey(Schema.Defect()),
 }) {}
 
@@ -330,6 +331,7 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 					if (Option.isNone(last) || last.value.type !== "response") {
 						return yield* new TurnModelError({
 							message: "The model stream ended without a response.",
+							retryable: true,
 						});
 					}
 					const { response } = last.value;

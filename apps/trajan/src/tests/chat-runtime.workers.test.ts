@@ -15,6 +15,7 @@ import {
 	draftPrompt,
 	draftReply,
 	longDraftPrompt,
+	retryStreamPrompt,
 	skillExecInput,
 } from "./chat-runtime-fixture";
 import {
@@ -1902,7 +1903,31 @@ test("keeps a large exchange in history when it falls outside the model's contex
 	});
 });
 
-test("settles a failed model turn and proceeds to the next queued submission", async () => {
+test("preserves a partial reply and completed tool when the Worker restarts during model backoff", async () => {
+	let stub = openFixture();
+	const { runId } = await submit(stub, { id: "stream-retry", prompt: retryStreamPrompt });
+	await expect.poll(() => stub.taskState(runId), { timeout: 5000 }).toBe("waiting");
+	const { instance } = await stub.state();
+	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+	stub = await waitForRestart(stub, instance);
+	await expect
+		.poll(() => readTurn(stub, runId), { timeout: 5000 })
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user" },
+					{ role: "tool-call" },
+					{ role: "tool" },
+					{ role: "interrupted", attemptId: "model:1:1", text: "Wrote" },
+					{ role: "assistant", text: `Wrote "${retryStreamPrompt}"` },
+				],
+			},
+		});
+	expect(await stub.state()).toMatchObject({ text: retryStreamPrompt });
+});
+
+test("settles a permanent model failure after one attempt and proceeds to the next queued submission", async () => {
 	let stub = openFixture();
 	const first = await submit(stub, { id: "fail", prompt: "Fail this turn." });
 	const second = await submit(stub, { id: "next", prompt: "Which earlier prompts did you see?" });
@@ -1915,6 +1940,18 @@ test("settles a failed model turn and proceeds to the next queued submission", a
 			failure: { code: "model", message: "The fixture model failed." },
 			transcript: null,
 		});
+	expect(
+		await runInDurableObject(
+			stub,
+			(_, { storage }) =>
+				storage.sql
+					.exec(
+						"SELECT attempt FROM cf_agents_task_steps WHERE run_id = ? AND step_name = 'model:0'",
+						first.runId,
+					)
+					.one().attempt,
+		),
+	).toBe(1);
 	await expect
 		.poll(() => readTurn(stub, second.runId), { timeout: 5000 })
 		.toMatchObject({

@@ -25,6 +25,7 @@ export function openAiGatewayTransport(gateway: Pick<AiGateway, "run">): OpenAiR
 			catch: (cause) =>
 				new TurnModelError({
 					message: cause instanceof Error ? cause.message : "OpenAI request failed.",
+					retryable: true,
 					cause,
 				}),
 		});

@@ -551,10 +551,8 @@ test("shows the restart limit and keeps the completed write available after reco
 	await expect(toolActivity(page)).toHaveText("Tool activity");
 });
 
-test("shows a completed reply once after a transcript retry and reconnect", async ({ page }) => {
-	const composer = await openChat(page);
-	expect((await page.request.post(`${control}/fail-transcript-write`)).status()).toBe(204);
-	await composer.fill("hello");
+async function sendAndWaitForRetry(page: Page, composer: Locator, prompt: string) {
+	await composer.fill(prompt);
 	const submission = page.waitForResponse(
 		(response) =>
 			response.request().method() === "POST" && new URL(response.url()).pathname === ChatPath,
@@ -570,6 +568,30 @@ test("shows a completed reply once after a transcript retry and reconnect", asyn
 			return response.ok() ? response.text() : undefined;
 		})
 		.toBe("waiting");
+}
+
+test("restores the partial and final replies after a restart during model backoff", async ({
+	page,
+}) => {
+	const composer = await openChat(page);
+	const prompt = "Retry an interrupted stream after append.";
+	await sendAndWaitForRetry(page, composer, prompt);
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await openChat(page);
+	const transcript = page.getByRole("main");
+	const reply = `Wrote "${prompt}"`;
+	await expect(transcript.getByText(reply, { exact: true })).toBeVisible();
+	await expect(toolCards(page)).toHaveCount(1);
+	const interrupted = transcript.locator("[data-interrupted-reply]");
+	await interrupted.locator("summary").click();
+	await expect(interrupted.getByText("Wrote", { exact: true })).toBeVisible();
+	await expectStoredReply(page.request, reply);
+});
+
+test("shows a completed reply once after a transcript retry and reconnect", async ({ page }) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/fail-transcript-write`)).status()).toBe(204);
+	await sendAndWaitForRetry(page, composer, "hello");
 	await composer.fill("Remember transcript retry recovered");
 	await composer.press("Enter");
 	await expect(page.getByText("1 queued behind this run", { exact: true })).toBeVisible();

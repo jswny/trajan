@@ -176,7 +176,11 @@ test.each([
 			yield* TestClock.adjust(wait);
 			expect(yield* Fiber.join(fiber)).toMatchObject({
 				_tag: "Failure",
-				failure: { _tag: "TurnModelError", message: expect.stringContaining(detail) },
+				failure: {
+					_tag: "TurnModelError",
+					message: expect.stringContaining(detail),
+					retryable: true,
+				},
 			});
 			expect(signal.aborted).toBe(true);
 		}).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
@@ -215,6 +219,35 @@ const failures: ReadonlyArray<{ event: Schema.JsonObject; message: string }> = [
 test.each(failures)("reports $event.type as a typed model failure", async ({ event, message }) => {
 	expect(await collectEvents(event)).toMatchObject({
 		_tag: "Failure",
-		failure: { _tag: "TurnModelError", message },
+		failure: { _tag: "TurnModelError", message, retryable: false },
+	});
+});
+
+test.each([
+	{ status: 400, code: "context_length_exceeded", retryable: false },
+	{ status: 401, code: "invalid_api_key", retryable: false },
+	{ status: 408, code: null, retryable: true },
+	{ status: 429, code: "insufficient_quota", retryable: false },
+	{ status: 429, code: "rate_limit_exceeded", retryable: true },
+	{ status: 503, code: null, retryable: true },
+])("classifies HTTP $status with code $code", async ({ status, code, retryable }) => {
+	const stream = fixtureStream(() =>
+		Effect.sync(() => Response.json({ error: { message: "Rejected.", code } }, { status })),
+	);
+	expect(await Effect.runPromise(stream.pipe(Stream.runDrain, Effect.result))).toMatchObject({
+		_tag: "Failure",
+		failure: { message: "Rejected.", retryable },
+	});
+});
+
+test("classifies a server error on an open stream as retryable", async () => {
+	expect(
+		await collectEvents({
+			type: "response.failed",
+			response: { error: { code: "server_error", message: "Try again." } },
+		}),
+	).toMatchObject({
+		_tag: "Failure",
+		failure: { message: "Try again.", retryable: true },
 	});
 });

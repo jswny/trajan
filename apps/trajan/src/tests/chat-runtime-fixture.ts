@@ -28,6 +28,7 @@ import {
 const chatFixtureReset = "Forced chat fixture restart";
 const mermaidPrompt = "Show the delivery flow.";
 export const draftPrompt = "Stream a draft recovery example.";
+export const retryStreamPrompt = "Retry an interrupted stream after append.";
 export const draftExcerpt = "The workspace is ready.\n\nI saved the checklist.";
 export const draftReply = `${draftExcerpt}\n\nThe final check passed.`;
 export const longDraftPrompt = "Stream an oversized draft.";
@@ -360,6 +361,7 @@ export class ChatTestObject extends TrajanChatObject {
 		if (last?.role === "user" && last.text === "Fail this turn.") {
 			return yield* new TurnModelError({
 				message: "The fixture model failed.",
+				retryable: false,
 			});
 		}
 		if (last?.role === "user" && last.text === draftPrompt) {
@@ -659,7 +661,10 @@ sequenceDiagram
 		}
 		if (last?.role === "tool") {
 			if (user?.text === "Fail the model after writing.") {
-				return yield* new TurnModelError({ message: "The fixture model failed after writing." });
+				return yield* new TurnModelError({
+					message: "The fixture model failed after writing.",
+					retryable: false,
+				});
 			}
 			if (last.callId === "exec-file-diffs" && last.result.status === "completed") {
 				return { role: "assistant", text: "Updated the report." };
@@ -670,13 +675,17 @@ sequenceDiagram
 				);
 				if (!alreadyFailed) {
 					yield* Effect.promise(() => this.ctx.storage.put("retry-once", true));
-					return yield* new TurnModelError({ message: "Temporary fixture model failure." });
+					return yield* new TurnModelError({
+						message: "Temporary fixture model failure.",
+						retryable: true,
+					});
 				}
 			}
 			if (appendTwice && last.callId === "append-1") {
 				yield* Effect.tryPromise({
 					try: (signal) => this.#pauseAt("between-tools", signal),
-					catch: (cause) => new TurnModelError({ message: "Fixture model pause failed.", cause }),
+					catch: (cause) =>
+						new TurnModelError({ message: "Fixture model pause failed.", retryable: true, cause }),
 				});
 				return {
 					role: "tool-call",
@@ -742,16 +751,31 @@ sequenceDiagram
 								Stream.map((text): TurnModelEvent => ({ type: "text-delta", text })),
 								Stream.concat(
 									Stream.fromEffect(
-										Effect.tryPromise({
-											try: (signal) => this.#pauseAt("during-reply", signal),
-											catch: (cause) =>
-												new TurnModelError({ message: "Fixture model pause failed.", cause }),
-										}).pipe(
-											Effect.as<TurnModelEvent>({
+										Effect.gen({ self: this }, function* () {
+											if (
+												user?.text === retryStreamPrompt &&
+												!this.ctx.storage.kv.get("stream-failed")
+											) {
+												this.ctx.storage.kv.put("stream-failed", true);
+												return yield* new TurnModelError({
+													message: "Fixture model stream disconnected.",
+													retryable: true,
+												});
+											}
+											yield* Effect.tryPromise({
+												try: (signal) => this.#pauseAt("during-reply", signal),
+												catch: (cause) =>
+													new TurnModelError({
+														message: "Fixture model pause failed.",
+														retryable: true,
+														cause,
+													}),
+											});
+											return {
 												type: "text-delta",
 												text: response.text.slice(excerpt.length),
-											}),
-										),
+											} satisfies TurnModelEvent;
+										}),
 									),
 								),
 								Stream.concat(end),

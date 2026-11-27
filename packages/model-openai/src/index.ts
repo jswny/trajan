@@ -34,8 +34,12 @@ const isCompaction = Schema.is(
 		encrypted_content: Schema.NonEmptyString,
 	}),
 );
+const providerErrorFields = {
+	message: Schema.String,
+	code: Schema.optionalKey(Schema.NullOr(Schema.String)),
+};
 const UpstreamError = Schema.Struct({
-	error: Schema.optionalKey(Schema.NullOr(Schema.Struct({ message: Schema.String }))),
+	error: Schema.optionalKey(Schema.NullOr(Schema.Struct(providerErrorFields))),
 	incomplete_details: Schema.optionalKey(Schema.NullOr(Schema.Struct({ reason: Schema.String }))),
 });
 const AddedItemEvent = Schema.Struct({
@@ -55,7 +59,7 @@ const UnsuccessfulEvent = Schema.Struct({
 	type: Schema.Literals(["response.failed", "response.incomplete"]),
 	response: UpstreamError,
 });
-const ErrorEvent = Schema.Struct({ type: Schema.Literal("error"), message: Schema.String });
+const ErrorEvent = Schema.Struct({ type: Schema.Literal("error"), ...providerErrorFields });
 const decodeErrorBody = Schema.decodeUnknownOption(Schema.fromJsonString(UpstreamError));
 type History = Parameters<TurnModel["Service"]["stream"]>[0];
 type Tool = {
@@ -102,19 +106,27 @@ export type OpenAiResponsesTransport = (
 	signal: AbortSignal,
 ) => Effect.Effect<Response, TurnModelError>;
 
-function modelError(message: string) {
-	return new TurnModelError({ message });
+function modelError(message: string, retryable = false) {
+	return new TurnModelError({ message, retryable });
 }
 
-function transportError(cause: unknown) {
+function toModelError(cause: unknown, retryable: boolean) {
 	if (cause instanceof TurnModelError) {
 		return cause;
 	}
 	return new TurnModelError({
 		message: cause instanceof Error ? cause.message : "OpenAI request failed.",
+		retryable,
 		cause,
 	});
 }
+
+const transientStreamErrors = new Set([
+	"server_error",
+	"rate_limit_exceeded",
+	"upstream_request_failed",
+	"upstream_stream_read_error",
+]);
 
 type FunctionToolResult = Extract<History[number], { role: "tool" }>["result"];
 
@@ -167,45 +179,48 @@ function compactWindow(items: ReadonlyArray<Item>) {
 	return items.slice(start);
 }
 
-const buildInput = Effect.fnUntraced(function* (
-	history: History,
-	labels: RuntimeLabels,
-	modelContext?: Schema.Json,
-) {
-	let items = [...(yield* Schema.decodeUnknownEffect(Items)(modelContext ?? []))];
-	for (const message of history) {
-		switch (message.role) {
-			case "user":
-			case "assistant":
-				items.push({ type: "message", role: message.role, content: message.text });
-				break;
-			case "runtime-outcome":
-				items.push({
-					type: "message",
-					role: "user",
-					content: `${labels.outcome}\n${JSON.stringify(message)}`,
-				});
-				break;
-			case "tool-call": {
-				const output = yield* Schema.decodeUnknownEffect(Items)(message.continuation);
-				if (!output.some((item) => item.type === "function_call" && item.call_id === message.id)) {
-					return yield* modelError("Checkpointed OpenAI tool call is missing its response items.");
+const buildInput = Effect.fnUntraced(
+	function* (history: History, labels: RuntimeLabels, modelContext?: Schema.Json) {
+		let items = [...(yield* Schema.decodeUnknownEffect(Items)(modelContext ?? []))];
+		for (const message of history) {
+			switch (message.role) {
+				case "user":
+				case "assistant":
+					items.push({ type: "message", role: message.role, content: message.text });
+					break;
+				case "runtime-outcome":
+					items.push({
+						type: "message",
+						role: "user",
+						content: `${labels.outcome}\n${JSON.stringify(message)}`,
+					});
+					break;
+				case "tool-call": {
+					const output = yield* Schema.decodeUnknownEffect(Items)(message.continuation);
+					if (
+						!output.some((item) => item.type === "function_call" && item.call_id === message.id)
+					) {
+						return yield* modelError(
+							"Checkpointed OpenAI tool call is missing its response items.",
+						);
+					}
+					items.push(...output);
+					break;
 				}
-				items.push(...output);
-				break;
+				case "tool":
+					items.push({
+						type: "function_call_output",
+						call_id: message.callId,
+						output: toolOutput(message.result, labels.uncertainEffects),
+					});
+					items = compactWindow(items);
+					break;
 			}
-			case "tool":
-				items.push({
-					type: "function_call_output",
-					call_id: message.callId,
-					output: toolOutput(message.result, labels.uncertainEffects),
-				});
-				items = compactWindow(items);
-				break;
 		}
-	}
-	return items;
-}, Effect.mapError(transportError));
+		return items;
+	},
+	Effect.mapError((cause) => toModelError(cause, false)),
+);
 
 const completedResponse = Effect.fnUntraced(function* (
 	output: ReadonlyArray<Item>,
@@ -279,11 +294,14 @@ const readEvent = Effect.fnUntraced(function* (
 		case "response.incomplete": {
 			const { response } = yield* Schema.decodeUnknownEffect(UnsuccessfulEvent)(event);
 			const message = response.error?.message ?? response.incomplete_details?.reason;
-			return yield* modelError(message ?? `OpenAI stream ended with ${event.type}.`);
+			return yield* modelError(
+				message ?? `OpenAI stream ended with ${event.type}.`,
+				event.type === "response.failed" && transientStreamErrors.has(response.error?.code ?? ""),
+			);
 		}
 		case "error": {
-			const { message } = yield* Schema.decodeUnknownEffect(ErrorEvent)(event);
-			return yield* modelError(message);
+			const { message, code } = yield* Schema.decodeUnknownEffect(ErrorEvent)(event);
+			return yield* modelError(message, transientStreamErrors.has(code ?? ""));
 		}
 		default:
 			return undefined;
@@ -307,18 +325,27 @@ export function openAiTurnModel(request: OpenAiResponsesTransport, options: Open
 		).pipe(
 			Effect.timeoutOrElse({
 				duration: "30 seconds",
-				orElse: () => Effect.fail(modelError("Timed out waiting for OpenAI response headers.")),
+				orElse: () =>
+					Effect.fail(modelError("Timed out waiting for OpenAI response headers.", true)),
 			}),
 		);
 		if (!response.ok) {
 			const body = yield* Effect.tryPromise({
 				try: () => response.text(),
-				catch: transportError,
-			}).pipe(Effect.timeoutOrElse({ duration: "5 seconds", orElse: () => Effect.succeed("") }));
+				catch: (cause) => toModelError(cause, true),
+			}).pipe(
+				Effect.orElseSucceed(() => ""),
+				Effect.timeoutOrElse({ duration: "5 seconds", orElse: () => Effect.succeed("") }),
+			);
 			const decoded = decodeErrorBody(body);
-			const detail = decoded._tag === "Some" ? decoded.value.error?.message : undefined;
+			const error = decoded._tag === "Some" ? decoded.value.error : undefined;
+			const { status } = response;
 			return yield* modelError(
-				detail ?? `OpenAI Responses request returned HTTP ${response.status}.`,
+				error?.message ?? `OpenAI Responses request returned HTTP ${status}.`,
+				status === 408 ||
+					status === 409 ||
+					status >= 500 ||
+					(status === 429 && error?.code !== "insufficient_quota"),
 			);
 		}
 		const body = response.body;
@@ -327,12 +354,16 @@ export function openAiTurnModel(request: OpenAiResponsesTransport, options: Open
 		}
 
 		const commentary = new Set<string>();
-		return Stream.fromReadableStream({ evaluate: () => body, onError: transportError }).pipe(
+		return Stream.fromReadableStream({
+			evaluate: () => body,
+			onError: (cause) => toModelError(cause, true),
+		}).pipe(
 			Stream.decodeText(),
 			Stream.pipeThroughChannel(decodeSse()),
 			Stream.timeoutOrElse({
 				duration: "90 seconds",
-				orElse: () => Stream.fail(modelError("The OpenAI response stream stopped sending events.")),
+				orElse: () =>
+					Stream.fail(modelError("The OpenAI response stream stopped sending events.", true)),
 			}),
 			Stream.filter((event) => event.data !== "[DONE]"),
 			Stream.mapEffect(({ data }) => Schema.decodeEffect(Event)(data)),
@@ -347,7 +378,7 @@ export function openAiTurnModel(request: OpenAiResponsesTransport, options: Open
 			),
 			Stream.filter((event) => event !== undefined),
 			Stream.takeUntil((event) => event.type === "response"),
-			Stream.mapError(transportError),
+			Stream.mapError((cause) => toModelError(cause, false)),
 		);
 	});
 	return TurnModel.of({

@@ -72,6 +72,13 @@ class StepRestartLimitError extends NonRetryableError {
 	}
 }
 
+class NonRetryableModelError extends NonRetryableError {
+	constructor(readonly modelError: TurnModelError) {
+		super(modelError.message, { cause: modelError });
+		this.name = modelError.name;
+	}
+}
+
 function conversationEffect<A>(operation: string, run: () => A) {
 	return Effect.try({ try: run, catch: (cause) => new TurnIoError({ operation, cause }) });
 }
@@ -220,6 +227,11 @@ function taskJournal(
 									),
 									Effect.flatMap(Schema.decodeUnknownEffect(result)),
 									Effect.flatMap(Schema.encodeEffect(checkpointJson)),
+									Effect.mapError((error) =>
+										error instanceof TurnModelError && !error.retryable
+											? new NonRetryableModelError(error)
+											: error,
+									),
 									Effect.withSpan("harness.step.attempt", {
 										attributes: { runId, name, attempt },
 									}),
@@ -230,6 +242,9 @@ function taskJournal(
 					),
 				).pipe(
 					Effect.catchDefect((error) => {
+						if (error instanceof NonRetryableModelError) {
+							return Effect.fail(error.modelError);
+						}
 						if (
 							error instanceof TurnModelError ||
 							error instanceof TurnIoError ||
