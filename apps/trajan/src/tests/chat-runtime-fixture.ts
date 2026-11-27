@@ -781,6 +781,18 @@ sequenceDiagram
 		return this.ctx.storage.put("inbox-wake-faults", attempts);
 	}
 
+	async setTranscriptWriteFailure(fail: boolean) {
+		await this.lifecycle.start();
+		const { storage } = this.ctx;
+		storage.sql.exec(
+			fail
+				? `CREATE TRIGGER IF NOT EXISTS fixture_reject_transcript BEFORE INSERT ON harness_entries
+				   WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'Fixture transcript write failed'); END`
+				: "DROP TRIGGER IF EXISTS fixture_reject_transcript",
+		);
+		await storage.sync();
+	}
+
 	async makeRetryDue(retry: "inbox-wake" | "missed-schedule") {
 		const { storage } = this.ctx;
 		if (retry === "inbox-wake" && storage.kv.get("harness-inbox:wake-backoff") === undefined) {

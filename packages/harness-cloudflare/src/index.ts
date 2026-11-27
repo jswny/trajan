@@ -52,6 +52,14 @@ class TurnTaskInputError extends Schema.TaggedError<
 	message: Schema.String,
 }) {}
 
+class TurnCommitError extends Schema.TaggedError<
+	TurnCommitError,
+	{ readonly brand: unique symbol }
+>()("TurnCommitError", {
+	message: Schema.String,
+	cause: Schema.Defect(),
+}) {}
+
 class StepRestartLimitError extends NonRetryableError {
 	readonly _tag = "StepRestartLimitError";
 	override name = this._tag;
@@ -136,6 +144,8 @@ function failureCode(name: string) {
 			return "model";
 		case "TurnTaskInputError":
 			return "task-input";
+		case "TurnCommitError":
+			return "transcript_commit";
 		case "StepRestartLimitError":
 			return "restart_limit";
 		case "SchemaError":
@@ -410,8 +420,25 @@ export abstract class CloudflareHarness<
 			modelContext,
 		);
 
-		yield* conversationEffect("commit turn", () =>
-			this.#conversation.commit(runId, transcript, outcomesThrough),
+		const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
+		// Replay can reconstruct the transcript from completed steps without storing a second copy.
+		yield* Effect.promise(() =>
+			step.do("commit-transcript", { retries: { limit: 5, delay: "1 second" } }, ({ signal }) =>
+				runPromise(
+					Effect.try({
+						try: () => this.#conversation.commit(runId, transcript, outcomesThrough),
+						catch: (cause) =>
+							new TurnCommitError({
+								message:
+									"The model finished, but its reply could not be saved to the conversation.",
+								cause,
+							}),
+					}).pipe(
+						Effect.tapError(({ cause }) => Effect.logWarning("Transcript write failed", cause)),
+					),
+					{ signal },
+				),
+			),
 		);
 		yield* this.#notifyState(runId);
 		yield* Effect.promise(async (signal) => this.onTurnPhase?.("after-commit", signal));

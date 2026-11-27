@@ -551,6 +551,44 @@ test("shows the restart limit and keeps the completed write available after reco
 	await expect(toolActivity(page)).toHaveText("Tool activity");
 });
 
+test("shows a completed reply once after a transcript retry and reconnect", async ({ page }) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/fail-transcript-write`)).status()).toBe(204);
+	await composer.fill("hello");
+	const submission = page.waitForResponse(
+		(response) =>
+			response.request().method() === "POST" && new URL(response.url()).pathname === ChatPath,
+	);
+	await composer.press("Enter");
+	const { runId } = decodeReceipt(await (await submission).json());
+	expect(runId).not.toBeNull();
+	await expect
+		.poll(async () => {
+			const response = await page.request.post(`${control}/task-state`, {
+				params: { runId: runId ?? "" },
+			});
+			return response.ok() ? response.text() : undefined;
+		})
+		.toBe("waiting");
+	await composer.fill("Remember transcript retry recovered");
+	await composer.press("Enter");
+	await expect(page.getByText("1 queued behind this run", { exact: true })).toBeVisible();
+
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await openChat(page);
+	expect((await page.request.post(`${control}/restore-transcript-write`)).status()).toBe(204);
+
+	const transcript = page.getByRole("main");
+	const reply = transcript.getByText('Wrote "hello"', { exact: true });
+	await expect(reply).toBeVisible();
+	await expect(
+		transcript.getByText("Remembering transcript retry recovered", { exact: true }),
+	).toBeVisible();
+	await expect(reply).toHaveCount(1);
+	await expect(toolCards(page)).toHaveCount(1);
+	await expectStoredReply(page.request, 'Wrote "hello"');
+});
+
 test("restores compacted model context and completes exec after a restart", async ({ page }) => {
 	const composer = await openChat(page);
 	await composer.fill("Prepare the compacted reference.");

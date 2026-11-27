@@ -1741,6 +1741,88 @@ test("the inbox backs off across a restart after each group of dispatch retries 
 	]);
 });
 
+test("retries a rolled-back transcript write across a restart without replaying model or tool work", async () => {
+	let stub = openFixture();
+	await stub.setTranscriptWriteFailure(true);
+	const first = await submit(stub);
+	const followUp = await submit(stub, {
+		id: "after-transcript-retry",
+		prompt: "Which assistant replies did you receive?",
+	});
+	await expect.poll(() => stub.taskState(first.runId), { timeout: 5000 }).toBe("waiting");
+	expect(await stub.turn(first.runId)).toMatchObject({ state: "running", transcript: null });
+	expect(await stub.turn(followUp.runId)).toMatchObject({ state: "pending" });
+	expect((await stub.history({})).entries).toEqual([]);
+	const { instance, text } = await stub.state();
+	expect(text).toBe("hello");
+
+	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+	stub = await waitForRestart(stub, instance);
+	await stub.setTranscriptWriteFailure(false);
+
+	const reply = 'Wrote "hello"';
+	await expect
+		.poll(() => readTurn(stub, followUp.runId), { timeout: 7000 })
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [{ role: "user" }, { role: "assistant", text: JSON.stringify([reply]) }],
+			},
+		});
+	expect(await stub.turn(first.runId)).toMatchObject({ state: "completed", failure: null });
+	expect(await stub.state()).toMatchObject({ text: "hello" });
+	const history = (await stub.history({})).entries.map(({ message }) =>
+		Schema.decodeSync(messageJson)(message),
+	);
+	expect(history.filter(({ role }) => role === "assistant")).toEqual([
+		{ role: "assistant", text: reply },
+		{ role: "assistant", text: JSON.stringify([reply]) },
+	]);
+	expect(history.filter(({ role }) => role === "tool")).toHaveLength(1);
+	expect(
+		await runInDurableObject(stub, (_, { storage }) =>
+			storage.sql
+				.exec(
+					"SELECT step_name, attempt FROM cf_agents_task_steps WHERE run_id = ? ORDER BY step_name",
+					first.runId,
+				)
+				.toArray(),
+		),
+	).toEqual([
+		{ step_name: "commit-transcript", attempt: expect.any(Number) },
+		{ step_name: "model:0", attempt: 1 },
+		{ step_name: "model:1", attempt: 1 },
+		{ step_name: "tool:0", attempt: 1 },
+	]);
+});
+
+test("reports an exhausted transcript write separately from a model failure", async () => {
+	const stub = openFixture();
+	await stub.setTranscriptWriteFailure(true);
+	const { runId } = await submit(stub);
+	const message = "The model finished, but its reply could not be saved to the conversation.";
+	await expect
+		.poll(() => stub.turn(runId), { timeout: 22_000 })
+		.toMatchObject({
+			state: "failed",
+			failure: { code: "transcript_commit", message },
+		});
+	expect(await stub.state()).toMatchObject({ text: "hello" });
+	await stub.setTranscriptWriteFailure(false);
+	const followUp = await submit(stub, {
+		id: "after-transcript-failure",
+		prompt: "Report recent runtime outcomes.",
+	});
+	await expect
+		.poll(() => readTurn(stub, followUp.runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [{ role: "user" }, { role: "assistant", text: expect.stringContaining(message) }],
+			},
+		});
+});
+
 test("a turn committed before the task settles appears once in history and in the next turn's context", async () => {
 	const phrase = crypto.randomUUID();
 	const input = remember(phrase);

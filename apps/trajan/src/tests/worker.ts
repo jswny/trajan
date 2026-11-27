@@ -19,7 +19,7 @@ export default {
 			return stub.fetch(request);
 		}
 		const action =
-			/^\/__browser-smoke\/chat\/(pause|pause-between-tools|pause-replay|pause-replay-edit|pause-replay-git|pause-remote-push|fail-inbox-wake|miss-schedule|defer-missed-schedule|retry-inbox-wake|retry-missed-schedule|release|crash|state)$/.exec(
+			/^\/__browser-smoke\/chat\/(pause|pause-between-tools|pause-replay|pause-replay-edit|pause-replay-git|pause-remote-push|fail-inbox-wake|fail-transcript-write|restore-transcript-write|miss-schedule|defer-missed-schedule|retry-inbox-wake|retry-missed-schedule|release|crash|state|task-state)$/.exec(
 				url.pathname,
 			)?.[1];
 		if (action && fixture && request.method === "POST") {
@@ -45,6 +45,10 @@ export default {
 				case "fail-inbox-wake":
 					await stub.failInboxWake(3);
 					return new Response(null, { status: 204 });
+				case "fail-transcript-write":
+				case "restore-transcript-write":
+					await stub.setTranscriptWriteFailure(action === "fail-transcript-write");
+					return new Response(null, { status: 204 });
 				case "miss-schedule":
 					await stub.setScheduledFailure("before-admission");
 					return new Response(null, { status: 204 });
@@ -65,6 +69,12 @@ export default {
 					return new Response(null, { status: 204 });
 				case "state":
 					return Response.json(await stub.state());
+				case "task-state": {
+					const runId = url.searchParams.get("runId");
+					return runId
+						? new Response(await stub.taskState(runId))
+						: new Response(null, { status: 400 });
+				}
 			}
 		}
 		return new Response(null, { status: 404 });
