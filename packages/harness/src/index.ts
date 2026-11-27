@@ -226,6 +226,20 @@ export class TurnModel extends Context.Service<
 	}
 >()("@trajan/harness/TurnModel") {}
 
+export function restoreModelContext(
+	model: Pick<TurnModel["Service"], "contextFormat" | "contextSchema">,
+	saved: typeof SavedModelContext.Type | undefined,
+): Option.Option<Schema.Json> {
+	if (
+		saved?.adapter === model.contextFormat.adapter &&
+		saved.version === model.contextFormat.version &&
+		Schema.is(model.contextSchema)(saved.state)
+	) {
+		return Option.some(saved.state);
+	}
+	return Option.none();
+}
+
 export type TurnModelEvent =
 	| { readonly type: "text-delta"; readonly text: string }
 	| { readonly type: "response"; readonly response: TurnModelResponse };

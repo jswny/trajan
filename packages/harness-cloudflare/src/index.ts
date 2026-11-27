@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
 	publishUpdate,
+	restoreModelContext,
 	runTurn,
 	TurnIoError,
 	TurnModel,
@@ -287,26 +288,18 @@ export abstract class CloudflareHarness<
 				message: "The turn has no context cursor.",
 			});
 		}
-		const { contextFormat, contextSchema } = yield* TurnModel;
+		const model = yield* TurnModel;
 		const { context, modelContext, outcomesThrough } = yield* conversationEffect(
 			"read context",
 			() => {
 				const saved = this.#conversation.modelContext();
 				const outcomes = this.#conversation.runtimeOutcomes(through);
-				if (
-					saved?.adapter === contextFormat.adapter &&
-					saved.version === contextFormat.version &&
-					Schema.is(contextSchema)(saved.state)
-				) {
-					return {
-						context: outcomes.messages,
-						modelContext: saved.state,
-						outcomesThrough: outcomes.through,
-					};
-				}
+				const restored = restoreModelContext(model, saved);
 				return {
-					context: [...this.#conversation.context(through), ...outcomes.messages],
-					modelContext: undefined,
+					context: Option.isSome(restored)
+						? outcomes.messages
+						: [...this.#conversation.context(through), ...outcomes.messages],
+					modelContext: Option.getOrUndefined(restored),
 					outcomesThrough: outcomes.through,
 				};
 			},

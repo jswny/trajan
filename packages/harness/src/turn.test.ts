@@ -1,7 +1,8 @@
 import { expect, it, vi } from "@effect/vitest";
-import { Effect, Layer, Result, Schema, Stream } from "effect";
+import { Effect, Layer, Option, Result, Schema, Stream } from "effect";
 import {
 	completedToolResult,
+	restoreModelContext,
 	runTurn,
 	toolResultContent,
 	ToolResult,
@@ -13,6 +14,22 @@ import type { TurnJournal, TurnModelResponse } from "./index";
 
 const submission = { id: "s1", prompt: "Say hello" };
 const contextFormat = { adapter: "test", version: 1 };
+
+it("restores compatible model context even when its value is false", () => {
+	const model = { contextFormat, contextSchema: Schema.Boolean };
+	const saved = { ...contextFormat, state: false };
+	expect(restoreModelContext(model, saved)).toEqual(Option.some(false));
+});
+
+it.each([
+	{ name: "missing", saved: undefined },
+	{ name: "from a different adapter", saved: { adapter: "other", version: 1, state: true } },
+	{ name: "from a different version", saved: { ...contextFormat, version: 2, state: true } },
+	{ name: "incompatible with the schema", saved: { ...contextFormat, state: "true" } },
+])("declines to restore saved context when it is $name", ({ saved }) => {
+	const model = { contextFormat, contextSchema: Schema.Boolean };
+	expect(restoreModelContext(model, saved)).toEqual(Option.none());
+});
 
 it("preserves JSON arrays and explicitly selected content across checkpoints", () => {
 	const jsonCodec = Schema.fromJsonString(ToolResult);
