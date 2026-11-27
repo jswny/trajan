@@ -11,6 +11,7 @@ import {
 import type {
 	RuntimeOutcome,
 	ToolActivity,
+	TurnCheckpoint,
 	TurnJournal,
 	TurnMessage,
 	TurnProgress,
@@ -18,7 +19,7 @@ import type {
 } from "@trajan/harness";
 import { Lifecycle, LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
-import { Tasks } from "agents/tasks";
+import { NonRetryableError, Tasks } from "agents/tasks";
 import type { TaskStep } from "agents/tasks";
 import { Clock, Effect, Option, Schema } from "effect";
 import type { Layer } from "effect";
@@ -31,8 +32,15 @@ const inboxWakeJob = "harness-inbox:wake";
 const inboxBackoffKey = "harness-inbox:wake-backoff";
 const inboxHeartbeatMs = 30_000;
 const maxInboxBackoffMs = 10 * 60_000;
+const stepRestartLimit = 5;
 const decodeInboxBackoff = Schema.decodeUnknownOption(Schema.Natural);
 const TurnTaskInput = Schema.Struct({ runId: Schema.NonEmptyString });
+const decodeStepInterruptions = Schema.decodeUnknownSync(
+	Schema.UndefinedOr(
+		Schema.Struct({ name: Schema.NonEmptyString, attempt: Schema.Natural, count: Schema.Natural }),
+	),
+);
+const stepInterruptionsKey = (runId: string) => `harness-turn:interruptions:${runId}`;
 
 class TurnTaskInputError extends Schema.TaggedError<
 	TurnTaskInputError,
@@ -40,6 +48,18 @@ class TurnTaskInputError extends Schema.TaggedError<
 >()("TurnTaskInputError", {
 	message: Schema.String,
 }) {}
+
+class StepRestartLimitError extends NonRetryableError {
+	readonly _tag = "StepRestartLimitError";
+	override name = this._tag;
+
+	constructor(kind: TurnCheckpoint["kind"]) {
+		const work = kind === "model" ? "model request" : "tool step";
+		super(
+			`The turn stopped after ${stepRestartLimit} consecutive interruptions of the same ${work}.`,
+		);
+	}
+}
 
 function conversationEffect<A>(operation: string, run: () => A) {
 	return Effect.try({ try: run, catch: (cause) => new TurnIoError({ operation, cause }) });
@@ -113,6 +133,8 @@ function failureCode(name: string) {
 			return "model";
 		case "TurnTaskInputError":
 			return "task-input";
+		case "StepRestartLimitError":
+			return "restart_limit";
 		case "SchemaError":
 			return "schema";
 		default:
@@ -120,10 +142,41 @@ function failureCode(name: string) {
 	}
 }
 
-function taskJournal(runId: string, step: TaskStep): TurnJournal {
+const recordInterruption = Effect.fnUntraced(function* (
+	storage: DurableObjectStorage,
+	runId: string,
+	{ name, attempt }: NonNullable<TaskStep["interrupted"]>,
+) {
+	const key = stepInterruptionsKey(runId);
+	const count = storage.transactionSync(() => {
+		const previous = decodeStepInterruptions(storage.kv.get(key));
+		if (previous?.name === name && previous.attempt === attempt) {
+			return previous.count;
+		}
+		// An ordinary retry breaks the sequence because it never reports an interruption.
+		const count =
+			previous?.name === name && previous.attempt + 1 === attempt ? previous.count + 1 : 1;
+		storage.kv.put(key, { name, attempt, count });
+		return count;
+	});
+	yield* Effect.promise(() => storage.sync());
+	return count;
+});
+
+function taskJournal(runId: string, step: TaskStep, storage: DurableObjectStorage): TurnJournal {
 	return {
 		checkpoint({ kind, name }, result, run) {
 			const checkpointJson = Schema.fromJsonString(result);
+			const interrupted = step.interrupted?.name === name ? step.interrupted : null;
+			const restartBudget = interrupted
+				? recordInterruption(storage, runId, interrupted).pipe(
+						Effect.flatMap((count) =>
+							count >= stepRestartLimit
+								? Effect.fail(new StepRestartLimitError(kind))
+								: Effect.void,
+						),
+					)
+				: Effect.void;
 			return Effect.gen(function* () {
 				const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
 				return yield* Effect.promise(() =>
@@ -134,11 +187,10 @@ function taskJournal(runId: string, step: TaskStep): TurnJournal {
 						},
 						({ attempt, idempotencyKey, signal }) =>
 							runPromise(
-								run({
-									runId,
-									idempotencyKey,
-									recovering: step.interrupted?.name === name || attempt > 1,
-								}).pipe(
+								restartBudget.pipe(
+									Effect.flatMap(() =>
+										run({ runId, idempotencyKey, recovering: interrupted !== null || attempt > 1 }),
+									),
 									Effect.flatMap(Schema.decodeUnknownEffect(result)),
 									Effect.flatMap(Schema.encodeEffect(checkpointJson)),
 									Effect.withSpan("harness.step.attempt", {
@@ -194,7 +246,10 @@ export abstract class CloudflareHarness<
 
 	readonly #conversation = new ConversationStore(
 		this.ctx.storage,
-		(runId, outcome) => this.settleRunState?.(runId, outcome),
+		(runId, outcome) => {
+			this.ctx.storage.kv.delete(stepInterruptionsKey(runId));
+			return this.settleRunState?.(runId, outcome);
+		},
 		(activity) => this.describeRecoveredTool(activity),
 	);
 	readonly #inbox = new InboxWake(() => this.#drainInbox());
@@ -322,7 +377,7 @@ export abstract class CloudflareHarness<
 		);
 		const transcript = yield* runTurn(
 			{ id: row.submission_id, prompt: row.prompt },
-			taskJournal(runId, step),
+			taskJournal(runId, step, this.ctx.storage),
 			context,
 			(event) => Effect.sync(() => this.onProgress?.(runId, event)),
 			modelContext,

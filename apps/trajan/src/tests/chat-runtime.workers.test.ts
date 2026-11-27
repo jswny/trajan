@@ -108,6 +108,23 @@ async function waitForRestart(stub: ReturnType<typeof openFixture>, instance: st
 	return env.CHAT_TEST.get(stub.id);
 }
 
+async function interruptPausedTurn(stub: ReturnType<typeof openFixture>, point: string) {
+	await expect
+		.poll(
+			async () => {
+				const { instance, pausedInstance, pausedAt } = await stub.state();
+				return instance === pausedInstance ? pausedAt : undefined;
+			},
+			{ timeout: 5000 },
+		)
+		.toBe(point);
+	const { instance } = await stub.state();
+	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+	const restarted = await waitForRestart(stub, instance);
+	await restarted.history({});
+	return restarted;
+}
+
 async function submit(stub: ReturnType<typeof openFixture>, input = submission) {
 	const receipt = await stub.submit(input);
 	if (receipt.runId === null) {
@@ -178,6 +195,118 @@ test("retries a model step after a successful tool without running the tool agai
 		.toMatchObject({ state: "completed" });
 	expect(await stub.state()).toMatchObject({ text: "Retry after append." });
 });
+
+test.each([
+	{ work: "model request", point: "between-tools" },
+	{ work: "tool step", point: "after-write" },
+] as const)(
+	"settles a repeatedly interrupted $work and runs the queued follow-up",
+	async ({ work, point }) => {
+		let stub = openFixture();
+		await stub.pause(point);
+		const input = { id: "repeated-reset", prompt: "Append hello, then world." };
+		const first = await submit(stub, input);
+		const followUp = await submit(stub, {
+			id: "follow-up",
+			prompt: "Report recent runtime outcomes.",
+		});
+		for (let count = 0; count < 5; count++) {
+			await expect.poll(() => stub.state()).toMatchObject({ text: "hello" });
+			expect(await stub.turn(first.runId)).toMatchObject({ state: "running" });
+			expect(await stub.turn(followUp.runId)).toMatchObject({ state: "pending" });
+			stub = await interruptPausedTurn(stub, point);
+		}
+		const text = `The turn stopped after 5 consecutive interruptions of the same ${work}.`;
+		const failure = { code: "restart_limit", message: text };
+		await expect.poll(() => stub.turn(first.runId)).toMatchObject({ state: "failed", failure });
+		await expect
+			.poll(() => readTurn(stub, followUp.runId))
+			.toMatchObject({
+				state: "completed",
+				result: {
+					messages: [
+						{ role: "user" },
+						{
+							role: "assistant",
+							text: expect.stringContaining(
+								'"name":"write","status":"completed","path":"/workspace/turn.txt"',
+							),
+						},
+					],
+				},
+			});
+		const followUpMessages = (await readTurn(stub, followUp.runId)).result?.messages;
+		expect(followUpMessages?.at(-1)).toMatchObject({ text: expect.stringContaining(text) });
+		const { instance } = await stub.state();
+		await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
+		stub = await waitForRestart(stub, instance);
+		expect(await stub.turn(first.runId)).toMatchObject({ state: "failed", failure });
+		const history = await stub.history({});
+		expect(
+			history.entries
+				.filter(({ submissionId }) => submissionId === input.id)
+				.map(({ message }) => Schema.decodeSync(messageJson)(message)),
+		).toMatchObject([
+			{ role: "user", text: input.prompt },
+			{ role: "tool-call", id: "append-1" },
+			{
+				role: "tool",
+				callId: "append-1",
+				result: {
+					status: "completed",
+					output: "hello",
+					activity: [
+						{ name: "read" },
+						{
+							name: "write",
+							status: "completed",
+							fileChange: { diff: expect.stringContaining("+hello") },
+						},
+					],
+				},
+			},
+			{ role: "notice", status: "failed", text },
+		]);
+		expect((await stub.state()).text).toBe("hello");
+	},
+	15_000,
+);
+
+test("the next checkpoint starts with its own restart budget", async () => {
+	let stub = openFixture();
+	await stub.pause("between-tools");
+	const { runId } = await submit(stub, {
+		id: "change-checkpoint",
+		prompt: "Append hello, then world.",
+	});
+	for (let count = 0; count < 4; count++) {
+		stub = await interruptPausedTurn(stub, "between-tools");
+	}
+	await stub.pause("after-write");
+	stub = await interruptPausedTurn(stub, "after-write");
+	await stub.release();
+	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "completed" });
+	expect((await stub.state()).text).toBe("hello world");
+}, 15_000);
+
+test("an ordinary model retry leaves the full restart budget available", async () => {
+	let stub = openFixture();
+	await stub.pause("during-reply");
+	const { runId } = await submit(stub, { id: "retry-then-reset", prompt: "Retry after append." });
+	for (let count = 0; count < 4; count++) {
+		stub = await interruptPausedTurn(stub, "during-reply");
+	}
+	await expect
+		.poll(async () => {
+			const { instance, pausedInstance } = await stub.state();
+			return instance === pausedInstance;
+		})
+		.toBe(true);
+	expect(await stub.turn(runId)).toMatchObject({ state: "running" });
+	await stub.release();
+	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "completed" });
+	expect((await stub.state()).text).toBe("Retry after append.");
+}, 15_000);
 
 test("lists an empty workspace before the first write and preserves files across a reset", async () => {
 	let stub = openFixture();

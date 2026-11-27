@@ -802,8 +802,9 @@ sequenceDiagram
 	async state() {
 		const executionId = await this.ctx.storage.get<string>("executionId");
 		const pausedAt = await this.ctx.storage.get<PausePoint>("pausedAt");
+		const pausedInstance = await this.ctx.storage.get<string>("pausedInstance");
 		const text = await this.#readWorkspaceText();
-		return { instance: this.#instance, executionId, pausedAt, text };
+		return { instance: this.#instance, executionId, pausedAt, pausedInstance, text };
 	}
 
 	async replayCalls() {
@@ -890,6 +891,7 @@ sequenceDiagram
 		}
 		await this.ctx.storage.put({
 			pausedAt: point,
+			pausedInstance: this.#instance,
 			...(executionId !== undefined && { executionId }),
 		});
 		while ((await this.ctx.storage.get("pause")) === point) {
