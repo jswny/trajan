@@ -191,6 +191,29 @@ test.each([
 	},
 );
 
+test.each([
+	{ writes: 2, overloaded: false, modelAttempts: 1 },
+	{ writes: 3, overloaded: false, modelAttempts: 2 },
+	{ writes: 1, overloaded: true, modelAttempts: 2 },
+])(
+	"recovers after $writes failed handoff writes (overloaded: $overloaded)",
+	async ({ writes, overloaded, modelAttempts }) => {
+		const stub = openFixture();
+		await stub.failToolHandoffWrites(writes, overloaded);
+		const { runId } = await submit(stub, { id: "handoff-retry", prompt: handoffPrompt });
+		await expect
+			.poll(() => stub.turn(runId), { timeout: 5000 })
+			.toMatchObject({ state: "completed" });
+		expect((await stub.state()).text).toBe(handoffPrompt);
+		expect(
+			await runInDurableObject(stub, (_, { storage }) => ({
+				modelAttempts: storage.kv.get("handoff-model-attempts"),
+				fault: storage.kv.get("tool-handoff-write-fault"),
+			})),
+		).toEqual({ modelAttempts, fault: { remaining: 0, overloaded } });
+	},
+);
+
 test("stopping a turn discards its committed tool handoff before exec runs", async () => {
 	const stub = openFixture();
 	await stub.pause("after-tool-handoff");

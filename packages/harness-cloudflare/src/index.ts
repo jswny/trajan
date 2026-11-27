@@ -21,7 +21,7 @@ import { Lifecycle, LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
 import { NonRetryableError, Tasks } from "agents/tasks";
 import type { TaskStep } from "agents/tasks";
-import { Clock, Effect, Option, Schema } from "effect";
+import { Clock, Effect, Option, Schedule, Schema } from "effect";
 import type { Layer } from "effect";
 import { ConversationStore } from "./conversation-store";
 import type { HistoryQuery } from "./conversation-store";
@@ -46,6 +46,13 @@ const decodeStepInterruptions = Schema.decodeUnknownSync(
 const stepInterruptionsKey = (runId: string) => `harness-turn:interruptions:${runId}`;
 const toolHandoffPrefix = (runId: string) => `harness-tool-handoff:${runId}:`;
 const decodeToolHandoff = Schema.decodeUnknownEffect(Schema.UndefinedOr(Schema.String));
+const isRetryableHandoffFailure = Schema.is(
+	Schema.Struct({
+		retryable: Schema.Literal(true),
+		overloaded: Schema.optionalKey(Schema.Literal(false)),
+		durableObjectReset: Schema.optionalKey(Schema.Literal(false)),
+	}),
+);
 const isToolCall = Schema.is(ToolCall);
 
 type ToolHandoffPhase = "before-tool-handoff" | "after-tool-handoff";
@@ -227,19 +234,29 @@ function taskJournal(
 				if (handoffKey === undefined || !isToolCall(value)) {
 					return encoded;
 				}
-				if (onHandoff) {
-					yield* Effect.promise(() => onHandoff("before-tool-handoff", signal));
-				}
-				yield* conversationEffect("commit tool handoff", () =>
-					storage.transactionSync(() => {
-						signal.throwIfAborted();
-						if (storage.kv.get(handoffKey) === undefined) {
-							storage.kv.put(handoffKey, encoded);
-							drafts.clearCheckpoint(runId, name);
-						}
+				yield* Effect.gen(function* () {
+					if (onHandoff) {
+						yield* lifecycleEffect("prepare tool handoff", () =>
+							onHandoff("before-tool-handoff", signal),
+						);
+					}
+					yield* conversationEffect("commit tool handoff", () =>
+						storage.transactionSync(() => {
+							signal.throwIfAborted();
+							if (storage.kv.get(handoffKey) === undefined) {
+								storage.kv.put(handoffKey, encoded);
+								drafts.clearCheckpoint(runId, name);
+							}
+						}),
+					);
+					yield* lifecycleEffect("flush tool handoff", () => storage.sync());
+				}).pipe(
+					Effect.retry({
+						times: 2,
+						schedule: Schedule.spaced("100 millis"),
+						while: ({ cause }) => isRetryableHandoffFailure(cause),
 					}),
 				);
-				yield* lifecycleEffect("flush tool handoff", () => storage.sync());
 				if (onHandoff) {
 					yield* Effect.promise(() => onHandoff("after-tool-handoff", signal));
 				}

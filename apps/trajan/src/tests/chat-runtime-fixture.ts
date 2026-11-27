@@ -826,11 +826,29 @@ sequenceDiagram
 				throw new Error("Fixture failed to start the inbox task.");
 			}
 		}
+		if (phase === "before-tool-handoff") {
+			const kv = this.ctx.storage.kv;
+			const failure = kv.get<{ remaining: number; overloaded: boolean }>(
+				"tool-handoff-write-fault",
+			);
+			if (failure && failure.remaining > 0) {
+				kv.put("tool-handoff-write-fault", { ...failure, remaining: failure.remaining - 1 });
+				await this.ctx.storage.sync();
+				throw Object.assign(new Error("Fixture tool handoff write failed."), {
+					retryable: true,
+					overloaded: failure.overloaded,
+				});
+			}
+		}
 		await this.#pauseAt(phase, signal);
 	}
 
 	failInboxWake(attempts: number) {
 		return this.ctx.storage.put("inbox-wake-faults", attempts);
+	}
+
+	failToolHandoffWrites(remaining: number, overloaded: boolean) {
+		return this.ctx.storage.put("tool-handoff-write-fault", { remaining, overloaded });
 	}
 
 	async setTranscriptWriteFailure(fail: boolean) {
