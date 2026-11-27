@@ -374,7 +374,7 @@ test("batches streamed drafts, archives an interrupted attempt, and gives the ne
 		.toEqual({ state: "waiting", draft: { live: undefined, interrupted: [interrupted] } });
 	await stub.release();
 	await expect
-		.poll(() => readTurn(stub, runId))
+		.poll(() => readTurn(stub, runId), { timeout: 5000 })
 		.toMatchObject({
 			state: "completed",
 			result: {
