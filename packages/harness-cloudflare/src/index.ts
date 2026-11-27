@@ -3,6 +3,7 @@ import {
 	publishUpdate,
 	restoreModelContext,
 	runTurn,
+	ToolCall,
 	TurnIoError,
 	TurnModel,
 	TurnModelError,
@@ -25,6 +26,7 @@ import { Clock, Effect, Option, Schema } from "effect";
 import type { Layer } from "effect";
 import { ConversationStore } from "./conversation-store";
 import type { HistoryQuery } from "./conversation-store";
+import { ModelDrafts } from "./model-drafts";
 
 // Tasks and jobs use these names to look up work persisted by prior isolates.
 const turnDefinition = "turn@v3";
@@ -41,6 +43,7 @@ const decodeStepInterruptions = Schema.decodeUnknownSync(
 	),
 );
 const stepInterruptionsKey = (runId: string) => `harness-turn:interruptions:${runId}`;
+const isToolCall = Schema.is(ToolCall);
 
 class TurnTaskInputError extends Schema.TaggedError<
 	TurnTaskInputError,
@@ -163,7 +166,12 @@ const recordInterruption = Effect.fnUntraced(function* (
 	return count;
 });
 
-function taskJournal(runId: string, step: TaskStep, storage: DurableObjectStorage): TurnJournal {
+function taskJournal(
+	runId: string,
+	step: TaskStep,
+	storage: DurableObjectStorage,
+	drafts: ModelDrafts,
+): TurnJournal {
 	return {
 		checkpoint({ kind, name }, result, run) {
 			const checkpointJson = Schema.fromJsonString(result);
@@ -185,11 +193,20 @@ function taskJournal(runId: string, step: TaskStep, storage: DurableObjectStorag
 						{
 							retries: kind === "model" ? { limit: 2, delay: "1 second" } : { limit: 1 },
 						},
-						({ attempt, idempotencyKey, signal }) =>
-							runPromise(
+						({ attempt, idempotencyKey, signal }) => {
+							const input = {
+								runId,
+								idempotencyKey,
+								recovering: interrupted !== null || attempt > 1,
+							};
+							return runPromise(
 								restartBudget.pipe(
 									Effect.flatMap(() =>
-										run({ runId, idempotencyKey, recovering: interrupted !== null || attempt > 1 }),
+										kind === "model"
+											? drafts.capture(runId, name, attempt, (recordText) =>
+													run({ ...input, recordText }),
+												)
+											: run(input),
 									),
 									Effect.flatMap(Schema.decodeUnknownEffect(result)),
 									Effect.flatMap(Schema.encodeEffect(checkpointJson)),
@@ -198,7 +215,8 @@ function taskJournal(runId: string, step: TaskStep, storage: DurableObjectStorag
 									}),
 								),
 								{ signal },
-							),
+							);
+						},
 					),
 				).pipe(
 					Effect.catchDefect((error) => {
@@ -213,6 +231,11 @@ function taskJournal(runId: string, step: TaskStep, storage: DurableObjectStorag
 						return Effect.die(error);
 					}),
 					Effect.flatMap(Schema.decodeEffect(checkpointJson)),
+					Effect.tap((value) =>
+						kind === "model" && isToolCall(value)
+							? Effect.sync(() => drafts.clearCheckpoint(runId, name))
+							: Effect.void,
+					),
 				);
 			}).pipe(Effect.withSpan("harness.checkpoint", { attributes: { runId, name } }));
 		},
@@ -244,11 +267,15 @@ export abstract class CloudflareHarness<
 		return { name, status };
 	}
 
+	readonly #drafts = new ModelDrafts(this.ctx.storage);
 	readonly #conversation = new ConversationStore(
 		this.ctx.storage,
 		(runId, outcome) => {
 			this.ctx.storage.kv.delete(stepInterruptionsKey(runId));
-			return this.settleRunState?.(runId, outcome);
+			return [
+				...(this.settleRunState?.(runId, outcome) ?? []),
+				...this.#drafts.settle(runId, outcome !== "completed"),
+			];
 		},
 		(activity) => this.describeRecoveredTool(activity),
 	);
@@ -377,7 +404,7 @@ export abstract class CloudflareHarness<
 		);
 		const transcript = yield* runTurn(
 			{ id: row.submission_id, prompt: row.prompt },
-			taskJournal(runId, step, this.ctx.storage),
+			taskJournal(runId, step, this.ctx.storage, this.#drafts),
 			context,
 			(event) => Effect.sync(() => this.onProgress?.(runId, event)),
 			modelContext,
@@ -393,6 +420,10 @@ export abstract class CloudflareHarness<
 
 	protected runState() {
 		return this.#conversation.status();
+	}
+
+	protected readModelDraft(runId: string) {
+		return this.#drafts.read(runId);
 	}
 
 	protected snapshot() {

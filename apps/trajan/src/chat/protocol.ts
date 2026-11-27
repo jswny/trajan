@@ -1,4 +1,4 @@
-import { ToolActivity, ToolCall, ToolResult, TurnMessage } from "@trajan/harness";
+import { InterruptedReply, ToolActivity, ToolCall, ToolResult, TurnMessage } from "@trajan/harness";
 import { Schema } from "effect";
 
 export const ChatPath = "/api/chat";
@@ -73,6 +73,7 @@ export const ChatToolPreview = Schema.Struct({
 export const ChatPreview = Schema.Struct({
 	runId: RunId,
 	text: Schema.String,
+	interrupted: Schema.Array(InterruptedReply),
 	tools: Schema.Array(ChatToolPreview),
 });
 
@@ -105,7 +106,11 @@ export const ChatEvent = Schema.Union([
 	ChatSnapshot,
 	ChatRunState,
 	Schema.Struct({ type: Schema.Literal("browser"), browserWatch: BrowserWatch }),
-	Schema.Struct({ type: Schema.Literal("reset"), runId: RunId }),
+	Schema.Struct({
+		type: Schema.Literal("reset"),
+		runId: RunId,
+		interrupted: ChatPreview.fields.interrupted,
+	}),
 	Schema.Struct({ type: Schema.Literal("tool"), runId: RunId, tool: ChatToolPreview }),
 	Schema.Struct({
 		type: Schema.Literal("text-delta"),

@@ -290,10 +290,6 @@ export class ConversationStore {
 	}
 
 	commit(runId: string, transcript: TurnCompletion, outcomesThrough: number) {
-		const messages = transcript.messages.map((message) => ({
-			role: message.role,
-			json: Schema.encodeSync(messageJson)(message),
-		}));
 		return this.storage.transactionSync(() => {
 			const row = this.#find(runId);
 			if (row?.submission_id !== transcript.submissionId) {
@@ -306,14 +302,12 @@ export class ConversationStore {
 				throw new Error("The turn is not running.");
 			}
 
-			for (const message of messages) {
-				this.storage.sql.exec(
-					"INSERT INTO harness_entries (submission_seq, role, message) VALUES (?, ?, ?)",
-					row.seq,
-					message.role,
-					message.json,
-				);
-			}
+			const recovered = this.settleRunState(runId, "completed") ?? [];
+			this.#appendEntries(row.seq, [
+				...transcript.messages.slice(0, -1),
+				...recovered,
+				...transcript.messages.slice(-1),
+			]);
 			this.storage.sql.exec(
 				"UPDATE harness_submissions SET state = 'completed' WHERE seq = ?",
 				row.seq,
@@ -324,7 +318,6 @@ export class ConversationStore {
 				this.storage.kv.delete(modelContextKey);
 			}
 			this.storage.kv.put(modelOutcomesCursorKey, outcomesThrough);
-			this.settleRunState(runId, "completed");
 		});
 	}
 
@@ -367,20 +360,23 @@ export class ConversationStore {
 				status === "failed" ? text : null,
 				row.seq,
 			);
-			const messages: ReadonlyArray<typeof TurnMessage.Type> = [
+			this.#appendEntries(row.seq, [
 				{ role: "user", text: row.prompt },
 				...(this.settleRunState(runId, status) ?? []),
 				{ role: "notice", status, text },
-			];
-			for (const message of messages) {
-				this.storage.sql.exec(
-					"INSERT INTO harness_entries (submission_seq, role, message) VALUES (?, ?, ?)",
-					row.seq,
-					message.role,
-					Schema.encodeSync(messageJson)(message),
-				);
-			}
+			]);
 		});
+	}
+
+	#appendEntries(submission: number, messages: ReadonlyArray<typeof TurnMessage.Type>) {
+		for (const message of messages) {
+			this.storage.sql.exec(
+				"INSERT INTO harness_entries (submission_seq, role, message) VALUES (?, ?, ?)",
+				submission,
+				message.role,
+				Schema.encodeSync(messageJson)(message),
+			);
+		}
 	}
 
 	status() {

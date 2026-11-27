@@ -6,6 +6,9 @@ import type { ChatMessage, ChatTool, ChatTurn } from "./chat-view";
 import { Icon } from "./icons";
 import { ToolCard } from "./tool-card";
 
+const disclosureRow =
+	"inline-flex min-h-7 max-w-full cursor-pointer list-none flex-wrap items-center gap-x-1.5 text-xs text-muted hover:text-ink focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring [&::-webkit-details-marker]:hidden";
+
 function TranscriptEntry<M>(h: Html.H<M>, message: Exclude<ChatMessage, ChatTool>) {
 	switch (message.role) {
 		case "user":
@@ -25,6 +28,23 @@ function TranscriptEntry<M>(h: Html.H<M>, message: Exclude<ChatMessage, ChatTool
 				.key(message.id)
 				.attr("data-chat-entry", "")
 				.children(ChatMarkdown(h, message.id, message.text));
+		case "interrupted":
+			return h.details
+				.key(message.id)
+				.attrs({ "data-chat-entry": "", "data-interrupted-reply": "" })
+				.class("group/interrupted")
+				.children(
+					h.summary
+						.attr("data-inspect", "")
+						.class(disclosureRow)
+						.children(
+							message.truncated ? "Interrupted reply · Truncated" : "Interrupted reply",
+							Icon(h, "chevron", 12, "-rotate-90 group-open/interrupted:rotate-0"),
+						),
+					h.div
+						.class("border-s border-line ps-3 text-muted")
+						.children(ChatMarkdown(h, message.id, message.text)),
+				);
 		case "notice":
 			return message.status === "failed"
 				? h.div
@@ -53,9 +73,7 @@ function ToolActivityDisclosure<M>(h: Html.H<M>, tools: ReadonlyArray<ChatTool>,
 		.children(
 			h.summary
 				.attrs({ "data-tool-activity": "", "data-chat-entry": "", "data-inspect": "" })
-				.class(
-					"inline-flex min-h-7 max-w-full cursor-pointer list-none flex-wrap items-center gap-x-1.5 text-xs text-muted hover:text-ink focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring [&::-webkit-details-marker]:hidden",
-				)
+				.class(disclosureRow)
 				.children(
 					working && Icon(h, "loader", 12, "motion-safe:animate-spin"),
 					working ? "Working…" : "Tool activity",

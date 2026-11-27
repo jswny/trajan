@@ -9,7 +9,14 @@ import { toolActivity } from "../chat/tool-activity";
 import { createLiveBrowser } from "../live-browser";
 import { nextWeeklyRun } from "../schedule-plan";
 import { FileMutationReceipt } from "@trajan/workspace-cloudflare";
-import { appendExecInput, skillExecInput } from "./chat-runtime-fixture";
+import {
+	appendExecInput,
+	draftExcerpt,
+	draftPrompt,
+	draftReply,
+	longDraftPrompt,
+	skillExecInput,
+} from "./chat-runtime-fixture";
 import {
 	compactReference,
 	compactResumePrompt,
@@ -304,9 +311,96 @@ test("an ordinary model retry leaves the full restart budget available", async (
 		.toBe(true);
 	expect(await stub.turn(runId)).toMatchObject({ state: "running" });
 	await stub.release();
-	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "completed" });
+	await expect
+		.poll(() => readTurn(stub, runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user" },
+					{ role: "tool-call" },
+					{ role: "tool" },
+					...Array.from({ length: 4 }, (_, index) => ({
+						role: "interrupted",
+						attemptId: `model:1:${index + 2}`,
+						text: "Wrote",
+						truncated: false,
+					})),
+					{ role: "assistant", text: 'Wrote "Retry after append."' },
+				],
+			},
+		});
 	expect((await stub.state()).text).toBe("Retry after append.");
 }, 15_000);
+
+test("batches streamed drafts, archives an interrupted attempt, and gives the next request only the final reply", async () => {
+	let stub = openFixture();
+	await stub.pause("during-reply");
+	const { runId } = await submit(stub, { id: "draft", prompt: draftPrompt });
+	const savedDraft = () =>
+		runInDurableObject(stub, (_, { storage }) => storage.kv.get(`harness-draft:live:${runId}`));
+	await expect.poll(savedDraft, { timeout: 5000 }).toMatchObject({ text: draftExcerpt });
+	const interrupted = {
+		role: "interrupted",
+		attemptId: "model:0:1",
+		text: draftExcerpt,
+		truncated: false,
+	};
+	stub = await interruptPausedTurn(stub, "during-reply");
+	await expect
+		.poll(() =>
+			runInDurableObject(stub, (_, { storage }) =>
+				storage.kv.get(`harness-draft:interrupted:${runId}`),
+			),
+		)
+		.toEqual([interrupted]);
+	await stub.release();
+	await expect
+		.poll(() => readTurn(stub, runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: draftPrompt },
+					interrupted,
+					{ role: "assistant", text: draftReply },
+				],
+			},
+		});
+	expect(
+		await runInDurableObject(
+			stub,
+			(_, { storage }) => Array.from(storage.kv.list({ prefix: "harness-draft:" })).length,
+		),
+	).toBe(0);
+	const followUp = await submit(stub, {
+		id: "context",
+		prompt: "Which assistant replies did you receive?",
+	});
+	await expect
+		.poll(() => readTurn(stub, followUp.runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [{ role: "user" }, { role: "assistant", text: JSON.stringify([draftReply]) }],
+			},
+		});
+});
+
+test("a stopped large draft is archived with a Unicode-safe truncation marker", async () => {
+	const stub = openFixture();
+	await stub.pause("during-reply");
+	const { runId } = await submit(stub, { id: "long-draft", prompt: longDraftPrompt });
+	await expect.poll(() => stub.state()).toMatchObject({ pausedAt: "during-reply" });
+	expect(await stub.stop(runId)).toMatchObject({ stopped: true });
+	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "cancelled" });
+	const { entries } = await stub.history({});
+	expect(entries.map(({ message }) => Schema.decodeSync(messageJson)(message))).toEqual([
+		{ role: "user", text: longDraftPrompt },
+		{ role: "interrupted", attemptId: "model:0:1", text: "x".repeat(7999), truncated: true },
+		{ role: "notice", status: "cancelled", text: "Stopped" },
+	]);
+});
 
 test("lists an empty workspace before the first write and preserves files across a reset", async () => {
 	let stub = openFixture();
@@ -901,11 +995,17 @@ test("stops only the active run and drains a queued follow-up", async () => {
 		.toMatchObject({ state: "cancelled", transcript: null });
 	await stub.release();
 	await expect.poll(() => stub.turn(queued.runId)).toMatchObject({ state: "completed" });
-	expect((await stub.history({})).entries.map(({ submissionId }) => submissionId)).toEqual([
-		"stop-this",
-		"stop-this",
-		"next",
-		"next",
+	expect(
+		(await stub.history({})).entries.map(({ submissionId, message }) => ({
+			submissionId,
+			...Schema.decodeSync(messageJson)(message),
+		})),
+	).toMatchObject([
+		{ submissionId: "stop-this", role: "user" },
+		{ submissionId: "stop-this", role: "interrupted", text: "Remem" },
+		{ submissionId: "stop-this", role: "notice", text: "Stopped" },
+		{ submissionId: "next", role: "user" },
+		{ submissionId: "next", role: "assistant" },
 	]);
 });
 

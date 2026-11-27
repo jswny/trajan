@@ -1,4 +1,9 @@
-import { ToolContentPart, toolResultContent, UncertainToolEffect } from "@trajan/harness";
+import {
+	InterruptedReply,
+	ToolContentPart,
+	toolResultContent,
+	UncertainToolEffect,
+} from "@trajan/harness";
 import type { ToolResult } from "@trajan/harness";
 import type { ToolActivity as ToolActivityEntry, ToolCall } from "@trajan/harness";
 import { Schema } from "effect";
@@ -49,6 +54,7 @@ export function toolOutcome({ result }: ChatTool) {
 export const ChatMessage = Schema.Union([
 	ChatText,
 	ChatTool,
+	Schema.Struct({ ...InterruptedReply.fields, id: Schema.String }),
 	Schema.Struct({
 		id: Schema.String,
 		role: Schema.Literal("notice"),
@@ -68,6 +74,10 @@ export type ChatTurn = typeof ChatTurn.Type;
 
 export function chatText(id: string, role: ChatText["role"], text: string): ChatText {
 	return { id, role, text };
+}
+
+export function chatInterrupted(submissionId: string, reply: typeof InterruptedReply.Type) {
+	return { ...reply, id: `interrupted:${JSON.stringify([submissionId, reply.attemptId])}` };
 }
 
 export function chatTool(
@@ -125,6 +135,8 @@ function chatMessages(entries: (typeof ChatPage.Type)["entries"]): Array<ChatMes
 		switch (message.role) {
 			case "user":
 				return [chatText(`user:${submissionId}`, "user", message.text)];
+			case "interrupted":
+				return [chatInterrupted(submissionId, message)];
 			case "assistant":
 			case "notice":
 				return [{ id: key, ...message }];

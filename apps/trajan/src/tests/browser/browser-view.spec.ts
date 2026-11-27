@@ -70,6 +70,7 @@ async function mockLiveBrowser(page: Page) {
 				preview: {
 					runId: browsingTurn.runId,
 					text: "",
+					interrupted: [],
 					tools: [
 						{
 							call: { role: "tool-call", id: "exec", name: "exec", input: {} },

@@ -114,7 +114,20 @@ const TurnNotice = Schema.Struct({
 	status: Schema.Literals(["failed", "cancelled"]),
 	text: Schema.NonEmptyString,
 });
-export const TurnMessage = Schema.Union([UserMessage, Reply, ToolCall, ToolMessage, TurnNotice]);
+export const InterruptedReply = Schema.Struct({
+	role: Schema.Literal("interrupted"),
+	attemptId: Schema.NonEmptyString,
+	text: Schema.NonEmptyString,
+	truncated: Schema.Boolean,
+});
+export const TurnMessage = Schema.Union([
+	UserMessage,
+	Reply,
+	InterruptedReply,
+	ToolCall,
+	ToolMessage,
+	TurnNotice,
+]);
 export const ConversationMessage = Schema.Union([UserMessage, Reply]);
 export const RuntimeOutcome = Schema.Struct({
 	role: Schema.Literal("runtime-outcome"),
@@ -202,6 +215,7 @@ export interface StepAttempt {
 	readonly idempotencyKey: string;
 	/** An earlier attempt may have started this step's external work. */
 	readonly recovering: boolean;
+	readonly recordText?: (delta: string) => Effect.Effect<void>;
 }
 
 export interface TurnCheckpoint {
@@ -297,7 +311,7 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 		const decision = yield* journal.checkpoint(
 			{ kind: "model", name: `model:${index}` },
 			allowTools ? ModelResponse : ModelReply,
-			() =>
+			({ recordText }) =>
 				Effect.gen(function* () {
 					yield* notify({ type: "reset" });
 					const last = yield* model
@@ -306,7 +320,11 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 							...(modelContext !== undefined && { modelContext }),
 						})
 						.pipe(
-							Stream.tap((event) => (event.type === "text-delta" ? notify(event) : Effect.void)),
+							Stream.tap((event) =>
+								event.type === "text-delta"
+									? (recordText?.(event.text) ?? Effect.void).pipe(Effect.andThen(notify(event)))
+									: Effect.void,
+							),
 							Stream.runLast,
 						);
 					if (Option.isNone(last) || last.value.type !== "response") {
@@ -324,7 +342,7 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 						return { role: response.role, text: response.text };
 					}
 					return response;
-				}).pipe(Effect.tapError(() => notify({ type: "reset" }))),
+				}),
 		);
 
 		if (decision.role === "assistant") {

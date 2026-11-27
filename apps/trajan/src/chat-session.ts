@@ -88,6 +88,7 @@ export function receiveChatEvent(state: ChatState, event: typeof ChatEvent.Type)
 					? {
 							...event.preview.tools.reduce(updateToolPreview, previous),
 							text: event.preview.text,
+							interrupted: event.preview.interrupted,
 						}
 					: (event.preview ?? (previous && { ...previous, text: "" }));
 			const page = mergeChatPage(state.page, event.page);
@@ -109,12 +110,12 @@ export function receiveChatEvent(state: ChatState, event: typeof ChatEvent.Type)
 			const preview =
 				state.preview?.runId === event.runId
 					? state.preview
-					: { runId: event.runId, text: "", tools: [] };
+					: { runId: event.runId, text: "", interrupted: [], tools: [] };
 			return {
 				...state,
 				preview:
 					event.type === "reset"
-						? { ...preview, text: "" }
+						? { ...preview, text: "", interrupted: event.interrupted }
 						: updateToolPreview(preview, event.tool),
 			};
 		}

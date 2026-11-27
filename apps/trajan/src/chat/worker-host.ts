@@ -85,11 +85,12 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 	}
 
 	protected override onProgress(runId: string, event: TurnProgress) {
-		const draft = this.#draft?.runId === runId ? this.#draft : { runId, text: "", tools: [] };
+		const draft = this.#draft?.runId === runId ? this.#draft : this.#savedPreview(runId);
 		switch (event.type) {
 			case "reset": {
-				this.#draft = { ...draft, text: "" };
-				this.#broadcast({ type: "reset", runId });
+				const { interrupted } = this.readModelDraft(runId);
+				this.#draft = { ...draft, text: "", interrupted };
+				this.#broadcast({ type: "reset", runId, interrupted });
 				break;
 			}
 			case "tool":
@@ -124,15 +125,22 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 		this.#broadcast({ type: "tool", runId: draft.runId, tool });
 	}
 
+	#savedPreview(runId: string): typeof ChatPreview.Type {
+		return { runId, ...this.readModelDraft(runId), tools: [] };
+	}
+
 	#snapshot(): typeof ChatSnapshot.Type {
 		const { page, active, queued } = this.snapshot();
-		const draft = this.#draft;
+		const draft =
+			active &&
+			(this.#draft?.runId === active.runId ? this.#draft : this.#savedPreview(active.runId));
 		return {
 			type: "snapshot",
 			page,
 			active,
 			queued,
-			preview: draft && draft.runId === active?.runId ? draft : null,
+			preview:
+				draft && (draft.text || draft.tools.length || draft.interrupted.length) ? draft : null,
 			browserWatch: this.browserWatch,
 		};
 	}

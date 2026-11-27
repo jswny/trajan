@@ -297,7 +297,7 @@ test("keeps browser memory bounded while waiting for a model reply", async ({ co
 	await expect(transcript.getByText('Wrote "hello"', { exact: true })).toBeVisible();
 });
 
-test("restores an interrupted stream into the chat without repeating the tool", async ({
+test("restores a live draft and keeps its interrupted attempt without repeating the tool", async ({
 	page,
 }) => {
 	const composer = await openChat(page);
@@ -305,15 +305,26 @@ test("restores an interrupted stream into the chat without repeating the tool", 
 	await composer.fill("hello");
 	await composer.press("Enter");
 	const transcript = page.getByRole("main");
-	await expect(transcript.getByText("Wrote", { exact: true })).toBeVisible();
+	const live = transcript.locator('[data-streaming="true"]');
+	const interrupted = transcript.locator("[data-interrupted-reply]");
+	await expect(live).toHaveText("Wrote");
+	await openChat(page);
+	await expect(live).toHaveText("Wrote");
+	await expect(interrupted).toHaveCount(0);
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
-	await page.reload();
-	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
-	await expect(transcript.getByText("Wrote", { exact: true })).toHaveCount(1);
+	await openChat(page);
+	await expect(interrupted.locator("summary")).toHaveText("Interrupted reply");
+	await expect(live).toHaveText("Wrote");
+	await interrupted.locator("summary").click();
+	await expect(interrupted.getByText("Wrote", { exact: true })).toBeVisible();
 	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
-	await expect(transcript.getByText('Wrote "hello"', { exact: true })).toHaveCount(1);
+	await expect(live).toHaveCount(0);
+	await expect(interrupted.getByText("Wrote", { exact: true })).toBeVisible();
+	await expect(transcript.getByText('Wrote "hello"', { exact: true })).toBeVisible();
 	await expect(transcript.getByText("hello", { exact: true })).toHaveCount(1);
-	await page.reload();
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await openChat(page);
+	await expect(interrupted.locator("summary")).toHaveText("Interrupted reply");
 	await expect(transcript.getByText('Wrote "hello"', { exact: true })).toHaveCount(1);
 });
 

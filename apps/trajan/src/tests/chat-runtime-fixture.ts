@@ -27,11 +27,21 @@ import {
 
 const chatFixtureReset = "Forced chat fixture restart";
 const mermaidPrompt = "Show the delivery flow.";
+export const draftPrompt = "Stream a draft recovery example.";
+export const draftExcerpt = "The workspace is ready.\n\nI saved the checklist.";
+export const draftReply = `${draftExcerpt}\n\nThe final check passed.`;
+export const longDraftPrompt = "Stream an oversized draft.";
+const longDraft = `${"x".repeat(7999)}📝followed by more text`;
 const openMermaidFence = `\`\`\`mermaid
 flowchart TD
   accTitle: Delivery flow
   A[Queued] --> B[Running]
 `;
+const excerptLengths = new Map([
+	[mermaidPrompt, openMermaidFence.length],
+	[draftPrompt, draftExcerpt.length],
+	[longDraftPrompt, longDraft.length],
+]);
 type PausePoint =
 	| "before-task"
 	| "after-write"
@@ -351,6 +361,18 @@ export class ChatTestObject extends TrajanChatObject {
 			return yield* new TurnModelError({
 				message: "The fixture model failed.",
 			});
+		}
+		if (last?.role === "user" && last.text === draftPrompt) {
+			return { role: "assistant", text: draftReply };
+		}
+		if (last?.role === "user" && last.text === longDraftPrompt) {
+			return { role: "assistant", text: longDraft };
+		}
+		if (last?.role === "user" && last.text === "Which assistant replies did you receive?") {
+			const replies = messages.flatMap((message) =>
+				message.role === "assistant" ? [message.text] : [],
+			);
+			return { role: "assistant", text: JSON.stringify(replies) };
 		}
 		if (last?.role === "user" && last.text.startsWith("Remember ")) {
 			return { role: "assistant", text: `Remembering ${last.text.slice("Remember ".length)}` };
@@ -713,11 +735,11 @@ sequenceDiagram
 							if (response.role !== "assistant") {
 								return end;
 							}
-							const excerpt = response.text.slice(
-								0,
-								user?.text === mermaidPrompt ? openMermaidFence.length : 5,
-							);
-							return Stream.succeed<TurnModelEvent>({ type: "text-delta", text: excerpt }).pipe(
+							const excerpt = response.text.slice(0, excerptLengths.get(user?.text ?? "") ?? 5);
+							const deltas =
+								user?.text === draftPrompt ? [excerpt.slice(0, 5), excerpt.slice(5)] : [excerpt];
+							return Stream.fromIterable(deltas).pipe(
+								Stream.map((text): TurnModelEvent => ({ type: "text-delta", text })),
 								Stream.concat(
 									Stream.fromEffect(
 										Effect.tryPromise({

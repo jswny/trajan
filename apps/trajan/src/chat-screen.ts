@@ -4,7 +4,7 @@ import type { AtomRegistry } from "effect/reactivity";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { ChatSession, INITIAL_CHAT } from "./chat-session";
 import type { PromptDraft } from "./chat-session";
-import { chatText, chatTool, ChatTurn, chatTurns } from "./chat-view";
+import { chatInterrupted, chatText, chatTool, ChatTurn, chatTurns } from "./chat-view";
 
 export const draftAtom = Atom.make<PromptDraft>({ text: "" }).pipe(Atom.keepAlive);
 const isTurnPrompt = Schema.is(TurnPrompt);
@@ -44,6 +44,7 @@ const previewAtom = Atom.make(
 	(get) => AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.preview,
 );
 const toolPreviewsAtom = Atom.make((get) => get(previewAtom)?.tools);
+const interruptedRepliesAtom = Atom.make((get) => get(previewAtom)?.interrupted);
 const activeMessagesAtom = Atom.make((get) => {
 	const active = get(runAtom);
 	return active
@@ -51,6 +52,9 @@ const activeMessagesAtom = Atom.make((get) => {
 				chatText(`user:${active.submissionId}`, "user", active.prompt),
 				...(get(toolPreviewsAtom) ?? []).map(({ call, result, activity }) =>
 					chatTool(active.submissionId, call.id, call, result, activity),
+				),
+				...(get(interruptedRepliesAtom) ?? []).map((reply) =>
+					chatInterrupted(active.submissionId, reply),
 				),
 			]
 		: [];

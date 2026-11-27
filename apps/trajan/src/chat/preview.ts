@@ -6,7 +6,7 @@ export function updateToolPreview(
 ): typeof ChatPreview.Type {
 	const existing = preview.tools.find(({ call }) => call.id === tool.call.id);
 	if (!existing) {
-		return { ...preview, text: "", tools: [...preview.tools, tool] };
+		return { ...preview, text: tool.result ? preview.text : "", tools: [...preview.tools, tool] };
 	}
 	if (
 		!tool.result &&
