@@ -4,7 +4,7 @@ import { env } from "cloudflare:workers";
 import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/harness";
 import { Effect, Schema } from "effect";
 import { expect, test } from "vite-plus/test";
-import { ChatEvent, ChatPath } from "../chat/protocol";
+import { ChatEvent, ChatLivePath } from "../chat/protocol";
 import { toolActivity } from "../chat/tool-activity";
 import { createLiveBrowser } from "../live-browser";
 import { nextWeeklyRun } from "../schedule-plan";
@@ -786,7 +786,7 @@ test("a chat socket restores a completed transcript from durable history", async
 	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "completed" });
 	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
 	const response = await env.CHAT_TEST.get(stub.id).fetch(
-		new Request(`https://fixture${ChatPath}/live`, { headers: { Upgrade: "websocket" } }),
+		new Request(`https://fixture${ChatLivePath}`, { headers: { Upgrade: "websocket" } }),
 	);
 	const socket = response.webSocket;
 	if (!socket) {

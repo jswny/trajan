@@ -2,12 +2,13 @@ import { ToolActivity, ToolCall, ToolResult, TurnMessage } from "@trajan/harness
 import { Schema } from "effect";
 
 export const ChatPath = "/api/chat";
+export const ChatLivePath = `${ChatPath}/live`;
 export const ChatHistoryPath = `${ChatPath}/history`;
 export const ChatStopPath = `${ChatPath}/stop`;
 export const BrowserViewPath = `${ChatPath}/browser-view`;
 export const BrowserViewRequest = Schema.Struct({ id: Schema.NonEmptyString });
 export function isChatPath(pathname: string) {
-	return [ChatPath, `${ChatPath}/live`, ChatHistoryPath, ChatStopPath, BrowserViewPath].includes(
+	return [ChatPath, ChatLivePath, ChatHistoryPath, ChatStopPath, BrowserViewPath].includes(
 		pathname,
 	);
 }
@@ -75,22 +76,6 @@ export const ChatPreview = Schema.Struct({
 	tools: Schema.Array(ChatToolPreview),
 });
 
-export function updateToolPreview(
-	preview: typeof ChatPreview.Type,
-	tool: typeof ChatToolPreview.Type,
-): typeof ChatPreview.Type {
-	const existing = preview.tools.find(({ call }) => call.id === tool.call.id);
-	if (!existing) {
-		return { ...preview, text: "", tools: [...preview.tools, tool] };
-	}
-	if (
-		!tool.result &&
-		(existing.result || (tool.activity.length === 0 && existing.activity.length > 0))
-	) {
-		return preview;
-	}
-	return { ...preview, tools: preview.tools.map((entry) => (entry === existing ? tool : entry)) };
-}
 export const BrowserWatch = Schema.NullOr(
 	Schema.Struct({
 		id: Schema.NonEmptyString,

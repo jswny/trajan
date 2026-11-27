@@ -3,7 +3,8 @@ import { Context, Effect, Layer, Option, Queue, Schedule, Schema, SubscriptionRe
 import { KeyValueStore } from "effect/persistence";
 import { Socket } from "effect/socket";
 import { ChatHttp, ChatRequestError } from "./chat/http-client";
-import { ChatEvent, ChatPath, updateToolPreview } from "./chat/protocol";
+import { updateToolPreview } from "./chat/preview";
+import { ChatEvent, ChatLivePath } from "./chat/protocol";
 import type { ChatPage, ChatSnapshot } from "./chat/protocol";
 
 export type PromptDraft = { readonly text: string };
@@ -331,7 +332,7 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 
 const chatSocket = Socket.layerWebSocket(
 	Effect.sync(() => {
-		const url = new URL(`${ChatPath}/live`, window.location.href);
+		const url = new URL(ChatLivePath, window.location.href);
 		url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
 		return url.href;
 	}),

@@ -3,10 +3,10 @@ import { openAiTurnModel } from "@trajan/model-openai";
 import { Browser, browserRun } from "agents/browser";
 import { Data, Effect, Layer } from "effect";
 import { browserKeepAliveMs, browserToolset } from "./browser";
-import { openAiGatewayTransport } from "./chat/openai-gateway";
-import { BrowserViewPath, ChatPath, isChatPath } from "./chat/protocol";
-import { TrajanChatObject } from "./chat/worker-host";
 import { createChatExec } from "./chat/exec";
+import { openAiGatewayTransport } from "./chat/openai-gateway";
+import { BrowserViewPath, ChatLivePath, isChatPath } from "./chat/protocol";
+import { TrajanChatObject } from "./chat/worker-host";
 import { browserViewHeaders, createLiveBrowser } from "./live-browser";
 import { modelConfig } from "./model-config";
 import { createScheduleTools, scheduleInstructions } from "./schedule-tools";
@@ -92,7 +92,7 @@ export default {
 			return new Response(null, { status: 403, headers: browserViewHeaders });
 		}
 		const socket = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
-		if (socket !== (url.pathname === `${ChatPath}/live`) || (socket && url.search !== "")) {
+		if (socket !== (url.pathname === ChatLivePath) || (socket && url.search !== "")) {
 			return new Response("Not found", { status: 404 });
 		}
 		return Effect.runPromise(
