@@ -5,6 +5,7 @@ import * as entrypoint from "./src/server.ts" with { type: "cf-worker" };
 
 // Use npm run deploy --workspace=@trajan/app as the Workers Builds deploy command.
 // This deploys the sandbox first so the cross-Worker binding resolves on initial deployment.
+// Workers Builds injects Trajan's target name and tag. Apply them only to Trajan's deploy.
 // The deploy script uses --force because dashboard secret updates have triggered false
 // configuration conflicts in Workers Builds. See cloudflare/cf#69 and cloudflare/cf#466.
 export default defineConfig(({ mode }) => {

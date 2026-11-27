@@ -7,7 +7,7 @@
 	"scripts": {
 		"dev": "cf dev",
 		"build": "cf build",
-		"deploy": "sh -c 'npm run deploy -w @trajan/code-mode-sandbox -- \"$@\" && cf deploy --force \"$@\"' --",
+		"deploy": "sh -c 'env -u CLOUDFLARE_CI_OVERRIDE_WORKER_NAME -u CLOUDFLARE_CI_MATCH_WORKER_TAG -u WRANGLER_CI_MATCH_TAG npm run deploy -w @trajan/code-mode-sandbox -- \"$@\" && cf deploy --force \"$@\"' --",
 		"types": "cf workers types",
 		"test": "npm run build -w @trajan/code-mode-sandbox && vp test run --config src/tests/vitest.config.ts",
 		"test:browser": "playwright test --config src/tests/browser/playwright.config.ts",
