@@ -347,6 +347,34 @@ test("shows animated progress with either motion preference", async ({ page }) =
 	await expect(spinner).toBeHidden();
 });
 
+test("runs a committed tool decision once after a Worker restart", async ({ page }) => {
+	const composer = await openChat(page);
+	const prompt = "Append through the tool handoff.";
+	expect((await page.request.post(`${control}/pause-tool-handoff`)).status()).toBe(204);
+	await composer.fill(prompt);
+	await composer.press("Enter");
+	const decodeState = Schema.decodeUnknownSync(
+		Schema.Struct({
+			text: Schema.String,
+			pausedAt: Schema.optionalKey(Schema.String),
+		}),
+	);
+	await expect
+		.poll(async () => {
+			const response = await page.request.post(`${control}/state`);
+			return decodeState(await response.json());
+		})
+		.toMatchObject({ pausedAt: "after-tool-handoff", text: "" });
+	await expect(toolCards(page)).toHaveCount(0);
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await page.reload();
+	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
+	const reply = `Wrote ${JSON.stringify(prompt)}`;
+	await expect(page.getByRole("main").getByText(reply, { exact: true })).toBeVisible();
+	await expect(toolCards(page)).toHaveCount(1);
+	await expectStoredReply(page.request, reply);
+});
+
 test("recovers a running exec without repeating its write", async ({ page }) => {
 	const composer = await openChat(page);
 	const card = toolCards(page).last();

@@ -29,6 +29,7 @@ const chatFixtureReset = "Forced chat fixture restart";
 const mermaidPrompt = "Show the delivery flow.";
 export const draftPrompt = "Stream a draft recovery example.";
 export const retryStreamPrompt = "Retry an interrupted stream after append.";
+export const handoffPrompt = "Append through the tool handoff.";
 export const draftExcerpt = "The workspace is ready.\n\nI saved the checklist.";
 export const draftReply = `${draftExcerpt}\n\nThe final check passed.`;
 export const longDraftPrompt = "Stream an oversized draft.";
@@ -45,6 +46,8 @@ const excerptLengths = new Map([
 ]);
 type PausePoint =
 	| "before-task"
+	| "before-tool-handoff"
+	| "after-tool-handoff"
 	| "after-write"
 	| "between-tools"
 	| "during-reply"
@@ -351,6 +354,10 @@ export class ChatTestObject extends TrajanChatObject {
 	): Effect.fn.Return<TurnModelResponse, TurnModelError> {
 		const user = messages.findLast((message) => message.role === "user");
 		const last = messages.at(-1);
+		if (last?.role === "user" && last.text === handoffPrompt) {
+			const kv = this.ctx.storage.kv;
+			kv.put("handoff-model-attempts", (kv.get<number>("handoff-model-attempts") ?? 0) + 1);
+		}
 		const appendTwice = user?.text === "Append hello, then world.";
 		if (last?.role === "user" && last.text === "Report recent runtime outcomes.") {
 			return {
@@ -806,7 +813,10 @@ sequenceDiagram
 		Layer.succeed(TurnTools, TurnTools.of({ execute: (...args) => this.#execute(...args) })),
 	);
 
-	protected override async onTurnPhase(phase: "before-task" | "after-commit", signal: AbortSignal) {
+	protected override async onTurnPhase(
+		phase: "before-task" | "before-tool-handoff" | "after-tool-handoff" | "after-commit",
+		signal: AbortSignal,
+	) {
 		if (phase === "before-task") {
 			const kv = this.ctx.storage.kv;
 			const remaining = kv.get<number>("inbox-wake-faults") ?? 0;

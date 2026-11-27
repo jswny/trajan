@@ -14,6 +14,7 @@ import {
 	draftExcerpt,
 	draftPrompt,
 	draftReply,
+	handoffPrompt,
 	longDraftPrompt,
 	retryStreamPrompt,
 	skillExecInput,
@@ -151,6 +152,71 @@ async function readTurn(stub: ReturnType<typeof openFixture>, runId: string) {
 				: Schema.decodeSync(Schema.fromJsonString(TurnTranscript))(transcript),
 	};
 }
+
+test.each([
+	{ phase: "before-tool-handoff", handoffs: 0, attempts: 2 },
+	{ phase: "after-tool-handoff", handoffs: 1, attempts: 1 },
+] as const)(
+	"recovers the model decision $phase without repeating exec",
+	async ({ phase, handoffs, attempts }) => {
+		let stub = openFixture();
+		await stub.pause(phase);
+		const { runId } = await submit(stub, { id: "tool-handoff", prompt: handoffPrompt });
+		const readState = () =>
+			runInDurableObject(stub, (_, { storage }) => ({
+				attempts: storage.kv.get("handoff-model-attempts"),
+				handoffs: Array.from(storage.kv.list({ prefix: `harness-tool-handoff:${runId}:` })).length,
+			}));
+		await expect
+			.poll(() => stub.state(), { timeout: 5000 })
+			.toMatchObject({ pausedAt: phase, text: "" });
+		expect(await readState()).toEqual({ attempts: 1, handoffs });
+		stub = await interruptPausedTurn(stub, phase);
+		await stub.release();
+		await expect
+			.poll(() => readTurn(stub, runId), { timeout: 5000 })
+			.toMatchObject({
+				state: "completed",
+				result: {
+					messages: [
+						{ role: "user", text: handoffPrompt },
+						{ role: "tool-call", id: "append-1" },
+						{ role: "tool", callId: "append-1", result: { status: "completed" } },
+						{ role: "assistant", text: `Wrote ${JSON.stringify(handoffPrompt)}` },
+					],
+				},
+			});
+		expect((await stub.state()).text).toBe(handoffPrompt);
+		expect(await readState()).toEqual({ attempts, handoffs: 0 });
+	},
+);
+
+test("stopping a turn discards its committed tool handoff before exec runs", async () => {
+	const stub = openFixture();
+	await stub.pause("after-tool-handoff");
+	const { runId } = await submit(stub, { id: "cancelled-handoff", prompt: handoffPrompt });
+	await expect
+		.poll(() => stub.state(), { timeout: 5000 })
+		.toMatchObject({
+			pausedAt: "after-tool-handoff",
+			text: "",
+		});
+	expect(await stub.stop(runId)).toMatchObject({ stopped: true });
+	await expect
+		.poll(() => stub.turn(runId), { timeout: 5000 })
+		.toMatchObject({ state: "cancelled" });
+	await stub.release();
+	const next = await submit(stub, { id: "after-cancelled-handoff", prompt: "next" });
+	await expect
+		.poll(() => stub.turn(next.runId), { timeout: 5000 })
+		.toMatchObject({ state: "completed" });
+	expect((await stub.state()).text).toBe("next");
+	expect(
+		await runInDurableObject(stub, (_, { storage }) =>
+			Array.from(storage.kv.list({ prefix: `harness-tool-handoff:${runId}:` })),
+		),
+	).toEqual([]);
+});
 
 test("deduplicates a submission and retains one complete transcript", async () => {
 	const stub = openFixture();

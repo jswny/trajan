@@ -44,7 +44,12 @@ const decodeStepInterruptions = Schema.decodeUnknownSync(
 	),
 );
 const stepInterruptionsKey = (runId: string) => `harness-turn:interruptions:${runId}`;
+const toolHandoffPrefix = (runId: string) => `harness-tool-handoff:${runId}:`;
+const decodeToolHandoff = Schema.decodeUnknownEffect(Schema.UndefinedOr(Schema.String));
 const isToolCall = Schema.is(ToolCall);
+
+type ToolHandoffPhase = "before-tool-handoff" | "after-tool-handoff";
+type TurnPhase = "before-task" | "after-commit" | ToolHandoffPhase;
 
 class TurnTaskInputError extends Schema.TaggedError<
 	TurnTaskInputError,
@@ -198,10 +203,49 @@ function taskJournal(
 	step: TaskStep,
 	storage: DurableObjectStorage,
 	drafts: ModelDrafts,
+	onHandoff: ((phase: ToolHandoffPhase, signal: AbortSignal) => Promise<void>) | undefined,
 ): TurnJournal {
 	return {
-		checkpoint({ kind, name }, result, run) {
+		checkpoint(checkpoint, result, run) {
+			const { kind, name } = checkpoint;
 			const checkpointJson = Schema.fromJsonString(result);
+			const handoffKey =
+				checkpoint.kind === "model"
+					? toolHandoffPrefix(runId) + step.idempotencyKey(checkpoint.nextTool)
+					: undefined;
+			const readHandoff =
+				handoffKey === undefined
+					? Effect.undefined
+					: conversationEffect("read tool handoff", () => storage.kv.get(handoffKey)).pipe(
+							Effect.flatMap(decodeToolHandoff),
+						);
+			const saveDecision = Effect.fnUntraced(function* (
+				value: typeof result.Type,
+				signal: AbortSignal,
+			) {
+				const encoded = yield* Schema.encodeEffect(checkpointJson)(value);
+				if (handoffKey === undefined || !isToolCall(value)) {
+					return encoded;
+				}
+				if (onHandoff) {
+					yield* Effect.promise(() => onHandoff("before-tool-handoff", signal));
+				}
+				yield* conversationEffect("commit tool handoff", () =>
+					storage.transactionSync(() => {
+						signal.throwIfAborted();
+						if (storage.kv.get(handoffKey) === undefined) {
+							storage.kv.put(handoffKey, encoded);
+							drafts.clearCheckpoint(runId, name);
+						}
+					}),
+				);
+				yield* lifecycleEffect("flush tool handoff", () => storage.sync());
+				if (onHandoff) {
+					yield* Effect.promise(() => onHandoff("after-tool-handoff", signal));
+				}
+				// The SDK acknowledges the step while the handoff owns the tool decision.
+				return null;
+			});
 			const interrupted = step.interrupted?.name === name ? step.interrupted : null;
 			const restartBudget =
 				interrupted && kind === "tool"
@@ -212,7 +256,8 @@ function taskJournal(
 						)
 					: Effect.void;
 			return Effect.gen(function* () {
-				if (kind === "model" && interrupted) {
+				const savedHandoff = yield* readHandoff;
+				if (kind === "model" && interrupted && savedHandoff === undefined) {
 					yield* drafts.interrupt(runId, name, interrupted.attempt);
 					if (interrupted.attempt >= modelAttemptLimit) {
 						return yield* Effect.die(new ModelInterruptedError());
@@ -226,7 +271,7 @@ function taskJournal(
 					);
 				}
 				const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
-				return yield* Effect.promise(() =>
+				const encoded = yield* Effect.promise(() =>
 					step.do(
 						name,
 						{
@@ -236,6 +281,10 @@ function taskJournal(
 									: { limit: 1 },
 						},
 						({ attempt, idempotencyKey, signal }) => {
+							if (savedHandoff !== undefined) {
+								// Settle the SDK step after a reset between the handoff and its acknowledgment.
+								return Promise.resolve(null);
+							}
 							const input = {
 								runId,
 								idempotencyKey,
@@ -251,7 +300,7 @@ function taskJournal(
 											: run(input),
 									),
 									Effect.flatMap(Schema.decodeUnknownEffect(result)),
-									Effect.flatMap(Schema.encodeEffect(checkpointJson)),
+									Effect.flatMap((value) => saveDecision(value, signal)),
 									Effect.mapError((error) =>
 										error instanceof TurnModelError && !error.retryable
 											? new NonRetryableModelError(error)
@@ -280,13 +329,24 @@ function taskJournal(
 						// Preserve SDK suspension, cancellation, and isolate reset signals.
 						return Effect.die(error);
 					}),
-					Effect.flatMap(Schema.decodeEffect(checkpointJson)),
-					Effect.tap((value) =>
-						kind === "model" && isToolCall(value)
-							? Effect.sync(() => drafts.clearCheckpoint(runId, name))
-							: Effect.void,
-					),
 				);
+				if (encoded === null) {
+					const handoff = savedHandoff ?? (yield* readHandoff);
+					const decision = yield* Schema.decodeUnknownEffect(checkpointJson)(handoff);
+					if (!isToolCall(decision)) {
+						return yield* new TurnIoError({
+							operation: "read tool handoff",
+							message: "The tool handoff does not contain a tool decision.",
+							cause: null,
+						});
+					}
+					return decision;
+				}
+				const decision = yield* Schema.decodeEffect(checkpointJson)(encoded);
+				if (kind === "model" && isToolCall(decision)) {
+					drafts.clearCheckpoint(runId, name);
+				}
+				return decision;
 			}).pipe(Effect.withSpan("harness.checkpoint", { attributes: { runId, name } }));
 		},
 	};
@@ -297,7 +357,7 @@ export abstract class CloudflareHarness<
 > extends DurableObject<Bindings> {
 	protected abstract readonly turnLayer: Layer.Layer<TurnModel | TurnTools>;
 
-	protected onTurnPhase?(phase: "before-task" | "after-commit", signal: AbortSignal): Promise<void>;
+	protected onTurnPhase?(phase: TurnPhase, signal: AbortSignal): Promise<void>;
 	protected onProgress?(runId: string, event: TurnProgress): void;
 	protected onStateChange?(update: {
 		readonly settledRunId?: string;
@@ -324,6 +384,10 @@ export abstract class CloudflareHarness<
 		this.ctx.storage,
 		(runId, outcome) => {
 			this.ctx.storage.kv.delete(stepInterruptionsKey(runId));
+			const handoffs = this.ctx.storage.kv.list({ prefix: toolHandoffPrefix(runId) });
+			for (const [key] of Array.from(handoffs)) {
+				this.ctx.storage.kv.delete(key);
+			}
 			return [
 				...(this.settleRunState?.(runId, outcome) ?? []),
 				...this.#drafts.settle(runId, outcome !== "completed"),
@@ -456,7 +520,7 @@ export abstract class CloudflareHarness<
 		);
 		const transcript = yield* runTurn(
 			{ id: row.submission_id, prompt: row.prompt },
-			taskJournal(runId, step, this.ctx.storage, this.#drafts),
+			taskJournal(runId, step, this.ctx.storage, this.#drafts, this.onTurnPhase?.bind(this)),
 			context,
 			(event) => Effect.sync(() => this.onProgress?.(runId, event)),
 			modelContext,

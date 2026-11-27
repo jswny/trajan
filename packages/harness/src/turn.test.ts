@@ -221,11 +221,11 @@ it.effect("passes each continuation back to the model and omits it from the tran
 		expect(complete.mock.calls[2]?.[0][1]).toEqual({ ...first, continuation: firstContinuation });
 		expect(complete.mock.calls[2]?.[0][3]).toEqual({ ...second, continuation: secondContinuation });
 		expect(checkpoints).toEqual([
-			{ kind: "model", name: "model:0" },
+			{ kind: "model", name: "model:0", nextTool: "tool:0" },
 			{ kind: "tool", name: "tool:0" },
-			{ kind: "model", name: "model:1" },
+			{ kind: "model", name: "model:1", nextTool: "tool:1" },
 			{ kind: "tool", name: "tool:1" },
-			{ kind: "model", name: "model:2" },
+			{ kind: "model", name: "model:2", nextTool: "tool:2" },
 		]);
 		expect(result.messages[1]).toEqual(first);
 		expect(result.messages[3]).toEqual(second);

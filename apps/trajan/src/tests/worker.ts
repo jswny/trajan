@@ -19,13 +19,16 @@ export default {
 			return stub.fetch(request);
 		}
 		const action =
-			/^\/__browser-smoke\/chat\/(pause|pause-between-tools|pause-replay|pause-replay-edit|pause-replay-git|pause-remote-push|fail-inbox-wake|fail-transcript-write|restore-transcript-write|miss-schedule|defer-missed-schedule|retry-inbox-wake|retry-missed-schedule|release|crash|state|task-state)$/.exec(
+			/^\/__browser-smoke\/chat\/(pause|pause-tool-handoff|pause-between-tools|pause-replay|pause-replay-edit|pause-replay-git|pause-remote-push|fail-inbox-wake|fail-transcript-write|restore-transcript-write|miss-schedule|defer-missed-schedule|retry-inbox-wake|retry-missed-schedule|release|crash|state|task-state)$/.exec(
 				url.pathname,
 			)?.[1];
 		if (action && fixture && request.method === "POST") {
 			switch (action) {
 				case "pause":
 					await stub.pause("during-reply");
+					return new Response(null, { status: 204 });
+				case "pause-tool-handoff":
+					await stub.pause("after-tool-handoff");
 					return new Response(null, { status: 204 });
 				case "pause-between-tools":
 					await stub.pause("between-tools");
