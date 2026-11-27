@@ -204,12 +204,27 @@ test("retries a model step after a successful tool without running the tool agai
 	expect(await stub.state()).toMatchObject({ text: "Retry after append." });
 });
 
+const modelInterruptedMessage =
+	"The model request was interrupted and its retry budget is exhausted.";
+
 test.each([
-	{ work: "model request", point: "between-tools" },
-	{ work: "tool step", point: "after-write" },
+	{
+		work: "model request",
+		point: "between-tools",
+		attempts: 4,
+		code: "model_interrupted",
+		text: modelInterruptedMessage,
+	},
+	{
+		work: "tool step",
+		point: "after-write",
+		attempts: 5,
+		code: "restart_limit",
+		text: "The turn stopped after 5 consecutive interruptions of the same tool step.",
+	},
 ] as const)(
 	"settles a repeatedly interrupted $work and runs the queued follow-up",
-	async ({ work, point }) => {
+	async ({ attempts, code, point, text }) => {
 		let stub = openFixture();
 		await stub.pause(point);
 		const input = { id: "repeated-reset", prompt: "Append hello, then world." };
@@ -218,14 +233,13 @@ test.each([
 			id: "follow-up",
 			prompt: "Report recent runtime outcomes.",
 		});
-		for (let count = 0; count < 5; count++) {
+		for (let count = 0; count < attempts; count++) {
 			await expect.poll(() => stub.state()).toMatchObject({ text: "hello" });
 			expect(await stub.turn(first.runId)).toMatchObject({ state: "running" });
 			expect(await stub.turn(followUp.runId)).toMatchObject({ state: "pending" });
 			stub = await interruptPausedTurn(stub, point);
 		}
-		const text = `The turn stopped after 5 consecutive interruptions of the same ${work}.`;
-		const failure = { code: "restart_limit", message: text };
+		const failure = { code, message: text };
 		await expect.poll(() => stub.turn(first.runId)).toMatchObject({ state: "failed", failure });
 		await expect
 			.poll(() => readTurn(stub, followUp.runId))
@@ -287,7 +301,7 @@ test("the next checkpoint starts with its own restart budget", async () => {
 		id: "change-checkpoint",
 		prompt: "Append hello, then world.",
 	});
-	for (let count = 0; count < 4; count++) {
+	for (let count = 0; count < 3; count++) {
 		stub = await interruptPausedTurn(stub, "between-tools");
 	}
 	await stub.pause("after-write");
@@ -297,40 +311,38 @@ test("the next checkpoint starts with its own restart budget", async () => {
 	expect((await stub.state()).text).toBe("hello world");
 }, 15_000);
 
-test("an ordinary model retry leaves the full restart budget available", async () => {
+test("an ordinary model retry and resets share the attempt budget and preserve partial replies", async () => {
 	let stub = openFixture();
 	await stub.pause("during-reply");
 	const { runId } = await submit(stub, { id: "retry-then-reset", prompt: "Retry after append." });
-	for (let count = 0; count < 4; count++) {
+	for (let count = 0; count < 3; count++) {
 		stub = await interruptPausedTurn(stub, "during-reply");
+		if (count === 0) {
+			await expect.poll(() => stub.taskState(runId)).toBe("waiting");
+			const { instance } = await stub.state();
+			await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+			stub = await waitForRestart(stub, instance);
+			await stub.history({});
+			expect(await stub.taskState(runId)).toBe("waiting");
+		}
 	}
 	await expect
-		.poll(async () => {
-			const { instance, pausedInstance } = await stub.state();
-			return instance === pausedInstance;
-		})
-		.toBe(true);
-	expect(await stub.turn(runId)).toMatchObject({ state: "running" });
-	await stub.release();
-	await expect
-		.poll(() => readTurn(stub, runId))
+		.poll(() => stub.turn(runId))
 		.toMatchObject({
-			state: "completed",
-			result: {
-				messages: [
-					{ role: "user" },
-					{ role: "tool-call" },
-					{ role: "tool" },
-					...Array.from({ length: 4 }, (_, index) => ({
-						role: "interrupted",
-						attemptId: `model:1:${index + 2}`,
-						text: "Wrote",
-						truncated: false,
-					})),
-					{ role: "assistant", text: 'Wrote "Retry after append."' },
-				],
-			},
+			state: "failed",
+			failure: { code: "model_interrupted", message: modelInterruptedMessage },
 		});
+	const { entries } = await stub.history({});
+	const messages = entries.map(({ message }) => Schema.decodeSync(messageJson)(message));
+	expect(messages.filter(({ role }) => role === "interrupted")).toEqual(
+		[2, 3, 4].map((attempt) => ({
+			role: "interrupted",
+			attemptId: `model:1:${attempt}`,
+			text: "Wrote",
+			truncated: false,
+		})),
+	);
+	expect(messages.filter(({ role }) => role === "assistant")).toEqual([]);
 	expect((await stub.state()).text).toBe("Retry after append.");
 }, 15_000);
 
@@ -349,10 +361,12 @@ test("batches streamed drafts, archives an interrupted attempt, and gives the ne
 	};
 	stub = await interruptPausedTurn(stub, "during-reply");
 	await expect
-		.poll(() =>
-			runInDurableObject(stub, (_, { storage }) =>
-				storage.kv.get(`harness-draft:interrupted:${runId}`),
-			),
+		.poll(
+			() =>
+				runInDurableObject(stub, (_, { storage }) =>
+					storage.kv.get(`harness-draft:interrupted:${runId}`),
+				),
+			{ timeout: 5000 },
 		)
 		.toEqual([interrupted]);
 	await stub.release();

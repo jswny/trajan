@@ -12,7 +12,6 @@ import {
 import type {
 	RuntimeOutcome,
 	ToolActivity,
-	TurnCheckpoint,
 	TurnJournal,
 	TurnMessage,
 	TurnProgress,
@@ -35,6 +34,8 @@ const inboxBackoffKey = "harness-inbox:wake-backoff";
 const inboxHeartbeatMs = 30_000;
 const maxInboxBackoffMs = 10 * 60_000;
 const stepRestartLimit = 5;
+const modelAttemptLimit = 4;
+const modelRetryDelayMs = 1000;
 const decodeInboxBackoff = Schema.decodeUnknownOption(Schema.Natural);
 const TurnTaskInput = Schema.Struct({ runId: Schema.NonEmptyString });
 const decodeStepInterruptions = Schema.decodeUnknownSync(
@@ -64,11 +65,18 @@ class StepRestartLimitError extends NonRetryableError {
 	readonly _tag = "StepRestartLimitError";
 	override name = this._tag;
 
-	constructor(kind: TurnCheckpoint["kind"]) {
-		const work = kind === "model" ? "model request" : "tool step";
+	constructor() {
 		super(
-			`The turn stopped after ${stepRestartLimit} consecutive interruptions of the same ${work}.`,
+			`The turn stopped after ${stepRestartLimit} consecutive interruptions of the same tool step.`,
 		);
+	}
+}
+
+class ModelInterruptedError extends Error {
+	override name = "ModelInterruptedError";
+
+	constructor() {
+		super("The model request was interrupted and its retry budget is exhausted.");
 	}
 }
 
@@ -149,6 +157,8 @@ function failureCode(name: string) {
 	switch (name) {
 		case "TurnModelError":
 			return "model";
+		case "ModelInterruptedError":
+			return "model_interrupted";
 		case "TurnTaskInputError":
 			return "task-input";
 		case "TurnCommitError":
@@ -193,22 +203,36 @@ function taskJournal(
 		checkpoint({ kind, name }, result, run) {
 			const checkpointJson = Schema.fromJsonString(result);
 			const interrupted = step.interrupted?.name === name ? step.interrupted : null;
-			const restartBudget = interrupted
-				? recordInterruption(storage, runId, interrupted).pipe(
-						Effect.flatMap((count) =>
-							count >= stepRestartLimit
-								? Effect.fail(new StepRestartLimitError(kind))
-								: Effect.void,
-						),
-					)
-				: Effect.void;
+			const restartBudget =
+				interrupted && kind === "tool"
+					? recordInterruption(storage, runId, interrupted).pipe(
+							Effect.flatMap((count) =>
+								count >= stepRestartLimit ? Effect.fail(new StepRestartLimitError()) : Effect.void,
+							),
+						)
+					: Effect.void;
 			return Effect.gen(function* () {
+				if (kind === "model" && interrupted) {
+					if (interrupted.attempt >= modelAttemptLimit) {
+						return yield* Effect.die(new ModelInterruptedError());
+					}
+					// The SDK reports the lost attempt once. Its sleep parks this run until the retry is due.
+					yield* Effect.promise(() =>
+						step.sleep(
+							`${name}:recover:${interrupted.attempt}`,
+							modelRetryDelayMs * 2 ** (interrupted.attempt - 1),
+						),
+					);
+				}
 				const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
 				return yield* Effect.promise(() =>
 					step.do(
 						name,
 						{
-							retries: kind === "model" ? { limit: 2, delay: "1 second" } : { limit: 1 },
+							retries:
+								kind === "model"
+									? { limit: modelAttemptLimit, delay: modelRetryDelayMs, backoff: "exponential" }
+									: { limit: 1 },
 						},
 						({ attempt, idempotencyKey, signal }) => {
 							const input = {

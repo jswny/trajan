@@ -497,7 +497,7 @@ test("streams successive tools into the open activity disclosure above the reply
 	await expect(activity.locator('[data-icon="loader"]')).toHaveCount(0);
 });
 
-test("shows the restart limit and keeps the completed write available after reconnecting", async ({
+test("shows an exhausted model retry budget and keeps the completed write after reconnecting", async ({
 	page,
 }) => {
 	const composer = await openChat(page);
@@ -512,23 +512,26 @@ test("shows the restart limit and keeps the completed write available after reco
 	const decodePause = Schema.decodeUnknownSync(
 		Schema.Struct({ instance: Schema.String, pausedInstance: Schema.optionalKey(Schema.String) }),
 	);
-	for (let count = 0; count < 5; count++) {
+	for (let count = 0; count < 4; count++) {
 		await expect
-			.poll(async () => {
-				const response = await page.request.post(`${control}/state`);
-				if (!response.ok()) {
-					return false;
-				}
-				const { instance, pausedInstance } = decodePause(await response.json());
-				return instance === pausedInstance;
-			})
+			.poll(
+				async () => {
+					const response = await page.request.post(`${control}/state`);
+					if (!response.ok()) {
+						return false;
+					}
+					const { instance, pausedInstance } = decodePause(await response.json());
+					return instance === pausedInstance;
+				},
+				{ timeout: 7000 },
+			)
 			.toBe(true);
 		expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 		await openChat(page);
 	}
 
 	const transcript = page.getByRole("main");
-	const message = "The turn stopped after 5 consecutive interruptions of the same model request.";
+	const message = "The model request was interrupted and its retry budget is exhausted.";
 	const notice = transcript.getByRole("alert").filter({ hasText: message });
 	await expect(notice).toHaveCount(1);
 	await expect(notice).toBeVisible();
