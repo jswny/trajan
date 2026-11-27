@@ -10,7 +10,7 @@ import {
 	TurnModelError,
 	TurnTools,
 } from "./index";
-import type { TurnJournal, TurnModelResponse } from "./index";
+import type { TurnCheckpoint, TurnJournal, TurnModelResponse } from "./index";
 
 const submission = { id: "s1", prompt: "Say hello" };
 const contextFormat = { adapter: "test", version: 1 };
@@ -49,7 +49,7 @@ it("preserves JSON arrays and explicitly selected content across checkpoints", (
 });
 
 const journal: TurnJournal = {
-	checkpoint: (name, schema, run) =>
+	checkpoint: ({ name }, schema, run) =>
 		run({ runId: "test-run", idempotencyKey: name, recovering: false }).pipe(
 			Effect.flatMap(Schema.decodeUnknownEffect(schema)),
 		),
@@ -174,9 +174,9 @@ it.effect("rejects a malformed tool result before sending it back to the model",
 			Effect.succeed({ role: "tool-call", name: "test", id: "call-1", input: null }),
 		);
 		const malformedJournal: TurnJournal = {
-			checkpoint: (name, schema, run) =>
-				journal.checkpoint(name, schema, (attempt) =>
-					name.startsWith("tool:")
+			checkpoint: (checkpoint, schema, run) =>
+				journal.checkpoint(checkpoint, schema, (attempt) =>
+					checkpoint.kind === "tool"
 						? run(attempt).pipe(Effect.as({ status: "completed", output: undefined }))
 						: run(attempt),
 				),
@@ -195,6 +195,13 @@ it.effect("rejects a malformed tool result before sending it back to the model",
 
 it.effect("passes each continuation back to the model and omits it from the transcript", () =>
 	Effect.gen(function* () {
+		const checkpoints: Array<TurnCheckpoint> = [];
+		const recordingJournal: TurnJournal = {
+			checkpoint: (checkpoint, schema, run) =>
+				Effect.sync(() => checkpoints.push(checkpoint)).pipe(
+					Effect.andThen(journal.checkpoint(checkpoint, schema, run)),
+				),
+		};
 		const first = { role: "tool-call" as const, id: "call-1", name: "test", input: null };
 		const second = { ...first, id: "call-2" };
 		const firstContinuation = { opaque: "first context" };
@@ -205,7 +212,7 @@ it.effect("passes each continuation back to the model and omits it from the tran
 			.mockReturnValueOnce(Effect.succeed({ ...second, continuation: secondContinuation }))
 			.mockReturnValueOnce(Effect.succeed({ role: "assistant", text: "Finished" }));
 
-		const result = yield* runTurn(submission, journal).pipe(
+		const result = yield* runTurn(submission, recordingJournal).pipe(
 			Effect.provide(
 				turnLayer(complete, () => Effect.succeed({ status: "completed", output: null })),
 			),
@@ -214,6 +221,13 @@ it.effect("passes each continuation back to the model and omits it from the tran
 		expect(complete.mock.calls[1]?.[0][1]).toEqual({ ...first, continuation: firstContinuation });
 		expect(complete.mock.calls[2]?.[0][1]).toEqual({ ...first, continuation: firstContinuation });
 		expect(complete.mock.calls[2]?.[0][3]).toEqual({ ...second, continuation: secondContinuation });
+		expect(checkpoints).toEqual([
+			{ kind: "model", name: "model:0" },
+			{ kind: "tool", name: "tool:0" },
+			{ kind: "model", name: "model:1" },
+			{ kind: "tool", name: "tool:1" },
+			{ kind: "model", name: "model:2" },
+		]);
 		expect(result.messages[1]).toEqual(first);
 		expect(result.messages[3]).toEqual(second);
 	}),

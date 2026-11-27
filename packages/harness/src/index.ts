@@ -204,10 +204,16 @@ export interface StepAttempt {
 	readonly recovering: boolean;
 }
 
+export interface TurnCheckpoint {
+	readonly kind: "model" | "tool";
+	/** Stable journal key used to find the same step on recovery. */
+	readonly name: string;
+}
+
 export interface TurnJournal {
 	/** Save one result per step name and return it on subsequent executions. */
 	readonly checkpoint: <A extends Schema.Json>(
-		name: string,
+		checkpoint: TurnCheckpoint,
 		result: Schema.Codec<A>,
 		run: (attempt: StepAttempt) => Effect.Effect<unknown, TurnError>,
 	) => Effect.Effect<A, TurnError>;
@@ -289,7 +295,7 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 	for (let index = 0; ; index++) {
 		const allowTools = index < MAX_TOOL_CALLS;
 		const decision = yield* journal.checkpoint(
-			`model:${index}`,
+			{ kind: "model", name: `model:${index}` },
 			allowTools ? ModelResponse : ModelReply,
 			() =>
 				Effect.gen(function* () {
@@ -336,14 +342,17 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 		}
 
 		const { continuation: _continuation, ...call } = decision;
-		const result = yield* journal.checkpoint(`tool:${index}`, ToolResult, (attempt) =>
-			notify({ type: "tool", call }).pipe(
-				Effect.andThen(
-					tools.execute(call, attempt, (activity) =>
-						notify({ type: "tool-activity", callId: call.id, activity }),
+		const result = yield* journal.checkpoint(
+			{ kind: "tool", name: `tool:${index}` },
+			ToolResult,
+			(attempt) =>
+				notify({ type: "tool", call }).pipe(
+					Effect.andThen(
+						tools.execute(call, attempt, (activity) =>
+							notify({ type: "tool-activity", callId: call.id, activity }),
+						),
 					),
 				),
-			),
 		);
 		yield* notify({ type: "tool-result", call, result });
 		history.push(decision, { role: "tool", callId: call.id, result });

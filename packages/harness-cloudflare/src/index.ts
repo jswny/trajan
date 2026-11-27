@@ -122,7 +122,7 @@ function failureCode(name: string) {
 
 function taskJournal(runId: string, step: TaskStep): TurnJournal {
 	return {
-		checkpoint(name, result, run) {
+		checkpoint({ kind, name }, result, run) {
 			const checkpointJson = Schema.fromJsonString(result);
 			return Effect.gen(function* () {
 				const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
@@ -130,7 +130,7 @@ function taskJournal(runId: string, step: TaskStep): TurnJournal {
 					step.do(
 						name,
 						{
-							retries: name.startsWith("model:") ? { limit: 2, delay: "1 second" } : { limit: 1 },
+							retries: kind === "model" ? { limit: 2, delay: "1 second" } : { limit: 1 },
 						},
 						({ attempt, idempotencyKey, signal }) =>
 							runPromise(
