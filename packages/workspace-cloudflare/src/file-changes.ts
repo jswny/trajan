@@ -101,58 +101,54 @@ type ObservedWrite = {
 
 export function workspaceFileTools(workspace: Workspace, root: string, maxDiffBytes: number) {
 	const fs = workspace.fs;
-	let observeWrite: ((write: ObservedWrite) => void) | undefined;
 	// Computer still validates arguments, confines paths, and applies the write or edit.
 	// The filesystem adapter observes the exact path and bytes within the same mutation.
-	const adapter: Parameters<typeof createPiTools>[0]["workspace"]["fs"] &
-		Pick<Workspace["fs"], "lstat"> = {
-		stat: fs.stat.bind(fs),
-		lstat: fs.lstat.bind(fs),
-		readFile: (path, options) => fs.readFile(path, options ?? {}),
-		mkdir: fs.mkdir.bind(fs),
-		rm: fs.rm.bind(fs),
-		find: fs.find.bind(fs),
-		grep: fs.grep.bind(fs),
-		readdir: fs.readdir.bind(fs),
-		async writeFile(path, bytes, options) {
-			const observe = observeWrite;
-			const before = observe && (await snapshot(fs, path));
-			await fs.writeFile(path, bytes, options);
-			if (observe) {
+	function createFiles(observe?: (write: ObservedWrite) => void) {
+		const adapter: Parameters<typeof createPiTools>[0]["workspace"]["fs"] &
+			Pick<Workspace["fs"], "lstat"> = {
+			stat: fs.stat.bind(fs),
+			lstat: fs.lstat.bind(fs),
+			readFile: (path, options) => fs.readFile(path, options ?? {}),
+			mkdir: fs.mkdir.bind(fs),
+			rm: fs.rm.bind(fs),
+			find: fs.find.bind(fs),
+			grep: fs.grep.bind(fs),
+			readdir: fs.readdir.bind(fs),
+			async writeFile(path, bytes, options) {
+				const before = observe && (await snapshot(fs, path));
+				await fs.writeFile(path, bytes, options);
+				if (!observe) {
+					return;
+				}
 				const change = describeChange(path, before, bytes, maxDiffBytes);
 				observe({ path, bytesWritten: bytes.byteLength, ...(change && { change }) });
-			}
-		},
-	};
-	const files = createPiTools({
-		workspace: {
-			fs: adapter,
-			runtime: workspace.runtime,
-			sessionId: workspace.sessionId,
-			...(workspace.assets && { assets: workspace.assets }),
-		},
-		root,
-		exec: { backends: {} },
-	});
+			},
+		};
+		return createPiTools({
+			workspace: {
+				fs: adapter,
+				runtime: workspace.runtime,
+				sessionId: workspace.sessionId,
+				...(workspace.assets && { assets: workspace.assets }),
+			},
+			root,
+			exec: { backends: {} },
+		});
+	}
+	const files = createFiles();
 
 	function execute(call: PiToolCall, context: ToolCallContext) {
 		const tracksWrite = call.name === "write" || call.name === "edit";
 		return Effect.tryPromise(async () => {
 			context.abortSignal?.throwIfAborted();
 			let observed: ObservedWrite | undefined;
-			if (tracksWrite) {
-				observeWrite = (write) => {
-					observed = write;
-				};
-			}
-			try {
-				const result = await files.execute(call, context);
-				return { result, observed };
-			} finally {
-				if (tracksWrite) {
-					observeWrite = undefined;
-				}
-			}
+			const tools = tracksWrite
+				? createFiles((write) => {
+						observed = write;
+					})
+				: files;
+			const result = await tools.execute(call, context);
+			return { result, observed };
 		});
 	}
 

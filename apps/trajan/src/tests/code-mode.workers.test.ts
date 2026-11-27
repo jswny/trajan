@@ -6,6 +6,81 @@ function openFixture() {
 	return env.CHAT_TEST.getByName(crypto.randomUUID());
 }
 
+test("a workspace transaction rollback keeps concurrent receipts and other transactions", async () => {
+	const stub = openFixture();
+	const result = await runInDurableObject(stub, async (_, { storage }) => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const rejected = storage.transaction(async (txn) => {
+			storage.kv.put("transaction-check:rejected", true);
+			entered.resolve();
+			await release.promise;
+			txn.rollback();
+		});
+		await entered.promise;
+		const receipt = storage.transaction(async () =>
+			storage.kv.put("transaction-check:receipt", true),
+		);
+		const committed = storage.transaction(async () =>
+			storage.kv.put("transaction-check:committed", true),
+		);
+		release.resolve();
+		await Promise.all([rejected, committed, receipt]);
+		return Array.from(storage.kv.list({ prefix: "transaction-check:" }), ([key]) => key);
+	});
+	expect(result).toEqual(["transaction-check:committed", "transaction-check:receipt"]);
+});
+
+test("parallel workspace edits preserve separate receipts and retain both changes on a shared path", async () => {
+	const stub = openFixture();
+	const result = await stub.workspaceTool("exec", {
+		code: `
+import { edit, read, write } from "codemode:tools";
+export default async function () {
+  const first = "/workspace/a.txt";
+  const second = "/workspace/b.txt";
+  await Promise.all([
+    write({ path: first, content: "red circle" }),
+    write({ path: second, content: "green triangle" }),
+  ]);
+  const [a, b, c] = await Promise.all([
+    edit({ path: first, edits: [{ oldText: "red", newText: "blue" }] }),
+    edit({ path: second, edits: [{ oldText: "triangle", newText: "square" }] }),
+    edit({ path: first, edits: [{ oldText: "circle", newText: "diamond" }] }),
+  ]);
+  const values = await Promise.all([read({ path: first }), read({ path: second })]);
+  return { edits: [a, b, c], values: values.map(({ details }) => details.content) };
+}`,
+	});
+	expect(JSON.parse(result)).toMatchObject({
+		status: "completed",
+		output: {
+			edits: [
+				{ isError: false, details: { path: "/workspace/a.txt" } },
+				{ isError: false, details: { path: "/workspace/b.txt" } },
+				{ isError: false, details: { path: "/workspace/a.txt" } },
+			],
+			values: ["blue diamond", "green square"],
+		},
+		activity: expect.arrayContaining([
+			expect.objectContaining({
+				name: "edit",
+				fileChange: expect.objectContaining({
+					path: "/workspace/a.txt",
+					diff: expect.stringContaining("blue"),
+				}),
+			}),
+			expect.objectContaining({
+				name: "edit",
+				fileChange: expect.objectContaining({
+					path: "/workspace/b.txt",
+					diff: expect.stringContaining("green square"),
+				}),
+			}),
+		]),
+	});
+});
+
 test("holds Code Mode ownership until an interrupted mutation settles", async () => {
 	const stub = openFixture();
 	const source = `
@@ -30,7 +105,7 @@ export default async function () {
 		await stub.release();
 		await expect(pending).resolves.toMatchObject({ error: expect.stringMatching(/interrupt/i) });
 	}
-	await expect(stub.runCodeMode("settling", source)).resolves.toEqual({ value: "interrupted" });
+	await expect.poll(() => stub.runCodeMode("settling", source)).toEqual({ value: "interrupted" });
 	expect((await stub.codeModeState()).receipts.settle).toHaveLength(1);
 	await expect(stub.runCodeMode("other", "export default () => 1")).resolves.toEqual({ value: 1 });
 });
@@ -134,27 +209,48 @@ test.each(recoverCase)(
 	},
 );
 
-test("retries an unfinished safe call with the same operation ID after a reset", async () => {
+test("replays out-of-order delivery and retries the unfinished call with the same ID", async () => {
 	let stub = openFixture();
 	await stub.seedCodeMode();
 	await stub.pause("code-mode-read");
 	const source = `
 import { read } from "codemode:tools";
 export default async function () {
-  return await Promise.all([read({ label: "before" }), read({ label: "retry" })]);
+  const slow = read({ label: "retry" }).then(() => "slow");
+  const fast = read({ label: "before" }).then(() => "fast");
+  const winner = await Promise.race([slow, fast]);
+  await read({ label: "winner-" + winner });
+  await read({ label: "sample:" + Date.now() + ":" + Math.random() });
+  return { winner, results: await Promise.all([slow, fast]) };
 }`;
 	const pending = expect(stub.runCodeMode("run", source)).rejects.toThrow(/restart|reset/i);
-	await expect.poll(() => stub.codeModeState()).toMatchObject({ pausedAt: "code-mode-read" });
+	await expect
+		.poll(() => stub.codeModeState())
+		.toMatchObject({
+			pausedAt: "code-mode-read",
+			receipts: { "winner-fast": [expect.any(String)] },
+		});
+	await expect
+		.poll(async () =>
+			Object.keys((await stub.codeModeState()).receipts).some((key) => key.startsWith("sample:")),
+		)
+		.toBe(true);
 	const { receipts } = await stub.codeModeState();
 	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
 	await pending;
 	stub = env.CHAT_TEST.get(stub.id);
 	await stub.release();
 
-	await expect(stub.runCodeMode("run", source)).resolves.toEqual({ value: ["seed", "seed"] });
+	await expect(stub.runCodeMode("run", source)).resolves.toEqual({
+		value: { winner: "fast", results: ["slow", "fast"] },
+	});
 	const after = await stub.codeModeState();
 	expect(receipts.retry).toHaveLength(1);
 	expect(after.receipts.before).toEqual(receipts.before);
+	expect(after.receipts["winner-fast"]).toEqual(receipts["winner-fast"]);
+	const samples = Object.entries(receipts).filter(([key]) => key.startsWith("sample:"));
+	expect(samples).toHaveLength(1);
+	expect(after.receipts).toMatchObject(Object.fromEntries(samples));
 	expect(after.receipts.retry).toEqual([receipts.retry?.[0], receipts.retry?.[0]]);
 });
 
@@ -237,18 +333,9 @@ test("stops a divergent replay before it can perform a new mutation", async () =
 	const source = `
 import { read, edit } from "codemode:tools";
 export default async function () {
-  try {
-    await read({ label: crypto.randomUUID() });
-    return await read({ label: "retry" });
-  } catch (error) {
-    if (error.code !== "failed") throw error;
-    try {
-      await edit({ oldText: "seed", newText: "unexpected" });
-    } catch (blocked) {
-      if (blocked.code !== "failed") throw blocked;
-    }
-    return "caught";
-  }
+  await read({ label: "retry" });
+  await edit({ oldText: "seed", newText: "unexpected" });
+  return "unexpected";
 }`;
 	const pending = expect(stub.runCodeMode("run", source)).rejects.toThrow(/restart|reset/i);
 	await expect.poll(() => stub.codeModeState()).toMatchObject({ pausedAt: "code-mode-read" });
@@ -257,6 +344,16 @@ export default async function () {
 	await pending;
 	stub = env.CHAT_TEST.get(stub.id);
 	await stub.release();
+	await runInDurableObject(stub, (_, { storage }) => {
+		storage.kv.put("code-mode:run:run:call:0", {
+			request: JSON.stringify({
+				module: "codemode:tools",
+				name: "read",
+				input: { label: "different" },
+			}),
+			replay: "safe",
+		});
+	});
 
 	await expect(stub.runCodeMode("run", source)).resolves.toEqual({
 		error: "Code Mode replay diverged at call 1.",
@@ -281,21 +378,34 @@ test("rejects direct filesystem and shell imports and denies outbound network ac
 			),
 		).resolves.toEqual({ value: expect.stringMatching(/module/i) });
 	}
-	const result = await stub.runCodeMode(
-		"network",
-		`export default async function () {
-  try {
-    await fetch("https://example.com");
-    return "allowed";
-  } catch (error) {
-    return error.message;
-  }
-}`,
-	);
-	expect(result).toEqual({
-		value: expect.stringContaining("not permitted to access the internet"),
-	});
+	await expect(
+		stub.runCodeMode("network", "export default () => typeof globalThis.fetch;"),
+	).resolves.toEqual({ value: "undefined" });
 });
+test("uses registered namespace imports alongside ordinary module bindings", async () => {
+	const stub = openFixture();
+	await expect(
+		stub.runCodeMode(
+			"namespace",
+			`
+import * as runtime from "codemode:runtime";
+const Object = "local";
+export default async () => Object + ":" + typeof await runtime.now();
+`,
+		),
+	).resolves.toEqual({ value: "local:number" });
+});
+
+test("bounds CPU-only scripts in the sandbox and accepts the next script", async () => {
+	const stub = openFixture();
+	await expect(
+		stub.runCodeMode("compute", "export default () => { for (;;) {} }"),
+	).resolves.toEqual({
+		error: expect.stringMatching(/interrupt|budget|timed out/i),
+	});
+	await expect(stub.runCodeMode("next", "export default () => 42")).resolves.toEqual({ value: 42 });
+});
+
 test("returns a committed call result even if activity publication fails", async () => {
 	const stub = env.CHAT_TEST.getByName(crypto.randomUUID());
 	await stub.seedCodeMode();

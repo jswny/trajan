@@ -1,52 +1,94 @@
 import { expect, it } from "@effect/vitest";
-import { Effect, Option, Result } from "effect";
+import { Deferred, Effect, Option } from "effect";
 import { createCodeMode } from "./index";
 import type {
 	CallCheckpoint,
 	CodeModeCatalog,
 	CodeModeHost,
 	CodeModeJournal,
+	GuestEvent,
 	RunCheckpoint,
 } from "./index";
 
 const module = "codemode:tools";
 const input = { module, name: "mutate", input: null };
 const source = "test script";
+const vm = { programId: "test-program", startedAt: 100, seed: 42 };
 
-function testHost(runGuest: CodeModeHost["runGuest"]) {
+function testHost({
+	fingerprint = "test-quickjs",
+	replayedInput = input,
+	issued = 1,
+	disconnectAfterDelivery = false,
+}: {
+	fingerprint?: string;
+	replayedInput?: Omit<typeof input, "input"> & { input: unknown };
+	issued?: number;
+	disconnectAfterDelivery?: boolean;
+} = {}) {
 	const calls = new Map<number, CallCheckpoint>();
 	let run: RunCheckpoint | undefined;
+	let replay: Parameters<CodeModeJournal["recordReplay"]>[0] | undefined;
+	let attempt = 0;
 	const journal: CodeModeJournal = {
 		callId: (index) => `test-call:${index}`,
 		readRun: () => Option.some(run),
 		readCall: (index) => Option.some(calls.get(index)),
-		start: (source) => {
-			run = { source };
-		},
+		readReplay: () => Option.some(replay),
+		start: (checkpoint) =>
+			Effect.sync(() => {
+				run = checkpoint;
+			}),
 		recordCall: (index, checkpoint) =>
 			Effect.sync(() => {
 				calls.set(index, checkpoint);
+			}),
+		recordReplay: (checkpoint) =>
+			Effect.sync(() => {
+				replay = checkpoint;
 			}),
 		finish: (checkpoint) =>
 			Effect.sync(() => {
 				run = checkpoint;
 			}),
-		commitCall: () => Effect.die("This test only exercises safe and unsafe calls."),
+		commitCall: () => Effect.die("Unexpected atomic call"),
 	};
-	return { calls, journal, host: { runGuest, openJournal: () => journal } };
+	const host: CodeModeHost = {
+		openJournal: () => journal,
+		prepareGuest: () =>
+			Effect.succeed({
+				programId: vm.programId,
+				start: (_, { onEvent }) => {
+					attempt++;
+					const done = Deferred.makeUnsafe<Extract<GuestEvent, { type: "done" | "error" }>>();
+					onEvent({ type: "started", fingerprint });
+					onEvent({ type: "call", index: 0, call: replayedInput });
+					onEvent({ type: "idle", sequence: 0, issued });
+					return {
+						deliver: ({ index, sequence, at }, reply) => {
+							expect(replay?.deliveries[sequence - 1]).toEqual({ index, at });
+							Deferred.doneUnsafe(
+								done,
+								Effect.succeed(
+									disconnectAfterDelivery && attempt === 1
+										? { type: "error", message: "Guest disconnected before acknowledgment." }
+										: { type: "done", sequence, issued, value: reply },
+								),
+							);
+						},
+						wait: Deferred.await(done),
+						close: async () => {},
+					};
+				},
+			}),
+	};
+	return { calls, journal, host };
 }
 
-it.effect("reuses a completed call after interruption and preserves its receipt", () =>
+it.effect("replays the same delivery after a disconnect before the VM acknowledges it", () =>
 	Effect.gen(function* () {
-		let attempt = 0;
 		let invocations = 0;
-		const { host, calls } = testHost(async (_, __, call) => {
-			const reply = await call(input);
-			if (++attempt === 1) {
-				throw new Error("Guest disconnected after receiving the reply.");
-			}
-			return reply;
-		});
+		const { host, calls, journal } = testHost({ disconnectAfterDelivery: true });
 		const catalog = {
 			[module]: {
 				mutate: {
@@ -61,12 +103,14 @@ it.effect("reuses a completed call after interruption and preserves its receipt"
 				},
 			},
 		} satisfies CodeModeCatalog;
-		const interrupted = yield* createCodeMode(host, catalog).run("run", source).pipe(Effect.result);
-		expect(Result.isFailure(interrupted)).toBe(true);
+		const interrupted = yield* createCodeMode(host, catalog).run("run", source).pipe(Effect.flip);
+		expect(interrupted.message).toBe("Guest disconnected before acknowledgment.");
+		expect(Option.getOrUndefined(journal.readReplay())?.issuedAfter).toEqual([1]);
 
 		const recovered = createCodeMode(host, catalog);
 		const reply = yield* recovered.run("run", source, { recovering: true });
 		expect(reply).toEqual({ status: "returned", value: "done" });
+		expect(Option.getOrUndefined(journal.readReplay())?.issuedAfter).toEqual([1, 1]);
 		expect(recovered.readExecution("run", "run").calls).toEqual([
 			{
 				id: "test-call:0",
@@ -81,13 +125,26 @@ it.effect("reuses a completed call after interruption and preserves its receipt"
 	}),
 );
 
-it.effect("retries a pending safe call and reports a pending unsafe call", () =>
+it.effect("retries safe or unstarted calls and reports interrupted unsafe effects", () =>
 	Effect.gen(function* () {
-		for (const replay of ["safe", "unsafe"] as const) {
+		for (const { replay, started, shouldRun } of [
+			{ replay: "safe", started: undefined, shouldRun: true },
+			{ replay: "unsafe", started: true, shouldRun: false },
+			{ replay: "unsafe", started: false, shouldRun: true },
+		] as const) {
 			let invocations = 0;
-			const { host, journal } = testHost((_, __, call) => call(input));
-			journal.start(source);
-			yield* journal.recordCall(0, { request: JSON.stringify(input), replay });
+			const { host, journal } = testHost();
+			yield* journal.start({ source, vm });
+			yield* journal.recordReplay({
+				fingerprint: "test-quickjs",
+				deliveries: [],
+				issuedAfter: [1],
+			});
+			yield* journal.recordCall(0, {
+				request: JSON.stringify(input),
+				replay,
+				...(started !== undefined && { started }),
+			});
 			const codeMode = createCodeMode(host, {
 				[module]: {
 					mutate: {
@@ -101,24 +158,42 @@ it.effect("retries a pending safe call and reports a pending unsafe call", () =>
 				},
 			});
 			const result = yield* codeMode.run("run", source, { recovering: true });
-			expect(result).toMatchObject({ status: replay === "safe" ? "returned" : "interrupted" });
-			expect(invocations).toBe(replay === "safe" ? 1 : 0);
+			expect(result).toMatchObject({ status: shouldRun ? "returned" : "interrupted" });
+			expect(invocations).toBe(Number(shouldRun));
 		}
 	}),
 );
 
-it.effect("rejects a divergent replay before invoking the new call", () =>
+it.effect("rejects a changed runtime, tool request, or idle boundary before invoking tools", () =>
 	Effect.gen(function* () {
-		const { host, journal } = testHost((_, __, call) => call({ ...input, input: "different" }));
-		journal.start(source);
-		yield* journal.recordCall(0, { request: JSON.stringify(input), replay: "unsafe" });
-		const result = yield* createCodeMode(host, {
-			[module]: {
-				mutate: { replay: "unsafe", run: () => Effect.die("Unexpected tool call") },
-			},
-		})
-			.run("run", source, { recovering: true })
-			.pipe(Effect.flip);
-		expect(result.message).toBe("Code Mode replay diverged at call 1.");
+		for (const [options, message] of [
+			[
+				{ fingerprint: "another-version" },
+				"The Code Mode sandbox runtime changed during recovery.",
+			],
+			[{ replayedInput: { ...input, input: "different" } }, "Code Mode replay diverged at call 1."],
+			[{ issued: 2 }, "Code Mode replay diverged at a sandbox checkpoint."],
+		] as const) {
+			const { host, journal } = testHost(options);
+			yield* journal.start({ source, vm });
+			yield* journal.recordReplay({
+				fingerprint: "test-quickjs",
+				deliveries: [],
+				issuedAfter: [1],
+			});
+			yield* journal.recordCall(0, {
+				request: JSON.stringify(input),
+				replay: "unsafe",
+				started: false,
+			});
+			const result = yield* createCodeMode(host, {
+				[module]: {
+					mutate: { replay: "unsafe", run: () => Effect.die("Unexpected tool call") },
+				},
+			})
+				.run("run", source, { recovering: true })
+				.pipe(Effect.flip);
+			expect(result.message).toBe(message);
+		}
 	}),
 );

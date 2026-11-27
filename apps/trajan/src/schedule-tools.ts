@@ -33,6 +33,7 @@ export function createScheduleTools(schedules: Pick<TurnSchedules, "create" | "l
 		}),
 		listSchedules: defineTool({
 			replay: "safe",
+			localStorage: true,
 			input: ListInput,
 			output: Schema.Struct({
 				schedules: Schema.Array(Schedule),
@@ -42,6 +43,7 @@ export function createScheduleTools(schedules: Pick<TurnSchedules, "create" | "l
 		}),
 		cancelSchedule: defineTool({
 			replay: "safe",
+			localStorage: true,
 			input: CancelInput,
 			output: Schema.Struct({ id: Schema.String, status: Schema.Literal("inactive") }),
 			run: ({ id }, { signal }) =>

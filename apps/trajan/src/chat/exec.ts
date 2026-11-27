@@ -1,5 +1,6 @@
 import { describeTools } from "@trajan/code-mode";
 import { clearCodeModeRun, createCloudflareCodeMode } from "@trajan/code-mode-cloudflare";
+import type { CodeModeSandboxBinding } from "@trajan/code-mode-cloudflare";
 import type { CodeModeActivity, CodeModeCatalog } from "@trajan/code-mode";
 import { completedToolResult, TurnIoError } from "@trajan/harness";
 import type { ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
@@ -60,11 +61,11 @@ function recordExecution(
 }
 
 export function createChatExec(
-	loader: WorkerLoader,
+	sandbox: CodeModeSandboxBinding,
 	storage: DurableObjectStorage,
 	{ catalog, instructions }: { catalog: CodeModeCatalog; instructions: string },
 ) {
-	const codeMode = createCloudflareCodeMode(loader, storage, catalog);
+	const codeMode = createCloudflareCodeMode(sandbox, storage, catalog);
 	const execute = Effect.fn("chat.exec")(
 		function* (...[call, attempt, publishActivity]: Parameters<TurnTools["Service"]["execute"]>) {
 			if (call.name !== Exec.name) {
@@ -83,9 +84,10 @@ export function createChatExec(
 					recovering: attempt.recovering,
 					onActivity: (entry) =>
 						Effect.suspend(() => {
-							recent = [...recent.filter(({ id }) => id !== entry.id), toolActivity(entry)].slice(
-								-RECENT_TOOL_CALLS,
-							);
+							const activity = toolActivity(entry);
+							recent = recent.some(({ id }) => id === entry.id)
+								? recent.map((item) => (item.id === entry.id ? activity : item))
+								: [...recent, activity].slice(-RECENT_TOOL_CALLS);
 							return publishActivity(recent);
 						}),
 				})
@@ -150,7 +152,7 @@ export function createChatExec(
 				"console.log and console.error are captured.",
 				"Use registered tools for all workspace and external operations. Capabilities cannot be accessed directly by the script.",
 				"Import replayable helpers from codemode:runtime for time or randomness that affects tool calls. Await now() for Unix time in milliseconds, random() for a number in [0, 1), or randomUUID() for a version 4 UUID. Each returned value is reused during replay.",
-				"Tools execute in call order. If a tool throws with code 'interrupted', inspect its effects before retrying. Base replay-sensitive branches and arguments on stable input and tool results.",
+				"Independent tool calls can run concurrently. Await dependent calls in order. If a tool throws with code 'interrupted', inspect its effects before retrying. Base replay-sensitive branches and arguments on stable input and tool results.",
 				"Write large results to a workspace file and return the path.",
 				instructions,
 				...describeTools(catalog),

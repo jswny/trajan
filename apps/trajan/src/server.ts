@@ -21,7 +21,11 @@ export class Trajan extends TrajanChatObject {
 	readonly #liveBrowser = createLiveBrowser(this.ctx.storage, this.#browser, this.env.BROWSER, () =>
 		this.publishBrowserAvailability(),
 	);
-	protected readonly chatExec = createChatExec(this.env.LOADER, this.ctx.storage, this.#toolset());
+	protected readonly chatExec = createChatExec(
+		this.env.CODE_MODE_SANDBOX,
+		this.ctx.storage,
+		this.#toolset(),
+	);
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);

@@ -5,7 +5,7 @@ import type { GitClient } from "@cloudflare/computer/git";
 import { CodeModeError, codeModeError, defineTool } from "@trajan/code-mode";
 import type { CodeModeTool } from "@trajan/code-mode";
 import { Effect, Predicate, Schema } from "effect";
-import type { Semaphore } from "effect";
+import type { workspaceLocks } from "./locks";
 
 export const createWorkspaceGitClient = createGitClient();
 
@@ -14,7 +14,11 @@ const pathList = Schema.mutable(Schema.Array(Schema.NonEmptyString));
 const ref = Schema.optionalKey(Schema.NonEmptyString);
 const depth = Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0)));
 
-export function workspaceGit(workspace: Workspace, root: string, mutations: Semaphore.Semaphore) {
+export function workspaceGit(
+	workspace: Workspace,
+	root: string,
+	locks: ReturnType<typeof workspaceLocks>,
+) {
 	const confinedDirectory = Effect.fnUntraced(function* (
 		input: string | undefined,
 		signal: AbortSignal,
@@ -76,16 +80,20 @@ export function workspaceGit(workspace: Workspace, root: string, mutations: Sema
 			return yield* Schema.decodeUnknownEffect(Schema.Json)(value ?? null);
 		});
 		return defineTool({
-			...(replay === "atomic" ? { replay, mutationLock: mutations } : { replay }),
+			...(replay === "atomic"
+				? { replay, mutationLock: locks.repository }
+				: {
+						replay,
+						// Status and diff may refresh index metadata.
+						lock: replay === "safe" ? locks.repository : locks.remoteGit,
+						localStorage: replay === "safe",
+						exclusiveStorage: replay === "unsafe",
+					}),
 			input,
 			output: Schema.Json,
 			normalizeInput: (raw) => raw ?? {},
 			...(recovery && { recovery }),
-			run: (args, { signal }) => {
-				const run = invoke(args, signal);
-				// Status and diff may refresh index metadata. Hold the lock until Git settles.
-				return replay === "atomic" ? run : mutations.withPermit(Effect.uninterruptible(run));
-			},
+			run: (args, { signal }) => Effect.uninterruptible(invoke(args, signal)),
 		});
 	}
 

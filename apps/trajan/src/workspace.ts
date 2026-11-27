@@ -36,6 +36,7 @@ function workspaceSkills(workspace: ReturnType<typeof createTrajanWorkspace>) {
 	) {
 		return defineTool({
 			replay: "safe",
+			localStorage: true,
 			input,
 			output,
 			details: FilePreview,

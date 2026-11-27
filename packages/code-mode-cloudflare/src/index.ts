@@ -1,13 +1,14 @@
-import { RpcTarget } from "cloudflare:workers";
+import type { CodemodeSandboxDurableObject } from "@earendil-works/pi-codemode/cloudflare";
 import {
 	codeModeError,
 	createCodeMode,
 	decodeCallCheckpoint,
+	decodeReplayCheckpoint,
 	decodeRunCheckpoint,
 } from "@trajan/code-mode";
-import type { CodeModeCatalog, CodeModeJournal, ToolReply } from "@trajan/code-mode";
+import type { CodeModeCatalog, CodeModeJournal } from "@trajan/code-mode";
 import { Effect } from "effect";
-import { loadGuest } from "./guest";
+import { quickJsGuest } from "./guest";
 
 function runPrefix(scope: string) {
 	return `code-mode:${encodeURIComponent(scope)}:`;
@@ -22,27 +23,29 @@ export function clearCodeModeRun(storage: DurableObjectStorage, scope: string) {
 function openJournal(storage: DurableObjectStorage, scope: string, id: string): CodeModeJournal {
 	const key = `${runPrefix(scope)}${encodeURIComponent(id)}`;
 	const callId = (index: number) => `${key}:call:${index}`;
+	// Standalone journal writes must have their own transaction so another call's rollback cannot undo them.
+	const persist = (write: () => void, runSignal?: AbortSignal) =>
+		Effect.tryPromise({
+			try: async (signal) => {
+				await storage.transaction(async () => {
+					signal.throwIfAborted();
+					runSignal?.throwIfAborted();
+					write();
+				});
+				await storage.sync();
+			},
+			catch: codeModeError,
+		});
 	return {
 		callId,
 		readRun: () => decodeRunCheckpoint(storage.kv.get(key)),
 		readCall: (index) => decodeCallCheckpoint(storage.kv.get(callId(index))),
-		start: (source) => storage.kv.put(key, { source }),
-		recordCall: (index, checkpoint) =>
-			Effect.tryPromise({
-				try: () => {
-					storage.kv.put(callId(index), checkpoint);
-					return storage.sync();
-				},
-				catch: codeModeError,
-			}),
-		finish: (checkpoint) =>
-			Effect.tryPromise({
-				try: () => {
-					storage.kv.put(key, checkpoint);
-					return storage.sync();
-				},
-				catch: codeModeError,
-			}),
+		readReplay: () => decodeReplayCheckpoint(storage.kv.get(`${key}:replay`)),
+		start: (checkpoint) => persist(() => storage.kv.put(key, checkpoint)),
+		recordCall: (index, checkpoint, signal) =>
+			persist(() => storage.kv.put(callId(index), checkpoint), signal),
+		recordReplay: (checkpoint) => persist(() => storage.kv.put(`${key}:replay`, checkpoint)),
+		finish: (checkpoint) => persist(() => storage.kv.put(key, checkpoint)),
 		commitCall: Effect.fnUntraced(function* (index, signal, invoke, receipt) {
 			const context = yield* Effect.context<never>();
 			return yield* Effect.tryPromise({
@@ -70,29 +73,26 @@ function openJournal(storage: DurableObjectStorage, scope: string, id: string): 
 	};
 }
 
-class HostTools extends RpcTarget {
-	readonly #call: (call: unknown) => Promise<ToolReply>;
-
-	constructor(call: (call: unknown) => Promise<ToolReply>) {
-		super();
-		this.#call = call;
-	}
-
-	call(call: unknown) {
-		return this.#call(call);
-	}
-}
+export type CodeModeSandboxBinding = DurableObjectNamespace<CodemodeSandboxDurableObject>;
 
 export function createCloudflareCodeMode(
-	loader: WorkerLoader,
+	sandbox: CodeModeSandboxBinding,
 	storage: DurableObjectStorage,
 	catalog: CodeModeCatalog,
 ) {
 	return createCodeMode(
 		{
 			openJournal: (scope, executionId) => openJournal(storage, scope, executionId),
-			runGuest: (source, namespaces, call) =>
-				loadGuest<HostTools>(loader, source, namespaces).run(new HostTools(call)),
+			isolateStorage: (effect) =>
+				Effect.gen(function* () {
+					const run = Effect.runPromiseWith(yield* Effect.context<never>());
+					const result = yield* Effect.tryPromise({
+						try: (signal) => storage.transaction(() => run(Effect.result(effect), { signal })),
+						catch: codeModeError,
+					});
+					return yield* Effect.fromResult(result);
+				}),
+			prepareGuest: quickJsGuest((executionId) => sandbox.getByName(executionId)),
 		},
 		catalog,
 	);

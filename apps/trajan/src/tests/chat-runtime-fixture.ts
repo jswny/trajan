@@ -140,7 +140,7 @@ export class ChatTestObject extends TrajanChatObject {
 	readonly #codeMode = createCodeModeFixture(
 		this.#workspace,
 		this.ctx.storage,
-		this.env.LOADER,
+		this.env.CODE_MODE_SANDBOX,
 		(point, signal) => this.#pauseAt(point, signal),
 	);
 	readSettledTools(runId: string) {
@@ -190,7 +190,7 @@ export class ChatTestObject extends TrajanChatObject {
 		const branch = faultBeforeCommit(git.branch, "during-replay-git");
 		const scheduleTools = this.#scheduleTools;
 		const schedule = faultBeforeCommit(scheduleTools.scheduleTurn, "during-replay-schedule");
-		return createChatExec(this.env.LOADER, storage, {
+		return createChatExec(this.env.CODE_MODE_SANDBOX, storage, {
 			instructions: `${instructions}\n${scheduleInstructions}`,
 			catalog: {
 				"codemode:tools": {
@@ -536,6 +536,24 @@ export default async function () {
   const checkedStatus = Array.isArray(await status());
   const branchExists = (await branches()).includes("replay-proof");
   return { checkedStatus, branchExists };
+}`,
+				},
+			};
+		}
+		if (last?.role === "user" && last.text === "Run parallel workspace recovery.") {
+			return {
+				role: "tool-call",
+				id: "exec-parallel-workspace",
+				name: "exec",
+				input: {
+					code: `import { read_second, write } from "codemode:tools";
+export default async function () {
+  const slow = read_second(null).then(() => "read");
+  const first = write({ path: "/workspace/first.txt", content: "first" }).then((value) => value.isError ? "failed" : "first");
+  const second = write({ path: "/workspace/second.txt", content: "second" }).then((value) => value.isError ? "failed" : "second");
+  const winner = await Promise.race([slow, first, second]);
+  if (winner === "read" || winner === "failed") throw new Error("Workspace writes did not complete during the pause");
+  return { winner, results: await Promise.all([slow, first, second]) };
 }`,
 				},
 			};
@@ -922,7 +940,7 @@ sequenceDiagram
 	workspaceTool(name: string, input: Schema.Json, recovering = false): Promise<string> {
 		const runId = crypto.randomUUID();
 		const { catalog, instructions } = workspaceToolset(this.#workspace);
-		const tools = createChatExec(this.env.LOADER, this.ctx.storage, {
+		const tools = createChatExec(this.env.CODE_MODE_SANDBOX, this.ctx.storage, {
 			catalog: {
 				...catalog,
 				"codemode:tools": { ...catalog["codemode:tools"], ...this.#scheduleTools },

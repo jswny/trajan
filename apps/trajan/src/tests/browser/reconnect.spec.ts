@@ -913,6 +913,35 @@ test("replays the original schedule receipt after its one-time job has fired", a
 	).toHaveCount(1);
 });
 
+test("keeps completed workspace writes when a concurrent call is interrupted by a restart", async ({
+	page,
+}) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/pause-replay`)).status()).toBe(204);
+	await composer.fill("Run parallel workspace recovery.");
+	await composer.press("Enter");
+	const card = toolCards(page).last();
+	await openToolCard(card);
+	const calls = card.getByRole("list", { name: "Tool calls" }).getByRole("listitem");
+	await expect(calls.filter({ hasText: /read_second.*Running/ })).toHaveCount(1);
+	await expect(calls.filter({ hasText: /write.*Succeeded/ })).toHaveCount(2);
+
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await openChat(page);
+	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
+	const reply = page.getByRole("main").getByText(/Wrote.*winner.*results/);
+	await expect(reply).toBeVisible();
+	await expect(reply).toHaveCount(1);
+	await openToolCard(card);
+	await expect(calls.filter({ hasText: /write.*Succeeded/ })).toHaveCount(2);
+	await expect(calls.filter({ hasText: /read_second.*Succeeded/ })).toHaveCount(1);
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await openChat(page);
+	await expect(reply).toHaveCount(1);
+	await openToolCard(card);
+	await expect(calls).toHaveCount(3);
+});
+
 test("keeps separate outcomes for concurrent calls to the same tool", async ({ page }) => {
 	const composer = await openChat(page);
 	await composer.fill("Run a workspace module.");

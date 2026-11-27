@@ -7,9 +7,9 @@
 	"scripts": {
 		"dev": "cf dev",
 		"build": "cf build",
-		"deploy": "cf deploy --force",
+		"deploy": "sh -c 'npm run deploy -w @trajan/code-mode-sandbox -- \"$@\" && cf deploy --force \"$@\"' --",
 		"types": "cf workers types",
-		"test": "vp test run --config src/tests/vitest.config.ts",
+		"test": "npm run build -w @trajan/code-mode-sandbox && vp test run --config src/tests/vitest.config.ts",
 		"test:browser": "playwright test --config src/tests/browser/playwright.config.ts",
 		"smoke": "node scripts/smoke.mjs"
 	},

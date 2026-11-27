@@ -1,5 +1,15 @@
-import { Cause, Clock, Data, Effect, Exit, Fiber, Option, Random, Schema } from "effect";
-import type { Semaphore } from "effect";
+import {
+	Cause,
+	Clock,
+	Data,
+	Effect,
+	Fiber,
+	Option,
+	Queue,
+	Random,
+	Schema,
+	Semaphore,
+} from "effect";
 
 export class CodeModeError extends Data.TaggedError("CodeModeError")<{
 	readonly message: string;
@@ -9,10 +19,20 @@ export class CodeModeRejected extends Data.TaggedError("CodeModeRejected")<{
 	readonly message: string;
 }> {}
 
+export interface ToolLock {
+	readonly withPermit: <A, E, R>(
+		effect: Effect.Effect<A, E, R>,
+		input: Schema.Json,
+	) => Effect.Effect<A, E, R>;
+}
+
 type ToolPolicy =
 	| { readonly replay: "safe" | "unsafe" }
 	// Atomic tools may mutate only storage shared with the execution journal.
-	| { readonly replay: "atomic"; readonly mutationLock: Semaphore.Semaphore };
+	| {
+			readonly replay: "atomic";
+			readonly mutationLock: ToolLock;
+	  };
 
 type ToolContext<D = Schema.Json> = {
 	readonly callId: string;
@@ -21,6 +41,11 @@ type ToolContext<D = Schema.Json> = {
 };
 
 export type CodeModeTool = ToolPolicy & {
+	/** A local-only operation that needs an isolated read or idempotent write. */
+	readonly localStorage?: boolean;
+	/** The tool's library touches local storage across external I/O. */
+	readonly exclusiveStorage?: boolean;
+	readonly lock?: ToolLock;
 	readonly parameters?: unknown;
 	readonly category?: string;
 	readonly description?: string;
@@ -38,6 +63,9 @@ export function defineTool<A, B extends Schema.Json, D extends Schema.Json = nev
 		readonly output: Schema.Codec<B>;
 		readonly details?: Schema.Codec<D>;
 		readonly category?: string;
+		readonly localStorage?: boolean;
+		readonly exclusiveStorage?: boolean;
+		readonly lock?: ToolLock;
 		readonly description?: string;
 		readonly normalizeInput?: (input: Schema.Json) => Schema.Json;
 		readonly recovery?: (input: A) => string;
@@ -125,12 +153,14 @@ export function describeTools(catalog: CodeModeCatalog) {
 }
 
 const maxCalls = 64;
+const maxConcurrentCalls = 8;
 const maxValueBytes = 64 * 1024;
 const interrupted: ToolReply = {
 	status: "interrupted",
 	message:
 		"The tool was interrupted and may have applied changes. Inspect its effects before retrying.",
 };
+const diverged = (message: string) => new CodeModeError({ message });
 const failed = (message: string): ToolReply => ({ status: "failed", message });
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 export const codeModeError = (error: unknown) =>
@@ -163,15 +193,74 @@ const ToolReply = Schema.Union([
 	Schema.Struct({ status: Schema.Literals(["interrupted", "failed"]), message: Schema.String }),
 ]);
 export type ToolReply = typeof ToolReply.Type;
+const GuestCall = Schema.Struct({
+	index: Schema.Natural.check(Schema.isLessThan(maxCalls)),
+	call: ToolCall,
+});
+const Delivery = Schema.Struct({
+	index: GuestCall.fields.index,
+	at: Schema.Natural,
+});
+export type Delivery = typeof Delivery.Type;
+const ReplayCheckpoint = Schema.Struct({
+	fingerprint: Schema.NonEmptyString,
+	deliveries: Schema.Array(Delivery).check(Schema.isMaxLength(maxCalls)),
+	issuedAfter: Schema.Array(Schema.Natural.check(Schema.isLessThanOrEqualTo(maxCalls))).check(
+		Schema.isMaxLength(maxCalls + 1),
+	),
+});
+type ReplayCheckpoint = typeof ReplayCheckpoint.Type;
+export const decodeReplayCheckpoint = Schema.decodeUnknownOption(
+	Schema.UndefinedOr(ReplayCheckpoint),
+);
+
+export type GuestEvent =
+	| { readonly type: "started"; readonly fingerprint: string }
+	| { readonly type: "call"; readonly index: number; readonly call: unknown }
+	| { readonly type: "idle"; readonly sequence: number; readonly issued: number }
+	| {
+			readonly type: "done";
+			readonly sequence: number;
+			readonly issued: number;
+			readonly value: unknown;
+	  }
+	| { readonly type: "error"; readonly message: string };
+
+interface GuestSession {
+	readonly deliver: (delivery: Delivery & { readonly sequence: number }, reply: ToolReply) => void;
+	readonly wait: Effect.Effect<Extract<GuestEvent, { type: "done" | "error" }>, CodeModeError>;
+	readonly close: () => Promise<void>;
+}
+
+interface PreparedGuest {
+	readonly programId: string;
+	readonly start: (
+		executionId: string,
+		options: {
+			readonly startedAt: number;
+			readonly seed: number;
+			readonly timeoutMs: number;
+			readonly onEvent: (event: GuestEvent) => void;
+		},
+	) => GuestSession;
+}
 const CallCheckpoint = Schema.Struct({
 	request: Schema.NonEmptyString,
 	replay: Schema.Literals(["safe", "unsafe", "atomic"]),
+	started: Schema.optionalKey(Schema.Boolean),
 	reply: Schema.optionalKey(ToolReply),
 	details: Schema.optionalKey(boundedJson),
 });
 export type CallCheckpoint = typeof CallCheckpoint.Type;
 const RunCheckpoint = Schema.Struct({
 	source: Schema.String,
+	vm: Schema.optionalKey(
+		Schema.Struct({
+			programId: Schema.NonEmptyString,
+			startedAt: Schema.Natural,
+			seed: Schema.Natural,
+		}),
+	),
 	result: Schema.optionalKey(Schema.Struct({ value: boundedJson })),
 });
 export type RunCheckpoint = typeof RunCheckpoint.Type;
@@ -190,12 +279,15 @@ export interface CodeModeJournal {
 	readonly callId: (index: number) => string;
 	readonly readRun: () => Option.Option<RunCheckpoint | undefined>;
 	readonly readCall: (index: number) => Option.Option<CallCheckpoint | undefined>;
-	readonly start: (source: string) => void;
+	readonly readReplay: () => Option.Option<ReplayCheckpoint | undefined>;
+	readonly start: (checkpoint: RunCheckpoint) => Effect.Effect<void, CodeModeError>;
 	/** Both intent and outcome records are durable before this effect succeeds. */
 	readonly recordCall: (
 		index: number,
 		checkpoint: CallCheckpoint,
+		signal?: AbortSignal,
 	) => Effect.Effect<void, CodeModeError>;
+	readonly recordReplay: (checkpoint: ReplayCheckpoint) => Effect.Effect<void, CodeModeError>;
 	readonly finish: (checkpoint: RunCheckpoint) => Effect.Effect<void, CodeModeError>;
 	/** Run against the journal's storage. Commit the mutation and receipt together,
 	 * or roll back when the callback returns no receipt or execution fails. */
@@ -209,11 +301,13 @@ export interface CodeModeJournal {
 
 export interface CodeModeHost {
 	readonly openJournal: (scope: string, executionId: string) => CodeModeJournal;
-	readonly runGuest: (
+	readonly isolateStorage?: <A, E>(
+		effect: Effect.Effect<A, E>,
+	) => Effect.Effect<A, E | CodeModeError>;
+	readonly prepareGuest: (
 		source: string,
 		namespaces: ReadonlyMap<string, ReadonlyArray<string>>,
-		call: (input: unknown) => Promise<ToolReply>,
-	) => Promise<Schema.Json>;
+	) => Effect.Effect<PreparedGuest, CodeModeError | CodeModeRejected>;
 }
 
 const activity = (
@@ -244,6 +338,42 @@ const replyStatus = (tool: CodeModeTool | undefined, reply: ToolReply) =>
 			: "completed"
 		: reply.status;
 
+function validReplay(history: ReplayCheckpoint | undefined, calls: ReadonlyArray<CallCheckpoint>) {
+	if (!history) {
+		return calls.length === 0;
+	}
+	const { deliveries, issuedAfter } = history;
+	if (
+		issuedAfter.length < deliveries.length ||
+		issuedAfter.length > deliveries.length + 1 ||
+		calls.length > (issuedAfter.at(-1) ?? 0)
+	) {
+		return false;
+	}
+	if (issuedAfter.some((issued, seq) => issued < (issuedAfter[seq - 1] ?? 0))) {
+		return false;
+	}
+	const seen = new Set<number>();
+	return deliveries.every(({ index, at }, seq) => {
+		if (
+			!calls[index]?.reply ||
+			index >= issuedAfter[seq] ||
+			seen.has(index) ||
+			at < (deliveries[seq - 1]?.at ?? 0)
+		) {
+			return false;
+		}
+		seen.add(index);
+		return true;
+	});
+}
+
+interface Invocation {
+	readonly input: ToolCall;
+	readonly tool: CodeModeTool;
+	readonly entry: CallCheckpoint;
+}
+
 export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 	const toolsByModule = new Map<string, ToolNamespace>(
 		Object.entries({ ...catalog, [runtimeModule]: runtimeTools }),
@@ -252,7 +382,8 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 		Array.from(toolsByModule, ([name, tools]) => [name, Object.keys(tools)]),
 	);
 	const active = new Set<string>();
-	const mutations = new Set<AbortSignal>();
+	const mutations = new Set<{ readonly signal: AbortSignal; readonly key: string }>();
+	const toolSlots = Semaphore.makeUnsafe(maxConcurrentCalls);
 	const getTool = ({ module, name }: ToolCall) => {
 		const tools = toolsByModule.get(module);
 		return tools && Object.hasOwn(tools, name) ? tools[name] : undefined;
@@ -272,7 +403,9 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 			if (!call) {
 				continue;
 			}
-			const reply = entry.reply ?? (entry.replay === "unsafe" ? interrupted : undefined);
+			const reply =
+				entry.reply ??
+				(entry.replay === "unsafe" && entry.started !== false ? interrupted : undefined);
 			if (reply) {
 				const tool = getTool(call);
 				calls.push(
@@ -299,7 +432,6 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 		yield* Schema.decodeEffect(boundedJson)(source).pipe(
 			Effect.mapError((error) => new CodeModeRejected({ message: error.message })),
 		);
-		const context = yield* Effect.context<never>();
 		const runScope = options.scope ?? id;
 		const key = JSON.stringify([runScope, id]);
 		const journal = host.openJournal(runScope, id);
@@ -317,202 +449,418 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 		if (saved?.result) {
 			return saved.result.value;
 		}
-		const scope = yield* Effect.scope;
+		const previous: Array<CallCheckpoint> = [];
+		for (let index = 0; index < maxCalls; index++) {
+			const entry = journal.readCall(index);
+			if (Option.isNone(entry)) {
+				return yield* new CodeModeError({
+					message: `Invalid Code Mode checkpoint for call ${index + 1}.`,
+				});
+			}
+			if (!entry.value) {
+				break;
+			}
+			previous.push(entry.value);
+		}
+		if (saved && !saved.vm) {
+			return yield* new CodeModeError({
+				message: "This unfinished script used a retired Code Mode runtime.",
+			});
+		}
+		const replay = journal.readReplay();
+		if (Option.isNone(replay)) {
+			return yield* new CodeModeError({ message: "Invalid Code Mode replay checkpoint." });
+		}
+		const history = replay.value;
+		if (!validReplay(history, previous)) {
+			return yield* new CodeModeError({ message: "Invalid Code Mode replay checkpoint." });
+		}
+
 		yield* Effect.acquireRelease(
 			Effect.gen(function* () {
-				if (active.has(key)) {
+				if (
+					active.has(key) ||
+					Array.from(mutations).some((owner) => owner.key === key && owner.signal.aborted)
+				) {
 					return yield* new CodeModeError({ message: "This script is already running." });
 				}
-				if (Array.from(mutations).some((signal) => signal.aborted)) {
+				if (Array.from(mutations).some(({ signal }) => signal.aborted)) {
 					return yield* new CodeModeError({ message: "An interrupted tool is still settling." });
 				}
 				active.add(key);
 			}),
 			() => Effect.sync(() => active.delete(key)),
 		);
-		return yield* Effect.tryPromise({
-			try: async (signal) => {
-				let open = true;
-				let inFlight = false;
-				let next = 0;
-				let divergence: string | undefined;
-				const rejectReplay = (index: number) => {
-					divergence = `Code Mode replay diverged at call ${index + 1}.`;
-					return failed(divergence);
-				};
-
-				const call = Effect.fnUntraced(function* (raw: unknown) {
-					if (!open || signal.aborted || inFlight || divergence || next >= maxCalls) {
-						return failed(divergence ?? "Code Mode cannot admit this call.");
-					}
-					const index = next;
-					const callId = journal.callId(index);
-					const input = yield* Schema.decodeUnknownEffect(ToolCall)(raw).pipe(
-						Effect.mapError(codeModeError),
-					);
-					const request = JSON.stringify(
-						yield* Schema.decodeEffect(boundedJson)(input).pipe(Effect.mapError(codeModeError)),
-					);
-					const tool = getTool(input);
-					const stored = journal.readCall(index);
-					if (Option.isNone(stored)) {
-						divergence = `Invalid Code Mode checkpoint for call ${index + 1}.`;
-						return failed(divergence);
-					}
-					const prior = stored.value;
-					if (prior && (prior.request !== request || prior.replay !== tool?.replay)) {
-						return rejectReplay(index);
-					}
-					if (!tool) {
-						return failed("Unknown Code Mode tool.");
-					}
-					const publish = (
-						status: CodeModeActivity["status"],
-						reply?: ToolReply,
-						details?: Schema.Json,
-					) =>
-						Effect.suspend(
-							() =>
-								options.onActivity?.(
-									activity(callId, input, status, tool.category, reply, details),
-								) ?? Effect.void,
-						).pipe(
-							Effect.catchCauseIf(
-								(cause) => !Cause.hasInterruptsOnly(cause),
-								(cause) => Effect.logWarning("Code Mode activity publication failed", cause),
-							),
-						);
-					const publishReply = (reply: ToolReply, details?: Schema.Json) =>
-						publish(replyStatus(tool, reply), reply, details);
-					next++;
-					if (prior?.reply) {
-						yield* publishReply(prior.reply, prior.details);
-						return prior.reply;
-					}
-
-					const entry: CallCheckpoint = prior ?? { request, replay: tool.replay };
-					inFlight = true;
-					return yield* Effect.gen(function* () {
-						if (!prior) {
-							// Flush the intent before the tool can change the workspace.
-							yield* journal.recordCall(index, entry);
-						}
-						if (prior?.replay !== "unsafe") {
-							yield* publish("running");
-						}
-						if (signal.aborted) {
-							return yield* Effect.interrupt;
-						}
-						let details: Schema.Json | undefined;
-						const invoke = Effect.suspend(() =>
-							tool.run(input.input, {
-								callId,
-								signal,
-								recordDetails: (value) => {
-									details = Option.getOrUndefined(decodeDetails(value));
-								},
-							}),
-						).pipe(
-							Effect.flatMap(Schema.decodeEffect(boundedJson)),
-							Effect.match({
-								onSuccess: (value): ToolReply => ({ status: "returned", value }),
-								onFailure: (error) => failed(errorMessage(error)),
-							}),
-						);
-						const checkpoint = (reply: ToolReply): CallCheckpoint => ({
-							...entry,
-							reply,
-							...(reply.status === "returned" && details !== undefined && { details }),
-						});
-						const attempt =
-							tool.replay === "atomic"
-								? tool.mutationLock.withPermit(
-										journal.commitCall(index, signal, invoke, (reply) => {
-											// A tool can report a failure after mutating its local storage.
-											if (
-												!open ||
-												signal.aborted ||
-												reply.status !== "returned" ||
-												tool.isError?.(reply.value)
-											) {
-												details = undefined;
-												return undefined;
-											}
-											return checkpoint(reply);
-										}),
-									)
-								: invoke.pipe(Effect.map((reply): CallOutcome => ({ reply })));
-						// A mutation can finish after abort. Keep ownership until it settles.
-						const scopedInvoke =
-							tool.replay === "safe"
-								? attempt
-								: Effect.acquireUseRelease(
-										Effect.sync(() => mutations.add(signal)),
-										() => attempt,
-										() => Effect.sync(() => mutations.delete(signal)),
-									).pipe(Effect.uninterruptible);
-						const { reply, committed } =
-							prior?.replay === "unsafe"
-								? { reply: interrupted, committed: undefined }
-								: yield* scopedInvoke;
-						if (!open || signal.aborted) {
-							return yield* Effect.interrupt;
-						}
-						const receipt = committed ?? checkpoint(reply);
-						if (!committed) {
-							yield* journal.recordCall(index, receipt);
-						}
-						yield* publishReply(reply, receipt.details);
-						return reply;
-					}).pipe(
-						Effect.ensuring(
-							Effect.sync(() => {
-								inFlight = false;
-							}),
-						),
-					);
-				});
-
-				try {
-					if (!saved) {
-						journal.start(source);
-					}
-					const value = await host.runGuest(source, namespaces, async (raw) => {
-						const exit = await Effect.runPromiseExitWith(context)(
-							Effect.forkIn(call(raw), scope).pipe(Effect.flatMap(Fiber.join)),
-							{ signal },
-						);
-						if (Exit.isSuccess(exit)) {
-							return exit.value;
-						}
-						if (signal.aborted) {
-							return interrupted;
-						}
-						throw Cause.squash(exit.cause);
-					});
-					signal.throwIfAborted();
-					if (
-						divergence ||
-						!Option.exists(journal.readCall(next), (entry) => entry === undefined) ||
-						inFlight
-					) {
-						throw new CodeModeError({
-							message: divergence ?? "Code Mode ended before reaching its recovery checkpoint.",
-						});
-					}
-					return value;
-				} finally {
-					open = false;
-				}
-			},
-			catch: codeModeError,
-		}).pipe(
+		const guest = yield* host
+			.prepareGuest(source, namespaces)
+			.pipe(Effect.mapError((error) => (saved ? codeModeError(error) : error)));
+		if (saved?.vm && saved.vm.programId !== guest.programId) {
+			return yield* new CodeModeError({
+				message: "The Code Mode program changed during recovery.",
+			});
+		}
+		const vm = saved?.vm ?? {
+			programId: guest.programId,
+			startedAt: yield* Clock.currentTimeMillis,
+			seed: (yield* Random.nextIntBetween(0, 0x1_00_00_00_00)) >>> 0,
+		};
+		if (!saved) {
+			yield* journal.start({ source, vm });
+		}
+		return yield* runGuest(guest, journal, key, vm, history, previous, options).pipe(
 			Effect.timeout("30 seconds"),
-			Effect.flatMap(Schema.decodeEffect(boundedJson)),
+			Effect.flatMap(Schema.decodeUnknownEffect(boundedJson)),
 			Effect.mapError(codeModeError),
-			Effect.tap((value) => journal.finish({ source, result: { value } })),
+			Effect.tap((value) => journal.finish({ source, vm, result: { value } })),
 		);
 	}, Effect.scoped);
+
+	const executeCall = Effect.fnUntraced(function* (
+		index: number,
+		invocation: Invocation,
+		prior: CallCheckpoint | undefined,
+		{
+			journal,
+			key,
+			signal,
+			onActivity,
+		}: {
+			readonly journal: CodeModeJournal;
+			readonly key: string;
+			readonly signal: AbortSignal;
+			readonly onActivity: RunOptions["onActivity"];
+		},
+	) {
+		const { input, tool, entry } = invocation;
+		const callId = journal.callId(index);
+		const publish = (
+			status: CodeModeActivity["status"],
+			reply?: ToolReply,
+			details?: Schema.Json,
+		) =>
+			Effect.suspend(
+				() =>
+					onActivity?.(activity(callId, input, status, tool.category, reply, details)) ??
+					Effect.void,
+			).pipe(
+				Effect.catchCauseIf(
+					(cause) => !Cause.hasInterruptsOnly(cause),
+					(cause) => Effect.logWarning("Code Mode activity publication failed", cause),
+				),
+			);
+		const publishReply = (reply: ToolReply, details?: Schema.Json) =>
+			publish(replyStatus(tool, reply), reply, details);
+		if (prior?.reply) {
+			yield* publishReply(prior.reply, prior.details);
+			return prior.reply;
+		}
+
+		const receipt = yield* toolSlots.withPermits(tool.exclusiveStorage ? maxConcurrentCalls : 1)(
+			Effect.gen(function* () {
+				const uncertain = prior?.replay === "unsafe" && prior.started !== false;
+				if (!uncertain) {
+					yield* publish("running");
+				}
+				if (signal.aborted) {
+					return yield* Effect.interrupt;
+				}
+				let details: Schema.Json | undefined;
+				const invoke = Effect.suspend(() =>
+					tool.run(input.input, {
+						callId,
+						signal,
+						recordDetails: (value) => {
+							details = Option.getOrUndefined(decodeDetails(value));
+						},
+					}),
+				).pipe(
+					Effect.flatMap(Schema.decodeEffect(boundedJson)),
+					Effect.match({
+						onSuccess: (value): ToolReply => ({ status: "returned", value }),
+						onFailure: (error) => failed(errorMessage(error)),
+					}),
+				);
+				const checkpoint = (reply: ToolReply): CallCheckpoint => ({
+					...entry,
+					...(tool.replay === "unsafe" && { started: true }),
+					reply,
+					...(reply.status === "returned" && details !== undefined && { details }),
+				});
+				const attempt =
+					tool.replay === "atomic"
+						? tool.mutationLock.withPermit(
+								journal.commitCall(index, signal, invoke, (reply) => {
+									// A tool can report a failure after mutating its local storage.
+									if (
+										signal.aborted ||
+										reply.status !== "returned" ||
+										tool.isError?.(reply.value)
+									) {
+										details = undefined;
+										return undefined;
+									}
+									return checkpoint(reply);
+								}),
+								input.input,
+							)
+						: (tool.localStorage && host.isolateStorage
+								? Effect.uninterruptible(host.isolateStorage(invoke))
+								: invoke
+							).pipe(Effect.map((reply): CallOutcome => ({ reply })));
+				// A mutation can finish after abort. Keep ownership until it settles.
+				const invokeWhenOpen = Effect.suspend(() => (!signal.aborted ? attempt : Effect.interrupt));
+				const execute =
+					tool.replay === "unsafe"
+						? journal
+								.recordCall(index, { ...entry, started: true }, signal)
+								.pipe(Effect.andThen(invokeWhenOpen))
+						: invokeWhenOpen;
+				const locked = tool.lock ? tool.lock.withPermit(execute, input.input) : execute;
+				const settle = Effect.gen(function* () {
+					const { reply, committed } = uncertain
+						? { reply: interrupted, committed: undefined }
+						: yield* locked;
+					if (signal.aborted) {
+						return yield* Effect.interrupt;
+					}
+					const receipt = committed ?? checkpoint(reply);
+					if (!committed) {
+						yield* journal.recordCall(index, receipt, signal);
+					}
+					return { reply, receipt };
+				});
+				const { reply, receipt } = yield* tool.replay === "safe" || uncertain
+					? settle
+					: Effect.acquireUseRelease(
+							Effect.sync(() => {
+								const owner = { signal, key };
+								mutations.add(owner);
+								return owner;
+							}),
+							() => settle,
+							(owner) => Effect.sync(() => mutations.delete(owner)),
+						).pipe(Effect.uninterruptible);
+				yield* publishReply(reply, receipt.details);
+				return receipt;
+			}),
+		);
+		return receipt.reply ?? interrupted;
+	});
+
+	function runGuest(
+		guest: PreparedGuest,
+		journal: CodeModeJournal,
+		key: string,
+		vm: NonNullable<RunCheckpoint["vm"]>,
+		history: ReplayCheckpoint | undefined,
+		previous: ReadonlyArray<CallCheckpoint>,
+		options: RunOptions,
+	) {
+		return Effect.gen(function* () {
+			type SchedulerEvent =
+				| GuestEvent
+				| { readonly type: "settled"; readonly index: number; readonly reply: ToolReply };
+			const queue = yield* Queue.unbounded<SchedulerEvent>();
+			const emit = (event: SchedulerEvent) => {
+				Queue.offerUnsafe(queue, event);
+			};
+			const session = yield* Effect.acquireRelease(
+				Effect.try({
+					try: () => guest.start(key, { ...vm, timeoutMs: 25_000, onEvent: emit }),
+					catch: codeModeError,
+				}),
+				(session) =>
+					Effect.tryPromise({ try: () => session.close(), catch: codeModeError }).pipe(
+						Effect.catch((error) => Effect.logWarning("Code Mode sandbox close failed", error)),
+					),
+			);
+			const tasks = new Set<Fiber.Fiber<void>>();
+			// Uninterruptible mutations retain ownership until they have actually settled.
+			yield* Effect.addFinalizer(() => Effect.forkDetach(Fiber.interruptAll(tasks)));
+			const signal = yield* Effect.abortSignal;
+			yield* session.wait.pipe(
+				Effect.match({
+					onFailure: (error) => ({ type: "error", message: error.message }) as const,
+					onSuccess: (event) => event,
+				}),
+				Effect.map(emit),
+				Effect.forkScoped,
+			);
+			const requests: Array<Invocation> = [];
+			const invoke = (index: number) =>
+				executeCall(index, requests[index], previous[index], {
+					journal,
+					key,
+					signal,
+					onActivity: options.onActivity,
+				});
+			const deliveries = [...(history?.deliveries ?? [])];
+			const issuedAfter = [...(history?.issuedAfter ?? [])];
+			const ready = new Map<number, ToolReply>();
+			let fingerprint: string | undefined;
+			let sequence = 0;
+			let initiated = 0;
+			let idle = false;
+			const persist = (verified: string) =>
+				journal.recordReplay({
+					fingerprint: verified,
+					deliveries: deliveries.slice(),
+					issuedAfter: issuedAfter.slice(),
+				});
+
+			const acknowledge = Effect.fnUntraced(function* (received: number, issued: number) {
+				if (
+					!fingerprint ||
+					received !== sequence ||
+					issued !== requests.length ||
+					(issuedAfter[sequence] !== undefined && issuedAfter[sequence] !== issued)
+				) {
+					return yield* diverged("Code Mode replay diverged at a sandbox checkpoint.");
+				}
+				if (issuedAfter[sequence] === undefined) {
+					issuedAfter.push(issued);
+					yield* persist(fingerprint);
+				}
+			});
+
+			const send = Effect.fnUntraced(function* (delivery: Delivery, reply: ToolReply) {
+				idle = false;
+				sequence++;
+				yield* Effect.try({
+					try: () => session.deliver({ ...delivery, sequence }, reply),
+					catch: codeModeError,
+				});
+			});
+
+			while (true) {
+				const event = yield* Queue.take(queue);
+				switch (event.type) {
+					case "started":
+						if (fingerprint || (history && history.fingerprint !== event.fingerprint)) {
+							return yield* diverged("The Code Mode sandbox runtime changed during recovery.");
+						}
+						fingerprint = event.fingerprint;
+						if (!history) {
+							yield* persist(fingerprint);
+						}
+						break;
+					case "call": {
+						const { index, call: input } = yield* Schema.decodeUnknownEffect(GuestCall)(event).pipe(
+							Effect.mapError(codeModeError),
+						);
+						if (
+							!fingerprint ||
+							idle ||
+							index !== requests.length ||
+							(issuedAfter[sequence] !== undefined && index >= issuedAfter[sequence])
+						) {
+							return yield* diverged("Code Mode replay diverged at a sandbox call.");
+						}
+						const tool = getTool(input);
+						const request = JSON.stringify(
+							yield* Schema.decodeEffect(boundedJson)(input).pipe(Effect.mapError(codeModeError)),
+						);
+						const prior = previous[index];
+						if (prior && (prior.request !== request || prior.replay !== tool?.replay)) {
+							return yield* diverged(`Code Mode replay diverged at call ${index + 1}.`);
+						}
+						if (!tool) {
+							return yield* diverged("Unknown Code Mode tool.");
+						}
+						requests.push({
+							input,
+							tool,
+							entry: prior ?? {
+								request,
+								replay: tool.replay,
+								...(tool.replay === "unsafe" && { started: false }),
+							},
+						});
+						break;
+					}
+					case "idle": {
+						if (idle) {
+							return yield* diverged("Duplicate Code Mode sandbox checkpoint.");
+						}
+						yield* acknowledge(event.sequence, event.issued);
+						const recorded = deliveries[sequence];
+						if (recorded) {
+							const reply = previous[recorded.index]?.reply;
+							if (!reply || recorded.index >= requests.length) {
+								return yield* diverged("Code Mode replay diverged before a recorded delivery.");
+							}
+							// Restore the activity stream from the same receipt the VM will receive.
+							yield* invoke(recorded.index);
+							yield* send(recorded, reply);
+							break;
+						}
+						if (requests.length < previous.length) {
+							return yield* diverged("Code Mode replay ended before reaching its saved calls.");
+						}
+						for (
+							let index = Math.max(initiated, previous.length);
+							index < requests.length;
+							index++
+						) {
+							yield* journal.recordCall(index, requests[index].entry);
+						}
+						// Historical deliveries have already settled and must never be invoked again.
+						const delivered = new Set(deliveries.map(({ index }) => index));
+						for (let index = initiated; index < requests.length; index++) {
+							if (delivered.has(index)) {
+								continue;
+							}
+							const fiber = yield* invoke(index).pipe(
+								Effect.matchCause({
+									onSuccess: (reply) => ({ type: "settled", index, reply }) as const,
+									onFailure: (cause) =>
+										({ type: "error", message: errorMessage(Cause.squash(cause)) }) as const,
+								}),
+								Effect.map(emit),
+								Effect.forkDetach,
+							);
+							tasks.add(fiber);
+						}
+						initiated = requests.length;
+						idle = true;
+						break;
+					}
+					case "settled":
+						ready.set(event.index, event.reply);
+						break;
+					case "done":
+						yield* acknowledge(event.sequence, event.issued);
+						if (
+							sequence !== deliveries.length ||
+							sequence !== requests.length ||
+							requests.length < previous.length
+						) {
+							return yield* diverged("Code Mode ended before reaching its recovery checkpoint.");
+						}
+						return event.value;
+					case "error":
+						return yield* new CodeModeError({ message: event.message });
+				}
+				if (idle && fingerprint && ready.size) {
+					const next = ready.entries().next();
+					if (next.done) {
+						continue;
+					}
+					const [index, reply] = next.value;
+					ready.delete(index);
+					const at = Math.max(
+						yield* Clock.currentTimeMillis,
+						deliveries.at(-1)?.at ?? vm.startedAt,
+					);
+					const delivery = { index, at };
+					deliveries.push(delivery);
+					// Persist the scheduler decision before the VM receives it or runs more code.
+					yield* persist(fingerprint);
+					yield* send(delivery, reply);
+				}
+			}
+		}).pipe(Effect.scoped);
+	}
 
 	return { run, readExecution };
 }

@@ -114,6 +114,7 @@ export function browserToolset(
 	) {
 		return defineTool({
 			category: "browser",
+			exclusiveStorage: true,
 			replay,
 			input,
 			output,
@@ -206,6 +207,7 @@ export function browserToolset(
 		),
 		browserClose: defineTool({
 			replay: "unsafe",
+			exclusiveStorage: true,
 			input: emptyInput,
 			output: Schema.Struct({ closed: Schema.Boolean }),
 			run: Effect.fnUntraced(function* () {

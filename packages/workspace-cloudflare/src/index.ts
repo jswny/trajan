@@ -1,9 +1,10 @@
 import { Workspace } from "@cloudflare/computer";
 import { CodeModeError, codeModeError } from "@trajan/code-mode";
 import type { CodeModeTool } from "@trajan/code-mode";
-import { Effect, Schema, Semaphore } from "effect";
+import { Effect, Schema } from "effect";
 import { createWorkspaceGitClient, workspaceGit } from "./git";
 import { workspaceFileTools } from "./file-changes";
+import { workspaceLocks } from "./locks";
 import type { FileMutationReceipt } from "./file-changes";
 
 export { FileMutationReceipt } from "./file-changes";
@@ -38,15 +39,19 @@ export function createWorkspaceTools(
 		readonly describeRead?: (read: typeof FileRead.Type) => Schema.Json;
 	},
 ) {
-	const mutations = Semaphore.makeUnsafe(1);
+	const locks = workspaceLocks(root);
 	const files = workspaceFileTools(workspace, root, maxDiffBytes);
 	const fileTools = Object.fromEntries(
 		files.tools.map(({ name, parameters, description }) => [
 			name,
 			{
 				...(atomicFiles.has(name)
-					? { replay: "atomic" as const, mutationLock: mutations }
-					: { replay: replaySafeFiles.has(name) ? ("safe" as const) : ("unsafe" as const) }),
+					? { replay: "atomic" as const, mutationLock: locks.fileMutation }
+					: {
+							replay: replaySafeFiles.has(name) ? ("safe" as const) : ("unsafe" as const),
+							localStorage: true,
+							lock: name === "read" ? locks.fileRead : locks.treeRead,
+						}),
 				parameters,
 				description,
 				isError: isFileToolError,
@@ -96,5 +101,5 @@ export function createWorkspaceTools(
 			} satisfies CodeModeTool,
 		]),
 	);
-	return { files: fileTools, git: workspaceGit(workspace, root, mutations) };
+	return { files: fileTools, git: workspaceGit(workspace, root, locks) };
 }
