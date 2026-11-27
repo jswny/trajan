@@ -5,9 +5,11 @@ import type { PluginConfig } from "@cloudflare/vite-plugin";
 import pierreDark from "@pierre/theme/pierre-dark";
 import pierreLight from "@pierre/theme/pierre-light";
 import tailwindcss from "@tailwindcss/vite";
-import react from "@vitejs/plugin-react";
 import agents from "agents/vite";
 import { defineConfig } from "vite-plus";
+
+// Pierre ships the SVGs in its tarball, outside the package's JS export map.
+const pierreIconAssets = fileURLToPath(new URL("../", import.meta.resolve("@pierre/icons")));
 
 const paletteRoles = {
 	canvas: "editor.background",
@@ -54,11 +56,11 @@ async function fixtureWorker(mode: "browser-smoke"): Promise<PluginConfig> {
 }
 
 export default defineConfig(async ({ command, mode }) => ({
+	resolve: { alias: { "pierre-icon-assets": pierreIconAssets } },
 	// Intentional Worker crashes during recovery tests must not obscure other test pages.
-	server: mode === "browser-smoke" ? { hmr: { overlay: false } } : undefined,
+	...(mode === "browser-smoke" && { server: { hmr: { overlay: false } } }),
 	plugins: [
 		agents(),
-		react(),
 		cloudflare(command === "serve" && mode === "browser-smoke" ? await fixtureWorker(mode) : {}),
 		tailwindcss(),
 		{
@@ -78,7 +80,4 @@ export default defineConfig(async ({ command, mode }) => ({
 			},
 		},
 	],
-	resolve: {
-		dedupe: ["react", "react-dom"],
-	},
 }));

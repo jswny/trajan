@@ -4,7 +4,7 @@ import { readPreference, writePreference } from "./browser-storage";
 
 // The startup script in index.html reads the same key before the first paint.
 const THEME_KEY = "trajan-theme";
-const ThemeMode = Schema.Literals(["auto", "light", "dark"]);
+export const ThemeMode = Schema.Literals(["auto", "light", "dark"]);
 const isThemeMode = Schema.is(ThemeMode);
 
 export const themePreference = Atom.writable<typeof ThemeMode.Type, string>(

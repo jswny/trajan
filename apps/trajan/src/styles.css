@@ -250,3 +250,10 @@ body {
 	background: var(--pierre-accent);
 	animation: chat-cursor-pulse 0.8s step-start infinite;
 }
+
+.pierre-icon {
+	background-color: currentColor;
+	mask-repeat: no-repeat;
+	mask-size: contain;
+	vertical-align: middle;
+}

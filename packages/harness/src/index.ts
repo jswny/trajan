@@ -46,16 +46,15 @@ const toolActivityFields = {
 	activity: Schema.optionalKey(Schema.Array(ToolActivity)),
 	uncertainEffects: Schema.optionalKey(Schema.Array(UncertainToolEffect)),
 };
-export const ToolContent = Schema.NonEmptyArray(
-	Schema.Union([
-		Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
-		Schema.Struct({
-			type: Schema.Literal("image"),
-			mimeType: Schema.Literals(["image/jpeg", "image/png", "image/webp", "image/gif"]),
-			data: Schema.NonEmptyString,
-		}),
-	]),
-);
+export const ToolContentPart = Schema.Union([
+	Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
+	Schema.Struct({
+		type: Schema.Literal("image"),
+		mimeType: Schema.Literals(["image/jpeg", "image/png", "image/webp", "image/gif"]),
+		data: Schema.NonEmptyString,
+	}),
+]);
+export const ToolContent = Schema.NonEmptyArray(ToolContentPart);
 const RichToolOutput = Schema.Struct({
 	type: Schema.Literal("tool-content"),
 	parts: ToolContent,

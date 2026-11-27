@@ -27,7 +27,11 @@ export function createCodeModeFixture(
 	loader: WorkerLoader,
 	pause: (point: Point, signal: AbortSignal) => Promise<void>,
 ) {
-	const files = createPiTools({ workspace, root: dir, exec: { backends: {} } });
+	const files = createPiTools({
+		workspace: { fs: workspace.fs, runtime: workspace.runtime, sessionId: workspace.sessionId },
+		root: dir,
+		exec: { backends: {} },
+	});
 	const receipt = (name: string, callId: string) =>
 		Effect.sync(() => {
 			const calls = storage.kv.get<Array<string>>(`code-mode-test:${name}`) ?? [];

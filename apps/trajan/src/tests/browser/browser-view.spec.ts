@@ -27,6 +27,7 @@ test("opens the browser in a mobile sheet and docks it on wide screens", async (
 	let finishTurn: (() => void) | undefined;
 	let expectedBrowser = "browser-one";
 	let viewRequests = 0;
+	let frameRequests = 0;
 	let leaseDuration = 60_000;
 	await page.routeWebSocket("**/api/chat/live", (client) => {
 		const snapshot = {
@@ -87,9 +88,10 @@ test("opens the browser in a mobile sheet and docks it on wide screens", async (
 			json: { status: "open", url: hostedView, expiresAt: Date.now() + leaseDuration },
 		});
 	});
-	await page.route(hostedView, (route) =>
-		route.fulfill({ contentType: "text/html", body: "<h1>Browser page</h1>" }),
-	);
+	await page.route(hostedView, (route) => {
+		frameRequests += 1;
+		return route.fulfill({ contentType: "text/html", body: "<h1>Browser page</h1>" });
+	});
 	await page.goto("/");
 	const footer = page.locator("footer");
 	const scroller = page.locator(".chat-transcript");
@@ -156,7 +158,9 @@ test("opens the browser in a mobile sheet and docks it on wide screens", async (
 	const panelBox = await dialog.boundingBox();
 	expect(panelBox?.x).toBeGreaterThan(700);
 	expect(panelBox?.height).toBe(900);
+	await expect(iframe.contentFrame().getByRole("heading", { name: "Browser page" })).toBeVisible();
 	expect(viewRequests).toBe(1);
+	expect(frameRequests).toBe(1);
 
 	setBrowser?.(null);
 	await expect(dialog.getByRole("status")).toHaveText("Browser closed");

@@ -268,7 +268,7 @@ test("shows animated progress with either motion preference", async ({ page }) =
 	const composer = await openChat(page);
 	await composer.fill("Interrupt after writing.");
 	await composer.press("Enter");
-	const spinner = page.getByText("Running exec", { exact: true }).locator("svg");
+	const spinner = page.getByText("Running exec", { exact: true }).locator('[data-icon="loader"]');
 	await expect(spinner).toHaveCSS("animation-name", "pulse");
 	await expect(spinner).toHaveCSS("transform", "none");
 	await expect
@@ -819,6 +819,23 @@ test("keeps the composer one row tall until the draft needs more space", async (
 	await composer.press("Enter");
 	await expect(page.getByRole("main")).toContainText("Remembering the first line");
 	await expect.poll(composerHeight).toBe(controlHeight);
+});
+
+test("keeps IME confirmation separate from sending a message", async ({ page }) => {
+	const composer = await openChat(page);
+	const send = page.getByRole("button", { name: "Send message" });
+	const transcript = page.getByRole("main");
+	const draft = "Remember 日本語";
+	await composer.dispatchEvent("compositionstart");
+	await composer.fill(draft);
+	await expect(send).toBeEnabled();
+	await composer.dispatchEvent("keydown", { key: "Enter", isComposing: true });
+	await expect(composer).toHaveValue(draft);
+	await expect(transcript).not.toContainText(draft);
+	await composer.dispatchEvent("compositionend", { data: "日本語" });
+	await composer.press("Enter");
+	await expect(transcript).toContainText("Remembering 日本語");
+	await expect(composer).toHaveValue("");
 });
 
 test("keeps the latest reply above a growing composer when following the transcript", async ({

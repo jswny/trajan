@@ -4,7 +4,7 @@ Keep this file focused on durable decisions that contributors cannot infer from 
 
 - Name packages for the capabilities they provide. Use platform or provider qualifiers when the platform or provider is part of the package's contract.
 - Extract reusable capabilities with interfaces that can be tested independently. Have platform adapters depend on the platform-neutral core. Keep product policy and composition in the deployable app.
-- Use Effect for app-owned asynchronous workflows and Effect atoms for shared UI state. Compose workflows before running them at integration boundaries. Use plain functions for pure transformations and let the renderer schedule DOM work.
+- Use Effect for app-owned asynchronous workflows and Effect atoms for shared UI state. Compose workflows before running them at integration boundaries. Use plain functions for pure transformations.
 - Give the model one tool surface through Code Mode. Expose only `exec` to the model. Route script effects through registered tools with an explicit replay policy.
 - Keep tool replies focused on what the caller needs. Record structured UI details alongside the tool outcome so previews can be restored after recovery.
 - Use Pi Durable as a design reference for turn execution and recovery. Keep the chat rebuildable from durable state after a reconnect.
@@ -24,6 +24,8 @@ Keep this file focused on durable decisions that contributors cannot infer from 
 
 ## UI design
 
+- Keep view-local state in Effect UI component models. Use scoped commands, subscriptions, and mounts for browser effects. Give third-party DOM renderers dedicated hosts and release their resources when those hosts unmount.
+- Consult the installed `node_modules/@effect/ui/AGENTS.md` before changing Effect UI components or lifecycle code.
 - Keep the conversation primary. Use compact controls and let users reveal supporting details on demand.
 - Surface transient progress in the live UI. Keep conversation history focused on messages and outcomes worth revisiting.
 - Reuse shared visual tokens for color, shape, and spacing. Give elements with the same role a consistent treatment across states, and keep nested surfaces visually secondary.

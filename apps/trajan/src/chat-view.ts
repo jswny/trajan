@@ -1,11 +1,6 @@
-import { toolResultContent } from "@trajan/harness";
-import type {
-	ToolActivity as ToolActivityEntry,
-	ToolCall,
-	ToolContent,
-	ToolResult,
-	UncertainToolEffect,
-} from "@trajan/harness";
+import { ToolContentPart, toolResultContent, UncertainToolEffect } from "@trajan/harness";
+import type { ToolResult } from "@trajan/harness";
+import type { ToolActivity as ToolActivityEntry, ToolCall } from "@trajan/harness";
 import { Schema } from "effect";
 import type { ChatPage } from "./chat/protocol";
 import { ToolActivity } from "./chat/tool-presentation";
@@ -14,39 +9,50 @@ import { execName, ExecInput } from "./exec-contract";
 const decodeActivity = Schema.decodeUnknownOption(ToolActivity);
 const decodeScript = Schema.decodeUnknownOption(ExecInput);
 
-export type ChatText = {
-	readonly id: string;
-	readonly role: "user" | "assistant";
-	readonly text: string;
-};
+export const ChatText = Schema.Struct({
+	id: Schema.String,
+	role: Schema.Literals(["user", "assistant"]),
+	text: Schema.String,
+});
+export type ChatText = typeof ChatText.Type;
 
-export type ChatTool = {
-	readonly id: string;
-	readonly role: "tool";
-	readonly name: string;
-	readonly argument?: {
-		readonly type: "script" | "json";
-		readonly source: string;
-	};
-	readonly activity: ReadonlyArray<typeof ToolActivity.Type>;
-	readonly result?: {
-		readonly status: (typeof ToolResult.Type)["status"];
-		readonly content: ReadonlyArray<
-			(typeof ToolContent.Type)[number] | { readonly type: "json"; readonly text: string }
-		>;
-		readonly uncertainEffects?: ReadonlyArray<typeof UncertainToolEffect.Type>;
-	};
-};
+export const ChatTool = Schema.Struct({
+	id: Schema.String,
+	role: Schema.Literal("tool"),
+	name: Schema.String,
+	argument: Schema.optionalKey(
+		Schema.Struct({
+			type: Schema.Literals(["script", "json"]),
+			source: Schema.String,
+		}),
+	),
+	activity: Schema.Array(ToolActivity),
+	result: Schema.optionalKey(
+		Schema.Struct({
+			status: Schema.Literals(["completed", "failed", "unknown"]),
+			content: Schema.Array(
+				Schema.Union([
+					ToolContentPart,
+					Schema.Struct({ type: Schema.Literal("json"), text: Schema.String }),
+				]),
+			),
+			uncertainEffects: Schema.optionalKey(Schema.Array(UncertainToolEffect)),
+		}),
+	),
+});
+export type ChatTool = typeof ChatTool.Type;
 
-export type ChatMessage =
-	| ChatText
-	| ChatTool
-	| {
-			readonly id: string;
-			readonly role: "notice";
-			readonly status: "failed" | "cancelled";
-			readonly text: string;
-	  };
+export const ChatMessage = Schema.Union([
+	ChatText,
+	ChatTool,
+	Schema.Struct({
+		id: Schema.String,
+		role: Schema.Literal("notice"),
+		status: Schema.Literals(["failed", "cancelled"]),
+		text: Schema.String,
+	}),
+]);
+export type ChatMessage = typeof ChatMessage.Type;
 
 export function chatText(id: string, role: ChatText["role"], text: string): ChatText {
 	return { id, role, text };

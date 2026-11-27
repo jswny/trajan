@@ -1,12 +1,12 @@
-import { useAtom, useAtomValue } from "@effect/atom-react";
 import { TurnPrompt } from "@trajan/harness";
 import { Clock, Effect, Schema, Stream } from "effect";
+import type { AtomRegistry } from "effect/reactivity";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { ChatSession, INITIAL_CHAT } from "./chat-session";
-import type { ChatCommand, PromptDraft } from "./chat-session";
-import { chatMessages, chatText, chatTool } from "./chat-view";
+import type { PromptDraft } from "./chat-session";
+import { ChatMessage, chatMessages, ChatText, chatText, chatTool } from "./chat-view";
 
-const draftAtom = Atom.make<PromptDraft>({ text: "" }).pipe(Atom.keepAlive);
+export const draftAtom = Atom.make<PromptDraft>({ text: "" }).pipe(Atom.keepAlive);
 const isTurnPrompt = Schema.is(TurnPrompt);
 const sessionAtom = Atom.make(({ registry }) => {
 	let restoredDraft = false;
@@ -77,10 +77,16 @@ export const browserWatchId = Atom.make((get) =>
 	AsyncResult.getOrElse(get(activeBrowserAtom), () => null),
 );
 
-export type ChatActivity =
-	| { readonly kind: "browser"; readonly working: boolean; readonly inspectable: boolean }
-	| { readonly kind: "waiting" | "responding" | "stopping" }
-	| { readonly kind: "tool"; readonly name: string };
+export const ChatActivity = Schema.Union([
+	Schema.Struct({
+		kind: Schema.Literal("browser"),
+		working: Schema.Boolean,
+		inspectable: Schema.Boolean,
+	}),
+	Schema.Struct({ kind: Schema.Literals(["waiting", "responding", "stopping"]) }),
+	Schema.Struct({ kind: Schema.Literal("tool"), name: Schema.String }),
+]);
+export type ChatActivity = typeof ChatActivity.Type;
 
 const activityAtom = Atom.make((get): ChatActivity | null => {
 	const state = AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state ?? INITIAL_CHAT;
@@ -107,25 +113,68 @@ const activityAtom = Atom.make((get): ChatActivity | null => {
 	return tool ? { kind: "tool", name: tool.call.name } : { kind: "waiting" };
 });
 
-export function useChatSession() {
-	const session = AsyncResult.getOrElse(useAtomValue(sessionAtom), () => undefined);
-	const state = session?.state ?? INITIAL_CHAT;
-	const [draft, setDraft] = useAtom(draftAtom);
-	const messages = useAtomValue(timelineAtom);
-	const activity = useAtomValue(activityAtom);
-	const submitting = state.submission?.status === "pending";
-	const canSubmit =
+const SubmissionNotice = Schema.Union([
+	Schema.Struct({
+		status: Schema.Literal("unconfirmed"),
+		id: Schema.String,
+		prompt: Schema.String,
+	}),
+	Schema.Struct({ status: Schema.Literal("rejected"), message: Schema.String }),
+]);
+export const ChatScreen = Schema.Struct({
+	status: Schema.Literals(["connecting", "open", "reconnecting"]),
+	messages: Schema.Array(ChatMessage),
+	activity: Schema.NullOr(ChatActivity),
+	loading: Schema.Boolean,
+	stopping: Schema.Boolean,
+	requestError: Schema.NullOr(Schema.String),
+	earlier: Schema.Boolean,
+	live: Schema.NullOr(ChatText),
+	notice: Schema.NullOr(SubmissionNotice),
+	running: Schema.Boolean,
+	queued: Schema.Natural,
+	canSubmit: Schema.Boolean,
+	submitting: Schema.Boolean,
+});
+
+export const initialScreen: typeof ChatScreen.Type = {
+	status: "connecting",
+	messages: [],
+	activity: null,
+	loading: false,
+	stopping: false,
+	requestError: null,
+	earlier: false,
+	live: null,
+	notice: null,
+	running: false,
+	queued: 0,
+	canSubmit: false,
+	submitting: false,
+};
+
+function canSend(state: typeof INITIAL_CHAT, draft: PromptDraft) {
+	return (
 		state.status === "open" &&
 		isTurnPrompt(draft.text.trim()) &&
-		!submitting &&
-		state.submission?.status !== "unconfirmed";
-	const dispatch = (command: ChatCommand) => session?.dispatch(command);
+		state.submission?.status !== "pending" &&
+		state.submission?.status !== "unconfirmed"
+	);
+}
+
+export const chatScreen = Atom.make((get): typeof ChatScreen.Type => {
+	const state = AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state ?? INITIAL_CHAT;
+	const draft = get(draftAtom);
+	const submission = state.submission;
 	return {
-		...state,
-		messages,
-		activity,
+		status: state.status,
+		messages: get(timelineAtom),
+		activity: get(activityAtom),
 		loading: state.historyRequest?.status === "pending",
-		stopping: state.stopRequest?.status === "pending" || state.stopRequest?.status === "requested",
+		stopping:
+			state.active?.state === "stopping" ||
+			state.stopRequest?.status === "pending" ||
+			state.stopRequest?.status === "requested",
 		requestError:
 			state.stopRequest?.status === "failed"
 				? "Couldn’t confirm that Trajan stopped."
@@ -136,19 +185,43 @@ export function useChatSession() {
 		live: state.preview?.text
 			? chatText(state.preview.runId, "assistant", state.preview.text)
 			: null,
-		composer: { text: draft.text, canSubmit, submitting },
-		editPrompt: (text: string) => setDraft({ text }),
-		submit: () => {
-			if (canSubmit) {
-				dispatch({ type: "submit", draft });
-			}
-		},
-		retrySubmit: (id: string) => dispatch({ type: "retry", id }),
-		stop: () => {
-			if (state.active) {
-				dispatch({ type: "stop", runId: state.active.runId });
-			}
-		},
-		loadEarlier: () => dispatch({ type: "load-earlier" }),
+		notice:
+			submission?.status === "unconfirmed"
+				? {
+						status: "unconfirmed",
+						id: submission.id,
+						prompt: submission.draft.text,
+					}
+				: submission?.status === "rejected"
+					? { status: "rejected", message: submission.message }
+					: null,
+		running: state.active !== null,
+		queued: state.queued,
+		canSubmit: canSend(state, draft),
+		submitting: submission?.status === "pending",
 	};
+});
+
+export const ScreenAction = Schema.Union([
+	Schema.Struct({ type: Schema.Literal("retry"), id: Schema.String }),
+	Schema.Struct({ type: Schema.Literals(["submit", "stop", "load-earlier"]) }),
+]);
+
+export function dispatchChat(
+	registry: AtomRegistry.AtomRegistry,
+	action: typeof ScreenAction.Type,
+) {
+	const session = AsyncResult.getOrElse(registry.get(sessionAtom), () => undefined);
+	if (action.type === "submit") {
+		const draft = registry.get(draftAtom);
+		if (session && canSend(session.state, draft)) {
+			session.dispatch({ type: "submit", draft });
+		}
+	} else if (action.type === "stop") {
+		if (session?.state.active) {
+			session.dispatch({ type: "stop", runId: session.state.active.runId });
+		}
+	} else {
+		session?.dispatch(action.type === "retry" ? action : { type: "load-earlier" });
+	}
 }

@@ -113,11 +113,10 @@ export function workspaceFileTools(workspace: Workspace, root: string) {
 			const observe = observeWrite;
 			const before = observe && (await snapshot(fs, path));
 			await fs.writeFile(path, bytes, options);
-			observe?.({
-				path,
-				bytesWritten: bytes.byteLength,
-				change: describeChange(path, before, bytes),
-			});
+			if (observe) {
+				const change = describeChange(path, before, bytes);
+				observe({ path, bytesWritten: bytes.byteLength, ...(change && { change }) });
+			}
 		},
 	};
 	const files = createPiTools({
@@ -125,7 +124,7 @@ export function workspaceFileTools(workspace: Workspace, root: string) {
 			fs: adapter,
 			runtime: workspace.runtime,
 			sessionId: workspace.sessionId,
-			assets: workspace.assets,
+			...(workspace.assets && { assets: workspace.assets }),
 		},
 		root,
 		exec: { backends: {} },

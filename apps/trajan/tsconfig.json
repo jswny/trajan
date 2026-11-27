@@ -3,13 +3,7 @@
 	"compilerOptions": {
 		"types": ["@cloudflare/vitest-plugin/types", "node", "vite/client"],
 		"lib": ["ES2024", "DOM", "DOM.Iterable"],
-		"jsx": "react-jsx"
+		"exactOptionalPropertyTypes": true
 	},
-	"include": [
-		"src/**/*.ts",
-		"src/**/*.tsx",
-		"cloudflare.config.ts",
-		"vite.config.ts",
-		".cloudflare/types"
-	]
+	"include": ["src/**/*.ts", "cloudflare.config.ts", "vite.config.ts", ".cloudflare/types"]
 }
