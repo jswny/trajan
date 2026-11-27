@@ -2,8 +2,8 @@ import { toolPreviewBytes } from "../chat/tool-presentation";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/harness";
-import { Effect, Schema } from "effect";
-import { expect, test } from "vite-plus/test";
+import { Effect, Option, Schema } from "effect";
+import { expect, test, vi } from "vite-plus/test";
 import { ChatEvent, ChatLivePath } from "../chat/protocol";
 import { toolActivity } from "../chat/tool-activity";
 import { createLiveBrowser } from "../live-browser";
@@ -23,9 +23,11 @@ import {
 	compactReference,
 	compactResumePrompt,
 	compactSetupPrompt,
+	confirmedPushRecoveryPrompt,
 	remotePushRecoveryPrompt,
 	scheduleOutcomePrompt,
 } from "./openai-responses-fixture";
+import { createTrajanWorkspace, workspaceToolset } from "../workspace";
 
 const submission = { id: "submission-1", prompt: "hello" };
 const prompt = { role: "user", text: submission.prompt };
@@ -38,6 +40,10 @@ const toolCall = {
 const completedTool = { status: "completed", output: "hello" };
 const unknownMessage = expect.stringContaining("Inspect it before repeating the action.");
 const unknownTool = { status: "unknown", message: unknownMessage };
+
+function gitPacket(value: string) {
+	return (value.length + 4).toString(16).padStart(4, "0") + value;
+}
 
 test("a recovered exec retains a push that aged out of the live preview", async () => {
 	let stub = openFixture();
@@ -84,6 +90,118 @@ test("a recovered exec retains a push that aged out of the live preview", async 
 	expect(
 		await runInDurableObject(stub, (_, { storage }) => storage.kv.get("git-push-attempts")),
 	).toBe(1);
+});
+
+test("reconciles a committed external effect once after restart", async () => {
+	let stub = openFixture();
+	const { instance } = await stub.state();
+	await stub.pause("during-remote-push");
+	const { runId } = await submit(stub, { id: "confirm-push", prompt: confirmedPushRecoveryPrompt });
+	await expect.poll(() => stub.state()).toMatchObject({ pausedAt: "during-remote-push" });
+	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
+	stub = await waitForRestart(stub, instance);
+	await runDurableObjectAlarm(stub);
+	await expect
+		.poll(() => readTurn(stub, runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: confirmedPushRecoveryPrompt },
+					{ role: "tool-call", id: "call_remote_push" },
+					{
+						role: "tool",
+						callId: "call_remote_push",
+						result: {
+							status: "completed",
+							output: "remote verified",
+							activity: [
+								{
+									id: expect.any(String),
+									name: "git.push",
+									status: "completed",
+									output: { format: "json", text: expect.stringContaining('"reconciled": true') },
+								},
+							],
+						},
+					},
+					{ role: "assistant", text: "Verified the remote branch at the expected commit." },
+				],
+			},
+		});
+	const counts = await runInDurableObject(stub, (_, { storage }) => ({
+		pushes: storage.kv.get("git-push-attempts"),
+		checks: storage.kv.get("git-push-checks"),
+	}));
+	expect(counts).toEqual({ pushes: 1, checks: 1 });
+});
+
+test("checks the pinned Git destination through a read-only remote advertisement", async () => {
+	const stub = openFixture();
+	await runInDurableObject(stub, async (_, ctx) => {
+		const workspace = createTrajanWorkspace(ctx);
+		const git = workspaceToolset(workspace).catalog["codemode:git"];
+		const signal = new AbortController().signal;
+		const context = { callId: "git-check", signal, recordDetails: () => {} };
+		await Effect.runPromise(git.init.run({}, context));
+		await workspace.fs.writeFile("/workspace/check.txt", "Check remote refs.");
+		await Effect.runPromise(git.add.run({ paths: ["check.txt"] }, context));
+		const commit = Schema.decodeUnknownSync(Schema.Struct({ oid: Schema.String }))(
+			await Effect.runPromise(
+				git.commit.run(
+					{ message: "Record expected tip", author: { name: "Test", email: "test@example.test" } },
+					context,
+				),
+			),
+		);
+		const configPath = "/workspace/.git/config";
+		const config = await workspace.fs.readFile(configPath, "utf8");
+		const endpoint = "https://push.fixture.test/project.git";
+		await workspace.fs.writeFile(
+			configPath,
+			`${config}\n[remote "mirror"]\n\turl = https://fetch.fixture.test/project.git\n\tpushurl = ${endpoint}\n[remote]\n\tpushDefault = mirror\n`,
+		);
+		const recovery = git.push.replay === "unsafe" && git.push.reconciliation;
+		if (!recovery) {
+			throw new Error("Missing Git push recovery contract.");
+		}
+		const ref = "refs/heads/review";
+		const intent = await Effect.runPromise(recovery.prepare({ remoteRef: ref }, signal));
+		expect(intent).toMatchObject({
+			directory: "/workspace",
+			remote: "mirror",
+			remoteRef: ref,
+			oid: commit.oid,
+		});
+		expect(JSON.stringify(intent)).not.toContain(endpoint);
+		let remoteOid = commit.oid;
+		const fetchRemote = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, options) => {
+			expect(url).toBe(`${endpoint}/info/refs?service=git-receive-pack`);
+			expect(options?.method).toBeUndefined();
+			return new Response(
+				`${gitPacket("# service=git-receive-pack\n")}0000${gitPacket(`${remoteOid} ${ref}\0report-status\n`)}0000`,
+				{
+					headers: { "content-type": "application/x-git-receive-pack-advertisement" },
+				},
+			);
+		});
+		try {
+			const check = () => Effect.runPromise(recovery.check(intent, signal));
+			await expect(check()).resolves.toEqual(
+				Option.some({ ok: true, error: null, refs: { [ref]: { ok: true } }, reconciled: true }),
+			);
+			remoteOid = "ab".repeat(20);
+			await expect(check()).resolves.toEqual(Option.none());
+			await workspace.fs.writeFile(
+				configPath,
+				`${config}\n[remote "mirror"]\n\turl = https://changed.fixture.test/project.git\n`,
+			);
+			await expect(check()).resolves.toEqual(Option.none());
+			expect(fetchRemote).toHaveBeenCalledTimes(2);
+		} finally {
+			fetchRemote.mockRestore();
+		}
+	});
 });
 
 test("bounds tool previews without splitting multibyte text and summarizes image data", () => {

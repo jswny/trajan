@@ -1,7 +1,7 @@
 import { expect, it } from "@effect/vitest";
-import { Deferred, Effect, Option } from "effect";
+import { Deferred, Effect, Option, Schema } from "effect";
 import { TestClock } from "effect/testing";
-import { createCodeMode } from "./index";
+import { CodeModeError, createCodeMode, defineReconciledTool } from "./index";
 import type {
 	CallCheckpoint,
 	CodeModeCatalog,
@@ -150,6 +150,80 @@ it.effect("leaves an expired execution's receipts available without starting the
 		expect(timeouts).toEqual([]);
 		expect(codeMode.readExecution("run", "run", "live").calls).toEqual([]);
 		expect(codeMode.readExecution("run", "run").calls).toMatchObject([{ status: "interrupted" }]);
+	}),
+);
+
+it.effect("does not start an external effect if the host cannot save its intent", () =>
+	Effect.gen(function* () {
+		const { host, calls, journal } = testHost();
+		const save = journal.recordCall;
+		const refusingJournal: CodeModeJournal = {
+			...journal,
+			recordCall: (index, checkpoint, signal) =>
+				checkpoint.started === true
+					? Effect.fail(new CodeModeError({ message: "Intent write failed." }))
+					: save(index, checkpoint, signal),
+		};
+		let invocations = 0;
+		const mutate = defineReconciledTool({
+			input: Schema.Null,
+			output: Schema.String,
+			intent: Schema.Struct({ id: Schema.String }),
+			prepare: () => Effect.succeed({ id: "external-effect" }),
+			run: () =>
+				Effect.sync(() => {
+					invocations++;
+					return "done";
+				}),
+			reconcile: () => Effect.succeedNone,
+		});
+		const catalog = { [module]: { mutate } };
+		const failed = yield* createCodeMode({ ...host, openJournal: () => refusingJournal }, catalog)
+			.run("run", source)
+			.pipe(Effect.flip);
+		expect(failed.message).toBe("Intent write failed.");
+		expect(invocations).toBe(0);
+		expect(calls.get(0)).toEqual({
+			request: JSON.stringify(input),
+			replay: "unsafe",
+			started: false,
+		});
+
+		expect(yield* createCodeMode(host, catalog).run("run", source, { recovering: true })).toEqual({
+			status: "returned",
+			value: "done",
+		});
+		expect(calls.get(0)?.intent).toEqual({ id: "external-effect" });
+		expect(invocations).toBe(1);
+	}),
+);
+
+it.effect("keeps a failed external verification uncertain without invoking the tool", () =>
+	Effect.gen(function* () {
+		const { host, journal } = testHost();
+		yield* journal.start({ source, vm });
+		yield* journal.recordReplay({ fingerprint: "test-quickjs", deliveries: [], issuedAfter: [1] });
+		yield* journal.recordCall(0, {
+			request: JSON.stringify(input),
+			replay: "unsafe",
+			started: true,
+			intent: { id: "external-effect" },
+		});
+		const mutate = defineReconciledTool({
+			input: Schema.Null,
+			output: Schema.String,
+			intent: Schema.Struct({ id: Schema.String }),
+			prepare: () => Effect.die("Unexpected preparation during recovery"),
+			run: () => Effect.die("Unexpected external retry"),
+			reconcile: ({ id }) =>
+				Effect.sync(() => expect(id).toBe("external-effect")).pipe(
+					Effect.andThen(Effect.fail(new CodeModeError({ message: "Remote unavailable." }))),
+				),
+		});
+		const recovered = createCodeMode(host, { [module]: { mutate } });
+		const reply = yield* recovered.run("run", source, { recovering: true });
+		expect(reply).toMatchObject({ status: "interrupted" });
+		expect(recovered.readExecution("run", "run").calls).toMatchObject([{ status: "interrupted" }]);
 	}),
 );
 

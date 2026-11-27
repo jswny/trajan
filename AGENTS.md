@@ -13,7 +13,7 @@ Keep this file focused on durable decisions that contributors cannot infer from 
 - Check with the user before making any change that requires a migration or backward-compatibility support.
 - Scope subscriptions, timers, and in-flight work to their owning session, connection, or request. Gate actions on application readiness as well as transport connectivity.
 - Validate external data at app boundaries with Effect Schema. Correlate acknowledgments with their requests before settling the requests or clearing user input.
-- Reuse operation IDs when retrying the same action. Mark tools replay-safe only when repeating them is harmless. Reconcile uncertain external effects against the affected system before retrying the action.
+- Reuse operation IDs when retrying the same action. Mark tools replay-safe only when repeating them is harmless. Have the host persist recovery intent before an external effect. Reconcile uncertain effects through a read-only check of the affected system before retrying the action.
 - Let independent tool calls overlap. Serialize calls whose effects can interfere with each other.
 - Commit local tool mutations and their recovery checkpoints in the same transaction. Keep external side effects outside that transaction.
 - Keep accepted work and unrecorded outcomes recoverable. Distinguish failures to wake work or record an outcome from failures of the work itself.

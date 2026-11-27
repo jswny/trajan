@@ -20,6 +20,7 @@ import {
 	compactReference,
 	compactResumePrompt,
 	compactSetupPrompt,
+	confirmedPushRecoveryPrompt,
 	createOpenAiResponsesFixture,
 	remotePushRecoveryPrompt,
 	scheduleOutcomePrompt,
@@ -240,13 +241,30 @@ export class ChatTestObject extends TrajanChatObject {
 					...git,
 					push: {
 						...git.push,
-						run: (_input, { signal }) =>
+						replay: "unsafe",
+						reconciliation: {
+							prepare: (input) => Effect.succeed(input),
+							check: (intent) =>
+								Effect.sync(() => {
+									storage.kv.put(
+										"git-push-checks",
+										(storage.kv.get<number>("git-push-checks") ?? 0) + 1,
+									);
+									return storage.kv.get("git-push-remote") === JSON.stringify(intent)
+										? Option.some({ ok: true, reconciled: true })
+										: Option.none();
+								}),
+						},
+						run: (input, { signal }) =>
 							Effect.tryPromise({
 								try: async () => {
 									storage.kv.put(
 										"git-push-attempts",
 										(storage.kv.get<number>("git-push-attempts") ?? 0) + 1,
 									);
+									if (JSON.stringify(input).includes('"refs/heads/review-confirmed"')) {
+										storage.kv.put("git-push-remote", JSON.stringify(input));
+									}
 									await this.#pauseAt("during-remote-push", signal);
 									return null;
 								},
@@ -760,6 +778,7 @@ sequenceDiagram
 						user?.text === compactSetupPrompt ||
 						user?.text === compactResumePrompt ||
 						user?.text === remotePushRecoveryPrompt ||
+						user?.text === confirmedPushRecoveryPrompt ||
 						user?.text === scheduleOutcomePrompt
 					) {
 						return this.#responses.stream(messages, options);

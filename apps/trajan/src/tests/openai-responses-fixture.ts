@@ -8,11 +8,13 @@ export const compactResumePrompt = "Recall the compacted reference and save it u
 export const compactReference = "amber-heron-795";
 export const scheduleOutcomePrompt = "What happened to the scheduled workspace check?";
 export const remotePushRecoveryPrompt = "Recover the interrupted remote push.";
-export const remotePushRecoveryCode = `import { push } from "codemode:git";
+export const confirmedPushRecoveryPrompt = "Recover the confirmed remote push.";
+const remotePushRecoveryCode = (confirmed: boolean) => `import { push } from "codemode:git";
 import { read_first } from "codemode:tools";
 export default async function () {
   try {
-    await push({ dir: "/workspace/repo", remote: "upstream", remoteRef: "refs/heads/review" });
+    const result = await push({ dir: "/workspace/repo", remote: "upstream", remoteRef: "refs/heads/review${confirmed ? "-confirmed" : ""}" });
+    if (result?.reconciled) return "remote verified";
   } catch (error) {
     if (error.code !== "interrupted") throw error;
   }
@@ -71,17 +73,25 @@ export function createOpenAiResponsesFixture(
 				if (last?.content === compactSetupPrompt) {
 					return sseResponse([assistant("Reference saved."), compaction], "Reference saved.");
 				}
-				if (last?.content === remotePushRecoveryPrompt) {
+				if (
+					last?.content === remotePushRecoveryPrompt ||
+					last?.content === confirmedPushRecoveryPrompt
+				) {
 					return sseResponse([
 						{
 							type: "function_call",
 							name: "exec",
 							call_id: remotePushCallId,
-							arguments: JSON.stringify({ code: remotePushRecoveryCode }),
+							arguments: JSON.stringify({
+								code: remotePushRecoveryCode(last.content === confirmedPushRecoveryPrompt),
+							}),
 						},
 					]);
 				}
 				if (last?.type === "function_call_output" && last.call_id === remotePushCallId) {
+					if (last.output === JSON.stringify("remote verified")) {
+						return sseResponse([assistant("Verified the remote branch at the expected commit.")]);
+					}
 					const parts = Schema.decodeUnknownSync(
 						Schema.Array(
 							Schema.Struct({ type: Schema.Literal("input_text"), text: Schema.String }),

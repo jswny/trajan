@@ -847,6 +847,33 @@ test("shows an unknown remote outcome after an exec catches the interruption", a
 	).toBeVisible();
 });
 
+test("shows a confirmed remote push after recovery", async ({ page }) => {
+	await page.setViewportSize({ width: 1440, height: 900 });
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/pause-remote-push`)).status()).toBe(204);
+	await composer.fill("Recover the confirmed remote push.");
+	await composer.press("Enter");
+	await expect
+		.poll(async () => {
+			const response = await page.request.post(`${control}/state`);
+			return Schema.decodeUnknownSync(
+				Schema.Struct({ pausedAt: Schema.optionalKey(Schema.String) }),
+			)(await response.json()).pausedAt;
+		})
+		.toBe("during-remote-push");
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await openChat(page);
+	await expect(
+		page.getByRole("main").getByText("Verified the remote branch at the expected commit."),
+	).toBeVisible();
+	const card = toolCards(page).last();
+	await openToolCard(card);
+	await expect(
+		card.getByRole("listitem").filter({ hasText: /git\.push.*Succeeded/ }),
+	).toBeVisible();
+	await expect(toolActivity(page).last()).not.toContainText("Outcome unknown");
+});
+
 test("stops the active reply and continues a follow-up submitted from another tab", async ({
 	page,
 	context,

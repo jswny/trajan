@@ -7,6 +7,7 @@ import {
 	Option,
 	Queue,
 	Random,
+	Result,
 	Schema,
 	Semaphore,
 } from "effect";
@@ -27,7 +28,8 @@ export interface ToolLock {
 }
 
 type ToolPolicy =
-	| { readonly replay: "safe" | "unsafe" }
+	| { readonly replay: "safe" }
+	| { readonly replay: "unsafe"; readonly reconciliation?: ExternalReconciliation }
 	// Atomic tools may mutate only storage shared with the execution journal.
 	| {
 			readonly replay: "atomic";
@@ -38,7 +40,19 @@ type ToolContext<D = Schema.Json> = {
 	readonly callId: string;
 	readonly signal: AbortSignal;
 	readonly recordDetails: (details: D) => void;
+	readonly intent?: Schema.Json;
 };
+
+interface ExternalReconciliation {
+	readonly prepare: (
+		input: Schema.Json,
+		signal: AbortSignal,
+	) => Effect.Effect<Schema.Json, CodeModeError>;
+	readonly check: (
+		intent: Schema.Json,
+		signal: AbortSignal,
+	) => Effect.Effect<Option.Option<Schema.Json>, CodeModeError>;
+}
 
 export type CodeModeTool = ToolPolicy & {
 	/** A local-only operation that needs an isolated read or idempotent write. */
@@ -57,20 +71,22 @@ export type CodeModeTool = ToolPolicy & {
 	) => Effect.Effect<Schema.Json, CodeModeError>;
 };
 
+interface ToolDefinition<A, B extends Schema.Json, D extends Schema.Json> {
+	readonly input: Schema.Codec<A>;
+	readonly output: Schema.Codec<B>;
+	readonly details?: Schema.Codec<D>;
+	readonly category?: string;
+	readonly localStorage?: boolean;
+	readonly exclusiveStorage?: boolean;
+	readonly lock?: ToolLock;
+	readonly description?: string;
+	readonly normalizeInput?: (input: Schema.Json) => Schema.Json;
+	readonly recovery?: (input: A) => string;
+	readonly run: (input: A, context: ToolContext<D>) => Effect.Effect<B, unknown>;
+}
+
 export function defineTool<A, B extends Schema.Json, D extends Schema.Json = never>(
-	definition: ToolPolicy & {
-		readonly input: Schema.Codec<A>;
-		readonly output: Schema.Codec<B>;
-		readonly details?: Schema.Codec<D>;
-		readonly category?: string;
-		readonly localStorage?: boolean;
-		readonly exclusiveStorage?: boolean;
-		readonly lock?: ToolLock;
-		readonly description?: string;
-		readonly normalizeInput?: (input: Schema.Json) => Schema.Json;
-		readonly recovery?: (input: A) => string;
-		readonly run: (input: A, context: ToolContext<D>) => Effect.Effect<B, unknown>;
-	},
+	definition: ToolPolicy & ToolDefinition<A, B, D>,
 ): CodeModeTool {
 	const { input, output, details, description, normalizeInput, recovery, run, ...policy } =
 		definition;
@@ -110,6 +126,48 @@ export function defineTool<A, B extends Schema.Json, D extends Schema.Json = nev
 				Effect.mapError(codeModeError),
 			),
 	};
+}
+
+export function defineReconciledTool<A, B extends Schema.Json, I, D extends Schema.Json = never>(
+	definition: Omit<ToolDefinition<A, B, D>, "run"> & {
+		readonly intent: Schema.Codec<I, Schema.Json>;
+		/** Capture the evidence needed for recovery before the host allows the external effect. */
+		readonly prepare: (input: A, signal: AbortSignal) => Effect.Effect<I, unknown>;
+		/** Read the affected system. Return a result only when the saved intent can be confirmed. */
+		readonly reconcile: (
+			intent: I,
+			signal: AbortSignal,
+		) => Effect.Effect<Option.Option<B>, unknown>;
+		readonly run: (input: A, context: ToolContext<D>, intent: I) => Effect.Effect<B, unknown>;
+	},
+): CodeModeTool {
+	const { intent, prepare, reconcile, run, ...tool } = definition;
+	const decodeInput = Schema.decodeUnknownEffect(tool.input);
+	const decodeIntent = Schema.decodeUnknownEffect(intent);
+	const encodeIntent = Schema.encodeEffect(intent);
+	const decodeOutput = Schema.decodeEffect(tool.output);
+	return defineTool({
+		...tool,
+		replay: "unsafe",
+		run: (input, context) =>
+			decodeIntent(context.intent).pipe(Effect.flatMap((saved) => run(input, context, saved))),
+		reconciliation: {
+			prepare: (input, signal) =>
+				decodeInput(tool.normalizeInput ? tool.normalizeInput(input) : input).pipe(
+					Effect.flatMap((value) => prepare(value, signal)),
+					Effect.flatMap(encodeIntent),
+					Effect.mapError(codeModeError),
+				),
+			check: (saved, signal) =>
+				decodeIntent(saved).pipe(
+					Effect.flatMap((value) => reconcile(value, signal)),
+					Effect.flatMap((value) =>
+						Option.isSome(value) ? Effect.asSome(decodeOutput(value.value)) : Effect.succeedNone,
+					),
+					Effect.mapError(codeModeError),
+				),
+		},
+	});
 }
 
 export interface CodeModeActivity {
@@ -251,6 +309,7 @@ const CallCheckpoint = Schema.Struct({
 	request: Schema.NonEmptyString,
 	replay: Schema.Literals(["safe", "unsafe", "atomic"]),
 	started: Schema.optionalKey(Schema.Boolean),
+	intent: Schema.optionalKey(boundedJson),
 	reply: Schema.optionalKey(ToolReply),
 	details: Schema.optionalKey(boundedJson),
 });
@@ -583,10 +642,12 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 					return yield* Effect.interrupt;
 				}
 				let details: Schema.Json | undefined;
+				let started = entry;
 				const invoke = Effect.suspend(() =>
 					tool.run(input.input, {
 						callId,
 						signal,
+						...(started.intent !== undefined && { intent: started.intent }),
 						recordDetails: (value) => {
 							details = Option.getOrUndefined(decodeDetails(value));
 						},
@@ -599,8 +660,7 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 					}),
 				);
 				const checkpoint = (reply: ToolReply): CallCheckpoint => ({
-					...entry,
-					...(tool.replay === "unsafe" && { started: true }),
+					...started,
 					reply,
 					...(reply.status === "returned" && details !== undefined && { details }),
 				});
@@ -629,15 +689,49 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 				const invokeWhenOpen = Effect.suspend(() => (!signal.aborted ? attempt : Effect.interrupt));
 				const execute =
 					tool.replay === "unsafe"
-						? journal
-								.recordCall(index, { ...entry, started: true }, signal)
-								.pipe(Effect.andThen(invokeWhenOpen))
+						? Effect.gen(function* () {
+								const prepared = yield* Effect.result(
+									tool.reconciliation
+										? tool.reconciliation
+												.prepare(input.input, signal)
+												.pipe(Effect.flatMap(Schema.decodeEffect(boundedJson)))
+										: Effect.undefined,
+								);
+								if (Result.isFailure(prepared)) {
+									return { reply: failed(errorMessage(prepared.failure)) };
+								}
+								started = {
+									...entry,
+									started: true,
+									...(prepared.success !== undefined && { intent: prepared.success }),
+								};
+								yield* journal.recordCall(index, started, signal);
+								return yield* invokeWhenOpen;
+							})
 						: invokeWhenOpen;
-				const locked = tool.lock ? tool.lock.withPermit(execute, input.input) : execute;
+				const reconcile = Effect.gen(function* (): Effect.fn.Return<CallOutcome> {
+					const saved = prior?.intent;
+					if (saved === undefined || tool.replay !== "unsafe" || !tool.reconciliation) {
+						return { reply: interrupted };
+					}
+					const result = yield* tool.reconciliation.check(saved, signal).pipe(
+						Effect.flatMap((value) =>
+							Option.isSome(value)
+								? Effect.asSome(Schema.decodeEffect(boundedJson)(value.value))
+								: Effect.succeedNone,
+						),
+						Effect.orElseSucceed(() => Option.none()),
+					);
+					return {
+						reply: Option.isSome(result)
+							? { status: "returned", value: result.value }
+							: interrupted,
+					};
+				});
+				const operation = uncertain ? reconcile : execute;
+				const locked = tool.lock ? tool.lock.withPermit(operation, input.input) : operation;
 				const settle = Effect.gen(function* () {
-					const { reply, committed } = uncertain
-						? { reply: interrupted, committed: undefined }
-						: yield* locked;
+					const { reply, committed } = yield* locked;
 					if (signal.aborted) {
 						return yield* Effect.interrupt;
 					}
