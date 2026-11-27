@@ -220,6 +220,29 @@ body {
 [data-markdown="code-header"] {
 	display: none;
 }
+[data-markdown="mermaid"] {
+	--pele-bg: var(--pierre-canvas);
+	--pele-fg: var(--pierre-ink);
+	--pele-fg-on-light: light-dark(var(--pierre-ink), var(--pierre-canvas));
+	--pele-fg-on-dark: light-dark(var(--pierre-canvas), var(--pierre-ink));
+	--pele-muted: var(--pierre-muted);
+	--pele-line: var(--pierre-muted);
+	--pele-surface: var(--pierre-surface);
+	--pele-surface-alt: var(--pierre-control);
+	--pele-border: var(--chat-line);
+	--pele-accent: var(--pierre-accent);
+	--pele-critical: var(--color-danger);
+	--pele-radius: var(--chat-inset-radius);
+	/* Some Pele charts paint their labels with --pele-bg on top of a series fill. */
+	--pele-series-1: color-mix(in srgb, var(--pierre-plot-blue) 64%, var(--pierre-ink));
+	--pele-series-2: color-mix(in srgb, var(--pierre-plot-green) 64%, var(--pierre-ink));
+	--pele-series-3: color-mix(in srgb, var(--pierre-plot-violet) 64%, var(--pierre-ink));
+	--pele-series-4: color-mix(in srgb, var(--pierre-plot-yellow) 62%, var(--pierre-ink));
+	--pele-series-5: color-mix(in srgb, var(--pierre-plot-magenta) 64%, var(--pierre-ink));
+	--pele-series-6: color-mix(in srgb, var(--pierre-plot-cyan) 64%, var(--pierre-ink));
+	--pele-series-7: color-mix(in srgb, var(--pierre-plot-red) 64%, var(--pierre-ink));
+	--pele-series-8: var(--pierre-muted);
+}
 
 /* A compaction summary is pi's notes, headed by sections: keep them small. */
 .chat-summary :is(h1, h2, h3, h4, h5, h6) {

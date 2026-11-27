@@ -26,6 +26,12 @@ import {
 } from "./openai-responses-fixture";
 
 const chatFixtureReset = "Forced chat fixture restart";
+const mermaidPrompt = "Show the delivery flow.";
+const openMermaidFence = `\`\`\`mermaid
+flowchart TD
+  accTitle: Delivery flow
+  A[Queued] --> B[Running]
+`;
 type PausePoint =
 	| "before-task"
 	| "after-write"
@@ -593,6 +599,28 @@ export default async function () {
 				text: `\`\`\`js\nconst message = "${"wide ".repeat(35)}";\n\`\`\``,
 			};
 		}
+		if (last?.role === "user" && last.text === mermaidPrompt) {
+			return {
+				role: "assistant",
+				text: `${openMermaidFence}  B --> C[Delivered]
+  click A "https://example.com"
+\`\`\`
+
+~~~mermaid
+sequenceDiagram
+  Alice->>Bob: Confirm delivery
+~~~`,
+			};
+		}
+		if (last?.role === "user" && last.text === "Show invalid Mermaid.") {
+			return { role: "assistant", text: "```mermaid\nnot a Mermaid diagram\n```" };
+		}
+		if (last?.role === "user" && last.text === "Show the delivery breakdown.") {
+			return {
+				role: "assistant",
+				text: '```mermaid\npie\n  title Delivery breakdown\n  "Delivered": 8\n  "Queued": 2\n```',
+			};
+		}
 		if (last?.role === "user" && last.text === "What did I ask you to remember?") {
 			const memory = messages.findLast(
 				(message) => message.role === "assistant" && message.text.startsWith("Remembering "),
@@ -685,7 +713,10 @@ export default async function () {
 							if (response.role !== "assistant") {
 								return end;
 							}
-							const excerpt = response.text.slice(0, 5);
+							const excerpt = response.text.slice(
+								0,
+								user?.text === mermaidPrompt ? openMermaidFence.length : 5,
+							);
 							return Stream.succeed<TurnModelEvent>({ type: "text-delta", text: excerpt }).pipe(
 								Stream.concat(
 									Stream.fromEffect(

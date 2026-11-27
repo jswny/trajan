@@ -24,6 +24,13 @@ const paletteRoles = {
 	"accent-hover": "button.hoverBackground",
 	success: "gitDecoration.addedResourceForeground",
 	danger: "gitDecoration.deletedResourceForeground",
+	"plot-blue": "terminal.ansiBlue",
+	"plot-green": "terminal.ansiGreen",
+	"plot-violet": "gitDecoration.conflictingResourceForeground",
+	"plot-yellow": "terminal.ansiYellow",
+	"plot-magenta": "terminal.ansiMagenta",
+	"plot-cyan": "terminal.ansiCyan",
+	"plot-red": "terminal.ansiRed",
 };
 
 async function fixtureWorker(mode: "browser-smoke"): Promise<PluginConfig> {

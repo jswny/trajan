@@ -28,6 +28,7 @@
 		"@trajan/workspace-cloudflare": "0.1.0",
 		"agents": "^0.34.0",
 		"effect": "4.1.6",
+		"pele": "1.13.0",
 		"prettier": "3.10.1",
 		"zod": "^4.6.7"
 	},

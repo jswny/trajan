@@ -1,10 +1,16 @@
 import { Component, Mount } from "@effect/ui";
 import type { Html } from "@effect/ui/html";
 import { createDomRenderer } from "@pierre/words/html";
+import type { PluginConfig } from "@pierre/words/html";
+import { createMermaidPlugin } from "@pierre/words/mermaid";
 import { Effect, Schema, Stream } from "effect";
 
 const loadHighlights = Effect.tryPromise(() => import("./markdown-highlights")).pipe(
 	Effect.map(({ syntaxHighlights }) => syntaxHighlights),
+	Effect.orElseSucceed(() => undefined),
+);
+
+const loadPele = Effect.tryPromise(() => import("pele")).pipe(
 	Effect.orElseSucceed(() => undefined),
 );
 
@@ -22,17 +28,46 @@ const renderMarkdown = Mount.make(
 				}),
 				(instance) => Effect.sync(() => instance.disconnect()),
 			);
-			let loaded = false;
+			let triedHighlights = false;
+			let triedPele = false;
+			let plugins: PluginConfig = {};
 			yield* Stream.runForEach(changes, ({ source, active }) =>
 				Effect.gen(function* () {
 					renderer.update(source, active, active);
-					if (!loaded && (source.includes("```") || source.includes("~~~"))) {
-						loaded = true;
+					const needsHighlights =
+						!triedHighlights && (source.includes("```") || source.includes("~~~"));
+					const needsPele = !triedPele && /(?:`{3,}|~{3,})[^\S\r\n]*mermaid(?=\s|$)/i.test(source);
+					if (!needsHighlights && !needsPele) {
+						return;
+					}
+					const nextPlugins = { ...plugins };
+					if (needsHighlights) {
+						triedHighlights = true;
 						const highlights = yield* loadHighlights;
 						if (highlights) {
-							renderer.configure({ ...options, plugins: highlights.markdownPlugins });
-							renderer.update(source, active, active);
+							nextPlugins.code = highlights.markdownPlugins.code;
 						}
+					}
+					if (needsPele) {
+						triedPele = true;
+						const pele = yield* loadPele;
+						if (pele) {
+							const prefix = `pele-${crypto.randomUUID()}`;
+							let diagram = 0;
+							nextPlugins.mermaid = createMermaidPlugin({
+								render: (code) =>
+									pele.render(code, {
+										idPrefix: `${prefix}-${++diagram}`,
+										links: false,
+										images: false,
+									}),
+							});
+						}
+					}
+					if (nextPlugins.code !== plugins.code || nextPlugins.mermaid !== plugins.mermaid) {
+						plugins = nextPlugins;
+						renderer.configure({ ...options, plugins });
+						renderer.update(source, active, active);
 					}
 				}),
 			);

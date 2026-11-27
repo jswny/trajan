@@ -930,6 +930,67 @@ test("wraps a long prompt and keeps a wide code block scrollable inside the tran
 	).toBe(0);
 });
 
+test("renders Mermaid during streaming and restores it from chat history", async ({ page }) => {
+	const composer = await openChat(page);
+	const graphics = page.locator('[data-markdown="mermaid"] > svg');
+	const flow = graphics.filter({ hasText: "Delivery flow" });
+	const edgeStroke = flow.locator(".pele-edges");
+
+	expect((await page.request.post(`${control}/pause`)).status()).toBe(204);
+	await composer.fill("Show the delivery flow.");
+	await composer.press("Enter");
+	await expect(flow.getByText("Running", { exact: true })).toBeVisible();
+	await expect(page.locator('[data-streaming="true"]').locator("svg.pele")).toHaveCount(1);
+	await expect(flow.getByText("Delivered", { exact: true })).toHaveCount(0);
+
+	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
+	await expect(flow.getByText("Delivered", { exact: true })).toBeVisible();
+	await expect(graphics.nth(1).getByText("Confirm delivery", { exact: true })).toBeVisible();
+	await expect(flow.locator("a")).toHaveCount(0);
+	await expect(page.locator('[data-streaming="true"]')).toHaveCount(0);
+	expect(
+		await page.locator(".chat-transcript").evaluate((node) => node.scrollWidth - node.clientWidth),
+	).toBe(0);
+
+	await page.getByRole("button", { name: "Chat settings" }).click();
+	await page.getByRole("menuitemradio", { name: "Light", exact: true }).click();
+	const light = await edgeStroke.evaluate((edge) => getComputedStyle(edge).stroke);
+	await page.getByRole("button", { name: "Chat settings" }).click();
+	await page.getByRole("menuitemradio", { name: "Dark", exact: true }).click();
+	await expect(edgeStroke).not.toHaveCSS("stroke", light);
+
+	await page.reload();
+	await expect(flow.getByText("Delivered", { exact: true })).toBeVisible();
+	await expect(graphics).toHaveCount(2);
+	await composer.fill("Show invalid Mermaid.");
+	await composer.press("Enter");
+	await expect(
+		page.locator('[data-markdown="code-block"] code').filter({ hasText: "not a Mermaid diagram" }),
+	).toBeVisible();
+	await expect(graphics).toHaveCount(2);
+});
+
+test("follows the Pierre palette for Mermaid chart series in Auto", async ({ page }) => {
+	await page.emulateMedia({ colorScheme: "light" });
+	const composer = await openChat(page);
+	await composer.fill("Show the delivery breakdown.");
+	await composer.press("Enter");
+	const slices = page.locator(".pele-slice");
+	await expect(slices).toHaveCount(2);
+	const delivered = slices.first();
+	const queued = slices.last();
+	const lightDelivered = await delivered.evaluate((element) => getComputedStyle(element).fill);
+	const lightQueued = await queued.evaluate((element) => getComputedStyle(element).fill);
+	expect(lightDelivered).not.toBe(lightQueued);
+	await page.emulateMedia({ colorScheme: "dark" });
+	await expect(delivered).not.toHaveCSS("fill", lightDelivered);
+	await expect(queued).not.toHaveCSS("fill", lightQueued);
+	await expect(queued).not.toHaveCSS(
+		"fill",
+		await delivered.evaluate((element) => getComputedStyle(element).fill),
+	);
+});
+
 const formatterPath = "/src/format-exec-script.ts";
 const workspaceModuleSource = `import { read, write } from "codemode:tools";
 export default async function () {
