@@ -2,7 +2,7 @@ import { Component, Mount, Subscription, UiSchema } from "@effect/ui";
 import { Html } from "@effect/ui/html";
 import { Effect, Schema, Stream } from "effect";
 import { ToolCode } from "./chat-markdown";
-import { ChatTool } from "./chat-view";
+import { ChatTool, toolOutcome } from "./chat-view";
 import { ToolActivity } from "./chat/tool-presentation";
 import type { ToolActivityPreview } from "./chat/tool-presentation";
 import { Icon } from "./icons";
@@ -215,8 +215,8 @@ export const ToolCard = Html.component({
 		const { argument, name, result, activity } = h.props.message;
 		const content =
 			result?.content.filter((part) => part.type === "image" || part.text.length > 0) ?? [];
-		const uncertain = (result?.uncertainEffects?.length ?? 0) > 0;
-		const failed = result?.status === "failed" || result?.status === "unknown" || uncertain;
+		const outcome = toolOutcome(h.props.message);
+		const failed = outcome === "failed" || outcome === "unknown";
 		const step = !result && activity.at(-1);
 		return h.details
 			.attr("data-chat-entry", "")
@@ -235,7 +235,7 @@ export const ToolCard = Html.component({
 						h.span
 							.class("chat-badge")
 							.attr("data-tone", failed ? "danger" : undefined)
-							.children(uncertain ? "Outcome unknown" : result ? labels[result.status] : "Running"),
+							.children(outcome ? labels[outcome] : "Running"),
 						Icon(h, "chevron", 12, "text-muted group-open:rotate-180"),
 					),
 				open &&

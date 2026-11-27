@@ -4,7 +4,7 @@ import type { AtomRegistry } from "effect/reactivity";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { ChatSession, INITIAL_CHAT } from "./chat-session";
 import type { PromptDraft } from "./chat-session";
-import { ChatMessage, chatMessages, ChatText, chatText, chatTool } from "./chat-view";
+import { chatText, chatTool, ChatTurn, chatTurns } from "./chat-view";
 
 export const draftAtom = Atom.make<PromptDraft>({ text: "" }).pipe(Atom.keepAlive);
 const isTurnPrompt = Schema.is(TurnPrompt);
@@ -36,15 +36,16 @@ const entriesAtom = Atom.make(
 		AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.page.entries ??
 		INITIAL_CHAT.page.entries,
 );
-const messagesAtom = Atom.make((get) => chatMessages(get(entriesAtom)));
-const activeTurnAtom = Atom.make(
+const historyTurnsAtom = Atom.make((get) => chatTurns(get(entriesAtom)));
+const runAtom = Atom.make(
 	(get) => AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.active ?? null,
 );
-const toolPreviewsAtom = Atom.make(
-	(get) => AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.preview?.tools,
+const previewAtom = Atom.make(
+	(get) => AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.preview,
 );
+const toolPreviewsAtom = Atom.make((get) => get(previewAtom)?.tools);
 const activeMessagesAtom = Atom.make((get) => {
-	const active = get(activeTurnAtom);
+	const active = get(runAtom);
 	return active
 		? [
 				chatText(`user:${active.submissionId}`, "user", active.prompt),
@@ -54,7 +55,23 @@ const activeMessagesAtom = Atom.make((get) => {
 			]
 		: [];
 });
-const timelineAtom = Atom.make((get) => [...get(messagesAtom), ...get(activeMessagesAtom)]);
+const activeTurnAtom = Atom.make((get): ChatTurn | null => {
+	const active = get(runAtom);
+	const preview = get(previewAtom);
+	return active
+		? {
+				submissionId: active.submissionId,
+				messages: get(activeMessagesAtom),
+				live: preview?.text ? chatText(active.runId, "assistant", preview.text) : null,
+				working: true,
+			}
+		: null;
+});
+const timelineAtom = Atom.make((get) => {
+	const history = get(historyTurnsAtom);
+	const active = get(activeTurnAtom);
+	return active ? [...history, active] : history;
+});
 const browserWatchAtom = Atom.make(
 	(get) => AsyncResult.getOrElse(get(sessionAtom), () => undefined)?.state.browserWatch ?? null,
 );
@@ -123,13 +140,12 @@ const SubmissionNotice = Schema.Union([
 ]);
 export const ChatScreen = Schema.Struct({
 	status: Schema.Literals(["connecting", "open", "reconnecting"]),
-	messages: Schema.Array(ChatMessage),
+	turns: Schema.Array(ChatTurn),
 	activity: Schema.NullOr(ChatActivity),
 	loading: Schema.Boolean,
 	stopping: Schema.Boolean,
 	requestError: Schema.NullOr(Schema.String),
 	earlier: Schema.Boolean,
-	live: Schema.NullOr(ChatText),
 	notice: Schema.NullOr(SubmissionNotice),
 	running: Schema.Boolean,
 	queued: Schema.Natural,
@@ -139,13 +155,12 @@ export const ChatScreen = Schema.Struct({
 
 export const initialScreen: typeof ChatScreen.Type = {
 	status: "connecting",
-	messages: [],
+	turns: [],
 	activity: null,
 	loading: false,
 	stopping: false,
 	requestError: null,
 	earlier: false,
-	live: null,
 	notice: null,
 	running: false,
 	queued: 0,
@@ -168,7 +183,7 @@ export const chatScreen = Atom.make((get): typeof ChatScreen.Type => {
 	const submission = state.submission;
 	return {
 		status: state.status,
-		messages: get(timelineAtom),
+		turns: get(timelineAtom),
 		activity: get(activityAtom),
 		loading: state.historyRequest?.status === "pending",
 		stopping:
@@ -182,9 +197,6 @@ export const chatScreen = Atom.make((get): typeof ChatScreen.Type => {
 					? "Couldn’t load earlier messages."
 					: null,
 		earlier: state.page.nextBefore !== null,
-		live: state.preview?.text
-			? chatText(state.preview.runId, "assistant", state.preview.text)
-			: null,
 		notice:
 			submission?.status === "unconfirmed"
 				? {

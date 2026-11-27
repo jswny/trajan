@@ -42,6 +42,10 @@ export const ChatTool = Schema.Struct({
 });
 export type ChatTool = typeof ChatTool.Type;
 
+export function toolOutcome({ result }: ChatTool) {
+	return result?.uncertainEffects?.length ? "unknown" : result?.status;
+}
+
 export const ChatMessage = Schema.Union([
 	ChatText,
 	ChatTool,
@@ -53,6 +57,14 @@ export const ChatMessage = Schema.Union([
 	}),
 ]);
 export type ChatMessage = typeof ChatMessage.Type;
+
+export const ChatTurn = Schema.Struct({
+	submissionId: Schema.String,
+	messages: Schema.Array(ChatMessage),
+	live: Schema.NullOr(ChatText),
+	working: Schema.Boolean,
+});
+export type ChatTurn = typeof ChatTurn.Type;
 
 export function chatText(id: string, role: ChatText["role"], text: string): ChatText {
 	return { id, role, text };
@@ -107,7 +119,7 @@ export function chatTool(
 	};
 }
 
-export function chatMessages(entries: (typeof ChatPage.Type)["entries"]): Array<ChatMessage> {
+function chatMessages(entries: (typeof ChatPage.Type)["entries"]): Array<ChatMessage> {
 	return entries.flatMap(({ id, submissionId, message }, index): ReadonlyArray<ChatMessage> => {
 		const key = String(id);
 		switch (message.role) {
@@ -117,20 +129,14 @@ export function chatMessages(entries: (typeof ChatPage.Type)["entries"]): Array<
 			case "notice":
 				return [{ id: key, ...message }];
 			case "tool-call": {
-				const next =
-					entries[index + 1]?.submissionId === submissionId
-						? entries[index + 1].message
-						: undefined;
+				const next = entries[index + 1]?.message;
 				if (next?.role === "tool" && next.callId === message.id) {
 					return [];
 				}
 				return [chatTool(submissionId, message.id, message)];
 			}
 			case "tool": {
-				const previous =
-					entries[index - 1]?.submissionId === submissionId
-						? entries[index - 1].message
-						: undefined;
+				const previous = entries[index - 1]?.message;
 				const call =
 					previous?.role === "tool-call" && previous.id === message.callId ? previous : undefined;
 				return [chatTool(submissionId, message.callId, call, message.result)];
@@ -139,4 +145,16 @@ export function chatMessages(entries: (typeof ChatPage.Type)["entries"]): Array<
 				throw new Error("Unsupported chat message");
 		}
 	});
+}
+
+export function chatTurns(entries: (typeof ChatPage.Type)["entries"]): ReadonlyArray<ChatTurn> {
+	return Array.from(
+		Map.groupBy(entries, (entry) => entry.submissionId),
+		([submissionId, turn]) => ({
+			submissionId,
+			messages: chatMessages(turn),
+			live: null,
+			working: false,
+		}),
+	);
 }

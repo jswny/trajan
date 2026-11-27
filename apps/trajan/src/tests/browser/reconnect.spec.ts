@@ -1,7 +1,7 @@
 import { setTimeout } from "node:timers/promises";
 import { TurnSubmission } from "@trajan/harness";
 import { devices } from "@playwright/test";
-import type { APIRequestContext, Page } from "@playwright/test";
+import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { Schema } from "effect";
 import { ChatEvent, ChatHistoryPath, ChatPage, ChatPath, ChatReceipt } from "../../chat/protocol";
 import { expect, test } from "./fixtures";
@@ -19,7 +19,19 @@ async function openChat(page: Page) {
 }
 
 function toolCards(page: Page) {
-	return page.getByRole("main").locator(":scope > details");
+	return page.getByRole("main").locator(".chat-tool-card");
+}
+
+function toolActivity(page: Page) {
+	return page.getByRole("main").locator("[data-tool-activity]");
+}
+
+async function openToolCard(card: Locator) {
+	const activity = card.locator("xpath=ancestor::details[1]");
+	if ((await activity.getAttribute("open")) === null) {
+		await activity.locator(":scope > summary").click();
+	}
+	await card.locator(":scope > summary").click();
 }
 
 function observeSubmissions(page: Page) {
@@ -80,7 +92,7 @@ test("loads a skill saved in chat after the Worker restarts", async ({ page }) =
 	await expect(replies.last()).toBeVisible();
 
 	const card = completed.first();
-	await card.locator(":scope > summary").click();
+	await openToolCard(card);
 	for (const { name, path, source, token } of [
 		{
 			name: "readSkillResource",
@@ -327,16 +339,15 @@ test("shows animated progress with either motion preference", async ({ page }) =
 test("recovers a running exec without repeating its write", async ({ page }) => {
 	const composer = await openChat(page);
 	const card = toolCards(page).last();
-	const summary = card.locator(":scope > summary");
 	const writes = card.getByRole("listitem").filter({ hasText: /write.*Succeeded/ });
 	await composer.fill("Interrupt after writing.");
 	await composer.press("Enter");
 	await expect(page.getByText("Running exec", { exact: true })).toBeVisible();
-	await summary.click();
+	await openToolCard(card);
 	await expect(writes).toHaveCount(1);
 	await page.reload();
 	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
-	await summary.click();
+	await openToolCard(card);
 	await expect(writes).toHaveCount(1);
 	await expect
 		.poll(async () => {
@@ -353,7 +364,7 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	await page.reload();
 	await expect(reply).toHaveCount(1);
 	await expect(toolCards(page)).toHaveCount(1);
-	await summary.click();
+	await openToolCard(card);
 	await expect(writes).toHaveCount(1);
 	await composer.fill("hello");
 	await composer.press("Enter");
@@ -383,14 +394,14 @@ for (const scenario of [
 			.getByRole("listitem")
 			.filter({ has: page.getByText("write", { exact: true }) });
 		if (scenario.stop) {
-			await card.locator(":scope > summary").click();
+			await openToolCard(card);
 			await expect(write).toHaveText(/write.*Succeeded/);
 			await page.getByRole("button", { name: "Stop" }).click();
 		}
 		await expect(page.getByRole("main").getByText(scenario.notice, { exact: true })).toBeVisible();
 		await page.reload();
 		await expect(page.getByRole("main").getByText(scenario.notice, { exact: true })).toBeVisible();
-		await card.locator(":scope > summary").click();
+		await openToolCard(card);
 		await expect(write).toHaveText(/write.*Succeeded/);
 		await write.locator(":scope > details > summary").click();
 		await expect(write.getByRole("region", { name: "File changes" }).locator("pre")).toContainText(
@@ -407,13 +418,13 @@ test("keeps the same tool card open through recovery, streaming, and commit", as
 	const card = toolCards(page).last();
 	const summary = card.locator(":scope > summary");
 	const calls = card.getByRole("list", { name: "Tool calls" }).getByRole("listitem");
-	await summary.click();
+	await openToolCard(card);
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Running/]);
 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
 	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
-	await summary.click();
+	await openToolCard(card);
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Running/]);
 	const pending = calls.last();
 	await pending.locator("summary").click();
@@ -435,25 +446,33 @@ test("keeps the same tool card open through recovery, streaming, and commit", as
 	await expect(calls).toHaveText([/read_first.*Succeeded/, /read_second.*Succeeded/]);
 });
 
-test("keeps completed exec cards visible while the model starts another tool", async ({ page }) => {
+test("streams successive tools into the open activity disclosure above the reply", async ({
+	page,
+}) => {
 	const composer = await openChat(page);
 	expect((await page.request.post(`${control}/pause-between-tools`)).status()).toBe(204);
 	await composer.fill("Append hello, then world.");
 	await composer.press("Enter");
 	const cards = toolCards(page);
 	const first = cards.first();
+	const activity = toolActivity(page);
 	await expect(first.locator(":scope > summary")).toHaveText("execDone");
 	await expect(page.getByText("Waiting for the model", { exact: true })).toBeVisible();
 	await expect(cards).toHaveCount(1);
-	await first.locator(":scope > summary").click();
+	await expect(activity).toHaveText("Working…");
+	await expect(activity.locator('[data-icon="loader"]')).toBeVisible();
+	await expect(first).toBeHidden();
+	await openToolCard(first);
 	await expect(first.locator("pre").first()).toHaveText('"hello"');
 
 	expect((await page.request.post(`${control}/pause`)).status()).toBe(204);
 	await expect(page.getByText("Responding", { exact: true })).toBeVisible();
 	await expect(cards).toHaveCount(2);
+	await expect(activity).toHaveText("Working…");
+	await expect(cards.last()).toBeVisible();
 	await expect(first).toHaveAttribute("open");
 	await expect(cards.last().locator(":scope > summary")).toHaveText("execDone");
-	await cards.last().locator(":scope > summary").click();
+	await openToolCard(cards.last());
 	await expect(cards.last().locator("pre").first()).toHaveText('"hello world"');
 
 	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
@@ -463,6 +482,8 @@ test("keeps completed exec cards visible while the model starts another tool", a
 	await expect(cards).toHaveCount(2);
 	await expect(first).toHaveAttribute("open");
 	await expect(cards.last()).toHaveAttribute("open");
+	await expect(activity).toHaveText("Tool activity");
+	await expect(activity.locator('[data-icon="loader"]')).toHaveCount(0);
 });
 
 test("restores compacted model context and completes exec after a restart", async ({ page }) => {
@@ -478,7 +499,7 @@ test("restores compacted model context and completes exec after a restart", asyn
 	await composer.fill("Recall the compacted reference and save it using exec.");
 	await composer.press("Enter");
 	await expect(transcript.getByText("Saved amber-heron-795.", { exact: true })).toBeVisible();
-	await transcript.getByText("Done", { exact: true }).click();
+	await openToolCard(toolCards(page).last());
 	await expect(transcript.getByRole("list", { name: "Tool calls" })).toContainText("write");
 });
 
@@ -487,7 +508,7 @@ test("replays time and randomness when reopening a file after a restart", async 
 	expect((await page.request.post(`${control}/pause-replay`)).status()).toBe(204);
 	await composer.fill("Recover a file named with time and randomness.");
 	await composer.press("Enter");
-	await toolCards(page).last().locator(":scope > summary").click();
+	await openToolCard(toolCards(page).last());
 	const calls = page.getByRole("list", { name: "Tool calls" }).getByRole("listitem");
 	await expect(calls).toHaveText([
 		/runtime\.now.*Succeeded/,
@@ -499,7 +520,7 @@ test("replays time and randomness when reopening a file after a restart", async 
 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
-	await toolCards(page).last().locator(":scope > summary").click();
+	await openToolCard(toolCards(page).last());
 	await expect(calls.last()).toHaveText(/read_second.*Running/);
 	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
 
@@ -520,7 +541,7 @@ test("replay shows the completed edit and diff after a reset before commit", asy
 	await expect(transcript.getByText(/Recovered .*"edit":"completed".*"text":"seed!"/)).toHaveCount(
 		1,
 	);
-	await transcript.getByText("Done", { exact: true }).click();
+	await openToolCard(toolCards(page).last());
 	const edit = calls.filter({ hasText: /edit.*Succeeded/ });
 	await expect(edit).toHaveCount(1);
 	await edit.locator("summary").press("Enter");
@@ -538,7 +559,7 @@ test("restores the write and edit diffs after a restart and follows the chat the
 	await composer.fill("Recover file diffs.");
 	await composer.press("Enter");
 	const card = toolCards(page).last();
-	await card.locator(":scope > summary").click();
+	await openToolCard(card);
 	const calls = card.getByRole("listitem");
 	await expect(calls.last()).toHaveText(/wait_for_restart.*Running/);
 
@@ -554,7 +575,7 @@ test("restores the write and edit diffs after a restart and follows the chat the
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
 	await expect(page.getByText("Updated the report.", { exact: true })).toBeVisible();
-	await card.locator(":scope > summary").click();
+	await openToolCard(card);
 	const written = await openDiff("write");
 	const edited = await openDiff("edit");
 	await expect(written.locator("pre")).toContainText("ready: false");
@@ -590,7 +611,7 @@ test("replay completes Git branch creation after a reset before commit", async (
 	await composer.press("Enter");
 	const transcript = page.getByRole("main");
 	await expect(transcript.getByText(/^Recovered .*"branchExists":true/)).toHaveCount(1);
-	await transcript.getByText("Done", { exact: true }).click();
+	await openToolCard(toolCards(page).last());
 	const calls = transcript.getByRole("list", { name: "Tool calls" }).getByRole("listitem");
 	const branch = calls.filter({ has: page.getByText("git.branch", { exact: true }) });
 	await expect(branch).toHaveText(/Succeeded/);
@@ -613,8 +634,9 @@ test("shows an unknown remote outcome after an exec catches the interruption", a
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await page.reload();
 	const card = toolCards(page).last();
-	await expect(card.getByText("Outcome unknown", { exact: true })).toBeVisible();
-	await card.locator(":scope > summary").click();
+	await expect(toolActivity(page).last()).toContainText("Outcome unknown");
+	await expect(card).toBeHidden();
+	await openToolCard(card);
 	await expect(
 		card.getByText(/Remote outcome unknown.*refs\/heads\/review.*upstream/),
 	).toBeVisible();
@@ -748,7 +770,7 @@ test("replays the original schedule receipt after its one-time job has fired", a
 	await composer.fill("Schedule a workspace check and wait.");
 	await composer.press("Enter");
 	const card = toolCards(page).last();
-	await card.locator(":scope > summary").click();
+	await openToolCard(card);
 	const receipt = card.getByRole("listitem").filter({ hasText: /scheduleTurn.*Succeeded/ });
 	await expect(receipt).toBeVisible();
 	await expect(page.getByText("1 queued behind this run")).toBeVisible();
@@ -766,10 +788,10 @@ test("keeps separate outcomes for concurrent calls to the same tool", async ({ p
 	await composer.fill("Run a workspace module.");
 	await composer.press("Enter");
 	const transcript = page.getByRole("main");
-	await expect(transcript.getByText("Done", { exact: true })).toBeVisible();
+	await expect(toolCards(page).last().locator(":scope > summary")).toHaveText("execDone");
 	await expect(transcript.getByText(/Wrote .*42/)).toBeVisible();
 	await page.reload();
-	await transcript.getByText("Done", { exact: true }).click();
+	await openToolCard(toolCards(page).last());
 	const calls = transcript.getByRole("list", { name: "Tool calls" }).getByRole("listitem");
 	await expect(calls).toHaveCount(3);
 	await expect(calls.filter({ hasText: /write.*Succeeded/ })).toBeVisible();
@@ -794,12 +816,14 @@ test("warns about a partial Code Mode outcome when a script fails after writing"
 	await composer.fill("Fail Code Mode after a write.");
 	await composer.press("Enter");
 	const transcript = page.getByRole("main");
-	const card = transcript.locator(":scope > details");
+	const card = toolCards(page);
 	await expect(card.locator(":scope > summary")).toHaveText("execOutcome unknown");
+	await expect(toolActivity(page)).toContainText("Outcome unknown");
+	await expect(card).toBeHidden();
 	await expect(
 		transcript.getByText(/Inspect it before repeating the action/).filter({ visible: true }),
 	).toBeVisible();
-	await card.locator(":scope > summary").click();
+	await openToolCard(card);
 	await expect(card.getByText(/Inspect it before repeating the action/)).toBeVisible();
 	await composer.fill("hello");
 	await composer.press("Enter");
@@ -1019,9 +1043,25 @@ test("keeps the collapsed tool card compact and opens it without scrolling its s
 	await composer.fill("Run a workspace module.");
 	await composer.press("Enter");
 	await expect(transcript.getByText(/Wrote .*42/)).toBeVisible();
-	const card = transcript.locator(":scope > details");
+	const card = toolCards(page);
 	const summary = card.locator(":scope > summary");
+	const activity = toolActivity(page);
 	await expect(card).toHaveCount(1);
+	await expect(activity).toHaveText("Tool activity");
+	await expect(activity).toBeInViewport();
+	await expect(card).toBeHidden();
+	const row = await activity.boundingBox();
+	expect(row?.height).toBeLessThanOrEqual(32);
+	await expect(activity).toHaveCSS("border-top-width", "0px");
+	expect(
+		await transcript.getByText(/Wrote .*42/).evaluate((reply) => reply.getBoundingClientRect().top),
+	).toBeGreaterThanOrEqual((row?.y ?? 0) + (row?.height ?? 0));
+	const rowTop = await activity.evaluate((element) => element.getBoundingClientRect().top);
+	await activity.press("Enter");
+	await expect(card).toBeVisible();
+	const openedRowTop = await activity.evaluate((element) => element.getBoundingClientRect().top);
+	expect(Math.abs(openedRowTop - rowTop)).toBeLessThanOrEqual(1);
+	await summary.scrollIntoViewIfNeeded();
 	await expect(summary).toHaveText("execDone");
 	await expect(summary).toBeInViewport();
 	const width = () => card.evaluate((element) => element.getBoundingClientRect().width);
@@ -1099,7 +1139,7 @@ test("shows the original exec script if the formatter cannot load", async ({ pag
 		"requestfailed",
 		(request) => new URL(request.url()).pathname === formatterPath,
 	);
-	await card.locator(":scope > summary").click();
+	await openToolCard(card);
 	await formatterFailure;
 	const script = card.locator("pre code").last();
 	await expect(script.locator("span[style]").filter({ hasText: "import" })).toBeVisible();
