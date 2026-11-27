@@ -46,6 +46,7 @@ const excerptLengths = new Map([
 ]);
 type PausePoint =
 	| "before-task"
+	| "before-turn"
 	| "before-tool-handoff"
 	| "after-tool-handoff"
 	| "after-write"
@@ -814,7 +815,12 @@ sequenceDiagram
 	);
 
 	protected override async onTurnPhase(
-		phase: "before-task" | "before-tool-handoff" | "after-tool-handoff" | "after-commit",
+		phase:
+			| "before-task"
+			| "before-turn"
+			| "before-tool-handoff"
+			| "after-tool-handoff"
+			| "after-commit",
 		signal: AbortSignal,
 	) {
 		if (phase === "before-task") {
@@ -990,7 +996,8 @@ sequenceDiagram
 	}
 
 	async #pauseAt(point: PausePoint, signal: AbortSignal, executionId?: string) {
-		if ((await this.ctx.storage.get("pause")) !== point) {
+		const key = point === "before-turn" ? "pause-turn" : "pause";
+		if ((await this.ctx.storage.get(key)) !== point) {
 			return;
 		}
 		await this.ctx.storage.put({
@@ -998,7 +1005,7 @@ sequenceDiagram
 			pausedInstance: this.#instance,
 			...(executionId !== undefined && { executionId }),
 		});
-		while ((await this.ctx.storage.get("pause")) === point) {
+		while ((await this.ctx.storage.get(key)) === point) {
 			signal.throwIfAborted();
 			await new Promise((resolve) => {
 				setTimeout(resolve, 10);
@@ -1018,11 +1025,11 @@ sequenceDiagram
 			this.#atomicFault = point;
 			return Promise.resolve();
 		}
-		return this.ctx.storage.put("pause", point);
+		return this.ctx.storage.put(point === "before-turn" ? "pause-turn" : "pause", point);
 	}
 
 	release() {
-		return this.ctx.storage.delete("pause");
+		return this.ctx.storage.delete(["pause", "pause-turn"]);
 	}
 
 	discardExecution(runId: string) {

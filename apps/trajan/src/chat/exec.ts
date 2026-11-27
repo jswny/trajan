@@ -3,10 +3,11 @@ import { clearCodeModeRun, createCloudflareCodeMode } from "@trajan/code-mode-cl
 import type { CodeModeSandboxBinding } from "@trajan/code-mode-cloudflare";
 import type { CodeModeActivity, CodeModeCatalog } from "@trajan/code-mode";
 import { completedToolResult, TurnIoError } from "@trajan/harness";
-import type { ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
+import type { ToolCall, ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
 import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
 import { execName, ExecInput } from "../exec-contract";
+import type { ChatToolPreview } from "./protocol";
 import { RECENT_TOOL_CALLS, toolActivity, uncertainToolEffects } from "./tool-activity";
 import type { ToolActivity } from "./tool-presentation";
 
@@ -27,10 +28,10 @@ function unknownOutcome(message: string): Extract<typeof ToolResult.Type, { stat
 	};
 }
 
-function settledActivity(calls: ReadonlyArray<CodeModeActivity>) {
+function settledActivity(calls: ReadonlyArray<CodeModeActivity>, limit = calls.length) {
 	const uncertainEffects = uncertainToolEffects(calls);
 	return {
-		...(calls.length > 0 && { activity: calls.map(toolActivity) }),
+		...(calls.length > 0 && { activity: calls.slice(-limit).map(toolActivity) }),
 		...(uncertainEffects.length > 0 && { uncertainEffects }),
 	};
 }
@@ -77,7 +78,16 @@ export function createChatExec(
 				try: () => recordExecution(storage, runId, executionId, call.id),
 				catch: executionError,
 			});
-			let recent: ReadonlyArray<typeof ToolActivity.Type> = [];
+			let recent: ReadonlyArray<typeof ToolActivity.Type> = attempt.recovering
+				? yield* Effect.try({
+						try: () =>
+							codeMode
+								.readExecution(executionId, runId, "live")
+								.calls.slice(-RECENT_TOOL_CALLS)
+								.map(toolActivity),
+						catch: executionError,
+					})
+				: [];
 			const result = yield* codeMode
 				.run(executionId, code, {
 					scope: runId,
@@ -114,20 +124,50 @@ export function createChatExec(
 		),
 	);
 
-	function readSettledTools(runId: string): Array<typeof TurnMessage.Type> {
+	function readRecordedExecutions(runId: string, view: "live" | "settled") {
 		return readExecutions(storage, runId).flatMap(({ executionId, callId }) => {
-			const { saved, calls } = codeMode.readExecution(executionId, runId);
-			if (!saved || (!saved.result && calls.length === 0)) {
+			const { saved, calls } = codeMode.readExecution(executionId, runId, view);
+			if (!saved) {
 				return [];
 			}
-			const result = saved.result
-				? completedToolResult(saved.result.value)
+			const call: typeof ToolCall.Type = {
+				role: "tool-call",
+				id: callId,
+				name: Exec.name,
+				input: { code: saved.source },
+			};
+			return [{ call, calls, result: saved.result }];
+		});
+	}
+
+	function readToolPreviews(runId: string): ReadonlyArray<typeof ChatToolPreview.Type> {
+		return readRecordedExecutions(runId, "live").map(({ call, calls, result }) =>
+			result
+				? {
+						call,
+						activity: [],
+						result: {
+							...completedToolResult(result.value),
+							...settledActivity(calls, RECENT_TOOL_CALLS),
+						},
+					}
+				: { call, activity: calls.slice(-RECENT_TOOL_CALLS).map(toolActivity) },
+		);
+	}
+
+	function readSettledTools(runId: string): Array<typeof TurnMessage.Type> {
+		return readRecordedExecutions(runId, "settled").flatMap(({ call, calls, result: saved }) => {
+			if (!saved && calls.length === 0) {
+				return [];
+			}
+			const result = saved
+				? completedToolResult(saved.value)
 				: unknownOutcome("The script ended without a completed result.");
 			return [
-				{ role: "tool-call", id: callId, name: Exec.name, input: { code: saved.source } },
+				call,
 				{
 					role: "tool",
-					callId,
+					callId: call.id,
 					result: {
 						...result,
 						...settledActivity(calls),
@@ -138,6 +178,7 @@ export function createChatExec(
 	}
 
 	return {
+		readToolPreviews,
 		readSettledTools,
 		settleRun(runId: string, outcome: "completed" | "failed" | "cancelled") {
 			const messages = outcome === "completed" ? undefined : readSettledTools(runId);

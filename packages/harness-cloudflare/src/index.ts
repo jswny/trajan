@@ -56,7 +56,7 @@ const isRetryableHandoffFailure = Schema.is(
 const isToolCall = Schema.is(ToolCall);
 
 type ToolHandoffPhase = "before-tool-handoff" | "after-tool-handoff";
-type TurnPhase = "before-task" | "after-commit" | ToolHandoffPhase;
+type TurnPhase = "before-task" | "before-turn" | "after-commit" | ToolHandoffPhase;
 
 class TurnTaskInputError extends Schema.TaggedError<
 	TurnTaskInputError,
@@ -535,6 +535,7 @@ export abstract class CloudflareHarness<
 				};
 			},
 		);
+		yield* Effect.promise(async (signal) => this.onTurnPhase?.("before-turn", signal));
 		const transcript = yield* runTurn(
 			{ id: row.submission_id, prompt: row.prompt },
 			taskJournal(runId, step, this.ctx.storage, this.#drafts, this.onTurnPhase?.bind(this)),

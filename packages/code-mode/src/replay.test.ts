@@ -148,6 +148,7 @@ it.effect("leaves an expired execution's receipts available without starting the
 		const error = yield* codeMode.run("run", source, { recovering: true }).pipe(Effect.flip);
 		expect(error.message).toBe("The Code Mode execution deadline expired.");
 		expect(timeouts).toEqual([]);
+		expect(codeMode.readExecution("run", "run", "live").calls).toEqual([]);
 		expect(codeMode.readExecution("run", "run").calls).toMatchObject([{ status: "interrupted" }]);
 	}),
 );

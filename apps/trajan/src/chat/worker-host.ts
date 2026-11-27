@@ -60,7 +60,10 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 		this.lifecycle.use(this.#sockets).use(this.schedules);
 	}
 
-	protected abstract readonly chatExec: Pick<ReturnType<typeof createChatExec>, "settleRun">;
+	protected abstract readonly chatExec: Pick<
+		ReturnType<typeof createChatExec>,
+		"readToolPreviews" | "settleRun"
+	>;
 	protected override describeRecoveredTool = describeRecoveredTool;
 
 	protected override settleRunState(runId: string, outcome: "completed" | "failed" | "cancelled") {
@@ -126,7 +129,7 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 	}
 
 	#savedPreview(runId: string): typeof ChatPreview.Type {
-		return { runId, ...this.readModelDraft(runId), tools: [] };
+		return { runId, ...this.readModelDraft(runId), tools: this.chatExec.readToolPreviews(runId) };
 	}
 
 	#snapshot(): typeof ChatSnapshot.Type {

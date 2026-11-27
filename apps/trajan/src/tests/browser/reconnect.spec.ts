@@ -379,6 +379,11 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	const composer = await openChat(page);
 	const card = toolCards(page).last();
 	const writes = card.getByRole("listitem").filter({ hasText: /write.*Succeeded/ });
+	const decodeState = Schema.decodeUnknownSync(
+		Schema.Struct({ text: Schema.String, pausedAt: Schema.optionalKey(Schema.String) }),
+	);
+	const readState = async () =>
+		decodeState(await (await page.request.post(`${control}/state`)).json());
 	await composer.fill("Interrupt after writing.");
 	await composer.press("Enter");
 	await expect(page.getByText("Running exec", { exact: true })).toBeVisible();
@@ -388,17 +393,27 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
 	await openToolCard(card);
 	await expect(writes).toHaveCount(1);
-	await expect
-		.poll(async () => {
-			const response = await page.request.post(`${control}/state`);
-			return Schema.decodeUnknownSync(Schema.Struct({ text: Schema.String }))(await response.json())
-				.text;
-		})
-		.toBe("once");
+	await expect.poll(readState).toMatchObject({ text: "once", pausedAt: "waiting-for-restart" });
 
+	expect((await page.request.post(`${control}/pause-before-turn`)).status()).toBe(204);
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	const transcript = page.getByRole("main");
 	const reply = transcript.getByText('Wrote "once"', { exact: true });
+	await openChat(page);
+	await expect.poll(readState).toMatchObject({ text: "once", pausedAt: "before-turn" });
+	await expect(toolCards(page)).toHaveCount(1);
+	await openToolCard(card);
+	await expect(writes).toBeVisible();
+	await expect(card.getByRole("listitem").filter({ hasText: "wait_for_restart" })).toHaveCount(0);
+	await expect(reply).toHaveCount(0);
+
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await openChat(page);
+	await expect(toolCards(page)).toHaveCount(1);
+	await openToolCard(card);
+	await expect(writes).toBeVisible();
+	await expect(reply).toHaveCount(0);
+	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
 	await expect(reply).toHaveCount(1);
 	await page.reload();
 	await expect(reply).toHaveCount(1);
@@ -523,6 +538,33 @@ test("streams successive tools into the open activity disclosure above the reply
 	await expect(cards.last()).toHaveAttribute("open");
 	await expect(activity).toHaveText("Tool activity");
 	await expect(activity.locator('[data-icon="loader"]')).toHaveCount(0);
+});
+
+test("restores a completed exec while its turn is still active", async ({ page }) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/pause-between-tools`)).status()).toBe(204);
+	await composer.fill("Append hello, then world.");
+	await composer.press("Enter");
+	const cards = toolCards(page);
+	const first = cards.first();
+	await expect(first.locator(":scope > summary")).toHaveText("execDone");
+	await expect(page.getByText("Waiting for the model", { exact: true })).toBeVisible();
+
+	expect((await page.request.post(`${control}/pause-before-turn`)).status()).toBe(204);
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await openChat(page);
+	await expect(cards).toHaveCount(1);
+	await expect(first.locator(":scope > summary")).toHaveText("execDone");
+	await openToolCard(first);
+	await expect(first.locator("pre").first()).toHaveText('"hello"');
+	await expect(first.getByRole("listitem").filter({ hasText: /write.*Succeeded/ })).toBeVisible();
+
+	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
+	await expect(
+		page.getByRole("main").getByText('Wrote "hello world"', { exact: true }),
+	).toBeVisible();
+	await expect(cards).toHaveCount(2);
+	await expect(first).toHaveAttribute("open");
 });
 
 test("shows an exhausted model retry budget and keeps the completed write after reconnecting", async ({

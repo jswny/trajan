@@ -392,7 +392,7 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 		return tools && Object.hasOwn(tools, name) ? tools[name] : undefined;
 	};
 
-	function readExecution(id: string, scope: string) {
+	function readExecution(id: string, scope: string, view: "live" | "settled" = "settled") {
 		const journal = host.openJournal(scope, id);
 		const saved = Option.getOrUndefined(journal.readRun());
 		const calls: Array<CodeModeActivity> = [];
@@ -408,7 +408,9 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 			}
 			const reply =
 				entry.reply ??
-				(entry.replay === "unsafe" && entry.started !== false ? interrupted : undefined);
+				(view === "settled" && entry.replay === "unsafe" && entry.started !== false
+					? interrupted
+					: undefined);
 			if (reply) {
 				const tool = getTool(call);
 				calls.push(
