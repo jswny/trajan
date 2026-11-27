@@ -8,7 +8,14 @@ import {
 	TurnModelError,
 	TurnSubmission,
 } from "@trajan/harness";
-import type { TurnJournal, TurnMessage, TurnProgress, TurnTools } from "@trajan/harness";
+import type {
+	RuntimeOutcome,
+	ToolActivity,
+	TurnJournal,
+	TurnMessage,
+	TurnProgress,
+	TurnTools,
+} from "@trajan/harness";
 import { Lifecycle, LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
 import { Tasks } from "agents/tasks";
@@ -178,8 +185,17 @@ export abstract class CloudflareHarness<
 		outcome: "completed" | "failed" | "cancelled",
 	): ReadonlyArray<typeof TurnMessage.Type> | undefined;
 
-	readonly #conversation = new ConversationStore(this.ctx.storage, (runId, outcome) =>
-		this.settleRunState?.(runId, outcome),
+	protected describeRecoveredTool({
+		name,
+		status,
+	}: typeof ToolActivity.Type): (typeof RuntimeOutcome.Type.tools)[number] {
+		return { name, status };
+	}
+
+	readonly #conversation = new ConversationStore(
+		this.ctx.storage,
+		(runId, outcome) => this.settleRunState?.(runId, outcome),
+		(activity) => this.describeRecoveredTool(activity),
 	);
 	readonly #inbox = new InboxWake(() => this.#drainInbox());
 	readonly #tasks = new Tasks({

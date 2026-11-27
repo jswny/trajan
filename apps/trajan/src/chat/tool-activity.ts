@@ -1,7 +1,7 @@
 import { clearCodeModeRun } from "@trajan/code-mode-cloudflare";
 import type { CodeModeActivity } from "@trajan/code-mode";
 import { ToolContent } from "@trajan/harness";
-import type { UncertainToolEffect } from "@trajan/harness";
+import type { ToolActivity as StoredToolActivity, UncertainToolEffect } from "@trajan/harness";
 import { Option, Schema } from "effect";
 import { FileChange, FilePreview, toolPreviewBytes } from "./tool-presentation";
 import type { ToolActivity, ToolActivityPreview } from "./tool-presentation";
@@ -10,6 +10,9 @@ export const RECENT_TOOL_CALLS = 8;
 
 const decodeContent = Schema.decodeUnknownOption(ToolContent);
 const decodeFileChange = Schema.decodeUnknownOption(FileChange);
+const decodeActivityPath = Schema.decodeUnknownOption(
+	FileChange.mapFields(({ path }) => ({ path })),
+);
 const decodeFilePreview = Schema.decodeUnknownOption(FilePreview);
 const encoder = new TextEncoder();
 
@@ -89,6 +92,15 @@ export function uncertainToolEffects(calls: ReadonlyArray<CodeModeActivity>) {
 			return [{ id, name, message: uncertainty ?? reply.message }];
 		},
 	);
+}
+
+export function describeRecoveredTool({
+	name,
+	status,
+	fileChange,
+}: typeof StoredToolActivity.Type) {
+	const file = decodeActivityPath(fileChange);
+	return { name, status, ...(file._tag === "Some" && { path: file.value.path.slice(0, 256) }) };
 }
 
 const executionsKey = (runId: string) => `chat-tool-executions:${runId}`;

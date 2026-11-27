@@ -14,7 +14,7 @@ import {
 	updateToolPreview,
 } from "./protocol";
 import type { BrowserWatch, ChatPreview, ChatSnapshot, ChatToolPreview } from "./protocol";
-import { clearToolState, RECENT_TOOL_CALLS } from "./tool-activity";
+import { clearToolState, describeRecoveredTool, RECENT_TOOL_CALLS } from "./tool-activity";
 
 const chatEventJson = Schema.encodeSync(Schema.fromJsonString(ChatEvent));
 const chatTag = "chat";
@@ -60,6 +60,7 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 	}
 
 	protected abstract readSettledTools(runId: string): ReadonlyArray<typeof TurnMessage.Type>;
+	protected override describeRecoveredTool = describeRecoveredTool;
 
 	protected override settleRunState(runId: string, outcome: "completed" | "failed" | "cancelled") {
 		const tools = outcome === "completed" ? undefined : this.readSettledTools(runId);

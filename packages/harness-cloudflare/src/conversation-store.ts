@@ -4,7 +4,7 @@ import {
 	TurnMessage,
 	TurnTranscript,
 } from "@trajan/harness";
-import type { RuntimeOutcome, TurnCompletion, TurnSubmission } from "@trajan/harness";
+import type { RuntimeOutcome, ToolActivity, TurnCompletion, TurnSubmission } from "@trajan/harness";
 import { Option, Schema } from "effect";
 
 const historyByteLimit = 1024 * 1024;
@@ -59,10 +59,6 @@ const decodeOutcomeRow = Schema.decodeUnknownSync(
 	}),
 );
 
-const decodeActivityPath = Schema.decodeUnknownOption(
-	Schema.Struct({ path: Schema.NonEmptyString }),
-);
-
 function splitsToolCall(
 	newer: typeof EntryRow.Type | undefined,
 	older: typeof EntryRow.Type | undefined,
@@ -86,6 +82,9 @@ export class ConversationStore {
 			runId: string,
 			outcome: "completed" | "failed" | "cancelled",
 		) => ReadonlyArray<typeof TurnMessage.Type> | undefined,
+		private readonly describeRecoveredTool: (
+			activity: typeof ToolActivity.Type,
+		) => (typeof RuntimeOutcome.Type.tools)[number],
 	) {}
 
 	initialize() {
@@ -269,16 +268,7 @@ export class ConversationStore {
 						return entry.role === "tool" ? [entry.result] : [];
 					});
 				const tools = results
-					.flatMap(({ activity }) =>
-						(activity ?? []).map(({ name, status, fileChange }) => {
-							const file = decodeActivityPath(fileChange);
-							return {
-								name,
-								status,
-								...(file._tag === "Some" && { path: file.value.path.slice(0, 256) }),
-							};
-						}),
-					)
+					.flatMap(({ activity }) => (activity ?? []).map(this.describeRecoveredTool))
 					.slice(-12);
 				const uncertainEffects = results
 					.flatMap(({ uncertainEffects }) =>
