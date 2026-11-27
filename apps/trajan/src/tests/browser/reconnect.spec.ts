@@ -579,13 +579,15 @@ test("restores the partial and final replies after a restart during model backof
 	const composer = await openChat(page);
 	const prompt = "Retry an interrupted stream after append.";
 	await sendAndWaitForRetry(page, composer, prompt);
+	const transcript = page.getByRole("main");
+	const interrupted = transcript.locator("[data-interrupted-reply]");
+	await expect(interrupted.locator("summary")).toHaveText("Interrupted reply");
+	await expect(transcript.locator('[data-streaming="true"]')).toHaveCount(0);
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	await openChat(page);
-	const transcript = page.getByRole("main");
 	const reply = `Wrote "${prompt}"`;
 	await expect(transcript.getByText(reply, { exact: true })).toBeVisible();
 	await expect(toolCards(page)).toHaveCount(1);
-	const interrupted = transcript.locator("[data-interrupted-reply]");
 	await interrupted.locator("summary").click();
 	await expect(interrupted.getByText("Wrote", { exact: true })).toBeVisible();
 	await expectStoredReply(page.request, reply);

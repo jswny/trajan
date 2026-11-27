@@ -362,13 +362,16 @@ test("batches streamed drafts, archives an interrupted attempt, and gives the ne
 	stub = await interruptPausedTurn(stub, "during-reply");
 	await expect
 		.poll(
-			() =>
-				runInDurableObject(stub, (_, { storage }) =>
-					storage.kv.get(`harness-draft:interrupted:${runId}`),
-				),
+			async () => ({
+				state: await stub.taskState(runId),
+				draft: await runInDurableObject(stub, (_, { storage }) => ({
+					live: storage.kv.get(`harness-draft:live:${runId}`),
+					interrupted: storage.kv.get(`harness-draft:interrupted:${runId}`),
+				})),
+			}),
 			{ timeout: 5000 },
 		)
-		.toEqual([interrupted]);
+		.toEqual({ state: "waiting", draft: { live: undefined, interrupted: [interrupted] } });
 	await stub.release();
 	await expect
 		.poll(() => readTurn(stub, runId))
@@ -1921,6 +1924,15 @@ test("preserves a partial reply and completed tool when the Worker restarts duri
 	let stub = openFixture();
 	const { runId } = await submit(stub, { id: "stream-retry", prompt: retryStreamPrompt });
 	await expect.poll(() => stub.taskState(runId), { timeout: 5000 }).toBe("waiting");
+	expect(
+		await runInDurableObject(stub, (_, { storage }) => ({
+			live: storage.kv.get(`harness-draft:live:${runId}`),
+			interrupted: storage.kv.get(`harness-draft:interrupted:${runId}`),
+		})),
+	).toEqual({
+		live: undefined,
+		interrupted: [{ role: "interrupted", attemptId: "model:1:1", text: "Wrote", truncated: false }],
+	});
 	const { instance } = await stub.state();
 	await expect(stub.crash()).rejects.toThrow(/restart|reset/i);
 	stub = await waitForRestart(stub, instance);

@@ -25,13 +25,48 @@ function interruptedReply(draft: typeof LiveDraft.Type): typeof InterruptedReply
 }
 
 export class ModelDrafts {
-	constructor(private readonly storage: DurableObjectStorage) {}
+	constructor(
+		private readonly storage: DurableObjectStorage,
+		private readonly onInterrupted: (runId: string) => void,
+	) {}
 
 	read(runId: string) {
 		return {
 			text: decodeDraft(this.storage.kv.get(liveKey(runId)))?.text ?? "",
 			interrupted: decodeInterrupted(this.storage.kv.get(interruptedKey(runId))) ?? [],
 		};
+	}
+
+	#appendInterrupted(runId: string, draft: typeof LiveDraft.Type) {
+		if (!draft.text.trim()) {
+			return false;
+		}
+		const key = interruptedKey(runId);
+		const kv = this.storage.kv;
+		kv.put(key, [...(decodeInterrupted(kv.get(key)) ?? []), interruptedReply(draft)]);
+		return true;
+	}
+
+	interrupt(runId: string, checkpoint: string, attempt: number) {
+		return publishUpdate("interrupted model draft", () =>
+			Effect.sync(() => {
+				const archived = this.storage.transactionSync(() => {
+					const key = liveKey(runId);
+					const kv = this.storage.kv;
+					const draft = decodeDraft(kv.get(key));
+					// An old attempt can finish unwinding after its replacement has started.
+					if (draft?.attemptId !== `${checkpoint}:${attempt}`) {
+						return false;
+					}
+					const archived = this.#appendInterrupted(runId, draft);
+					kv.delete(key);
+					return archived;
+				});
+				if (archived) {
+					this.onInterrupted(runId);
+				}
+			}),
+		);
 	}
 
 	capture<A, E, R>(
@@ -46,12 +81,8 @@ export class ModelDrafts {
 			const kv = this.storage.kv;
 			this.storage.transactionSync(() => {
 				const previous = decodeDraft(kv.get(key));
-				if (previous?.checkpoint === checkpoint && previous.text.trim()) {
-					const archived = interruptedKey(runId);
-					kv.put(archived, [
-						...(decodeInterrupted(kv.get(archived)) ?? []),
-						interruptedReply(previous),
-					]);
+				if (previous?.checkpoint === checkpoint) {
+					this.#appendInterrupted(runId, previous);
 				}
 				kv.put(key, { checkpoint, attemptId, text: "", truncated: false });
 			});
@@ -89,7 +120,10 @@ export class ModelDrafts {
 					text = truncated ? next.slice(0, maxDraftLength).replace(/[\uD800-\uDBFF]$/u, "") : next;
 					return first ? flush : Effect.void;
 				}),
-			).pipe(Effect.ensuring(flush));
+			).pipe(
+				Effect.ensuring(flush),
+				Effect.onError(() => this.interrupt(runId, checkpoint, attempt)),
+			);
 		}).pipe(Effect.scoped);
 	}
 

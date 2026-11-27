@@ -213,6 +213,7 @@ function taskJournal(
 					: Effect.void;
 			return Effect.gen(function* () {
 				if (kind === "model" && interrupted) {
+					yield* drafts.interrupt(runId, name, interrupted.attempt);
 					if (interrupted.attempt >= modelAttemptLimit) {
 						return yield* Effect.die(new ModelInterruptedError());
 					}
@@ -316,7 +317,9 @@ export abstract class CloudflareHarness<
 		return { name, status };
 	}
 
-	readonly #drafts = new ModelDrafts(this.ctx.storage);
+	readonly #drafts = new ModelDrafts(this.ctx.storage, (runId) =>
+		this.onProgress?.(runId, { type: "reset" }),
+	);
 	readonly #conversation = new ConversationStore(
 		this.ctx.storage,
 		(runId, outcome) => {
