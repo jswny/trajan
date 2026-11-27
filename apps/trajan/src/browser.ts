@@ -97,10 +97,11 @@ const readPage = Effect.fnUntraced(function* (session: Session) {
 
 export const browserKeepAliveMs = 120_000;
 
+export type BrowserPageStatus = "open" | "reopened" | "closed";
+
 export function browserToolset(
 	browser: BrowserHost,
-	onPage: (status: "open" | "reopened" | "closed") => Effect.Effect<void, CodeModeError> = () =>
-		Effect.void,
+	onPage: (status: BrowserPageStatus) => Effect.Effect<void, CodeModeError> = () => Effect.void,
 ) {
 	const notifyPage = (status: Parameters<typeof onPage>[0]) =>
 		publishUpdate("browser availability", () => onPage(status));

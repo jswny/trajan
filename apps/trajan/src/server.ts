@@ -1,37 +1,25 @@
-import { codeModeError } from "@trajan/code-mode";
 import { TurnModel, TurnTools } from "@trajan/harness";
 import { openAiTurnModel } from "@trajan/model-openai";
 import { Browser, browserRun } from "agents/browser";
-import { Clock, Data, Effect, Layer, Option, Schema } from "effect";
+import { Data, Effect, Layer } from "effect";
 import { browserKeepAliveMs, browserToolset } from "./browser";
 import { openAiGatewayTransport } from "./chat/openai-gateway";
-import {
-	BrowserViewPath,
-	BrowserViewRequest,
-	BrowserViewResponse,
-	BrowserWatch,
-	ChatPath,
-	isChatPath,
-} from "./chat/protocol";
+import { BrowserViewPath, ChatPath, isChatPath } from "./chat/protocol";
 import { TrajanChatObject } from "./chat/worker-host";
 import { createChatExec } from "./chat/exec";
+import { browserViewHeaders, createLiveBrowser } from "./live-browser";
 import { modelConfig } from "./model-config";
 import { createTrajanWorkspace, WORKSPACE_PROMPT, workspaceToolset } from "./workspace";
 
 class ChatRouteError extends Data.TaggedError("ChatRouteError")<{ readonly cause: unknown }> {}
-const decodeBrowserView = Schema.decodeUnknownEffect(BrowserViewResponse);
-const decodeBrowserViewRequest = Schema.decodeUnknownOption(
-	Schema.fromJsonString(BrowserViewRequest),
-);
-const browserViewHeaders = { "Cache-Control": "no-store" };
-const browserViewLeaseMs = 60_000;
-const browserWatchKey = "trajan:browser-watch";
-const decodeBrowserWatch = Schema.decodeUnknownOption(BrowserWatch);
 
 export class Trajan extends TrajanChatObject {
 	readonly #browser = new Browser({
 		provider: browserRun(this.env.BROWSER, { keepAliveMs: browserKeepAliveMs }),
 	});
+	readonly #liveBrowser = createLiveBrowser(this.ctx.storage, this.#browser, this.env.BROWSER, () =>
+		this.publishBrowserAvailability(),
+	);
 	protected readonly chatExec = createChatExec(
 		this.env.LOADER,
 		this.ctx.storage,
@@ -46,9 +34,7 @@ export class Trajan extends TrajanChatObject {
 
 	#toolset() {
 		const workspace = workspaceToolset(createTrajanWorkspace(this.ctx));
-		const browser = browserToolset(this.#browser, (status) =>
-			this.#changeBrowserAvailability(status),
-		);
+		const browser = browserToolset(this.#browser, this.#liveBrowser.changeAvailability);
 		return {
 			catalog: {
 				...workspace.catalog,
@@ -59,35 +45,7 @@ export class Trajan extends TrajanChatObject {
 	}
 
 	protected override get browserWatch() {
-		return Option.getOrNull(decodeBrowserWatch(this.ctx.storage.kv.get(browserWatchKey)));
-	}
-
-	#changeBrowserAvailability(status: "open" | "reopened" | "closed") {
-		return Effect.gen({ self: this }, function* () {
-			const now = yield* Clock.currentTimeMillis;
-			const previous = this.browserWatch;
-			const watch =
-				status === "closed"
-					? null
-					: {
-							id:
-								status === "open" && previous && previous.expiresAt > now
-									? previous.id
-									: yield* Effect.sync(() => crypto.randomUUID()),
-							expiresAt: now + browserKeepAliveMs,
-						};
-			yield* Effect.try({
-				try: () => {
-					if (watch === null) {
-						this.ctx.storage.kv.delete(browserWatchKey);
-					} else {
-						this.ctx.storage.kv.put(browserWatchKey, watch);
-					}
-					this.publishBrowserAvailability();
-				},
-				catch: codeModeError,
-			});
-		});
+		return this.#liveBrowser.watch();
 	}
 
 	protected readonly turnLayer = Layer.merge(
@@ -108,61 +66,8 @@ export class Trajan extends TrajanChatObject {
 	onRequest(request: Request) {
 		return Effect.runPromise(
 			new URL(request.url).pathname === BrowserViewPath
-				? this.#browserView(request)
+				? this.#liveBrowser.requestView(request)
 				: this.chatRequest(request),
-		);
-	}
-
-	#browserView(request: Request) {
-		return Effect.gen({ self: this }, function* () {
-			const input = decodeBrowserViewRequest(yield* Effect.tryPromise(() => request.text()));
-			if (input._tag === "None") {
-				return new Response(null, { status: 400, headers: browserViewHeaders });
-			}
-			const watch = this.browserWatch;
-			const now = yield* Clock.currentTimeMillis;
-			if (watch?.id !== input.value.id || watch.expiresAt <= now) {
-				return Response.json({ status: "closed" }, { headers: browserViewHeaders });
-			}
-			const view = yield* Effect.tryPromise(() => this.#browser.liveView({ mode: "tab" }));
-			const target = view?.targets.find(
-				(tab) => tab.type === "page" && tab.pageUrl?.startsWith("https:"),
-			);
-			if (!view || !target) {
-				if (
-					this.browserWatch?.id === watch?.id &&
-					this.browserWatch?.expiresAt === watch?.expiresAt
-				) {
-					yield* this.#changeBrowserAvailability("closed");
-				}
-				return Response.json({ status: "closed" }, { headers: browserViewHeaders });
-			}
-			const expiresAt = (yield* Clock.currentTimeMillis) + browserViewLeaseMs;
-			const link = yield* Effect.tryPromise(() =>
-				this.env.BROWSER.getLiveView(view.sessionId, {
-					targetId: target.targetId,
-					mode: "tab",
-					expiresInMs: browserViewLeaseMs,
-					guardrails: { mode: "readonly" },
-				}),
-			);
-			if (link.options.guardrails?.mode !== "readonly") {
-				return new Response(null, { status: 502, headers: browserViewHeaders });
-			}
-			const current = this.browserWatch;
-			const checkedAt = yield* Clock.currentTimeMillis;
-			if (current?.id !== watch.id || current.expiresAt <= checkedAt) {
-				return Response.json({ status: "closed" }, { headers: browserViewHeaders });
-			}
-			const payload = yield* decodeBrowserView({
-				status: "open",
-				url: link.devtoolsFrontendUrl,
-				expiresAt,
-			});
-			return Response.json(payload, { headers: browserViewHeaders });
-		}).pipe(
-			Effect.timeout("8 seconds"),
-			Effect.orElseSucceed(() => new Response(null, { status: 502, headers: browserViewHeaders })),
 		);
 	}
 }
