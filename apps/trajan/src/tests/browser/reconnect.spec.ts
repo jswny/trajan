@@ -1,20 +1,16 @@
 import { setTimeout } from "node:timers/promises";
 import { TurnSubmission } from "@trajan/harness";
-import { devices, expect, test } from "@playwright/test";
-import type { Page } from "@playwright/test";
+import { devices } from "@playwright/test";
+import type { APIRequestContext, Page } from "@playwright/test";
 import { Schema } from "effect";
-import { ChatEvent, ChatPath, ChatReceipt } from "../../chat/protocol";
+import { ChatEvent, ChatHistoryPath, ChatPage, ChatPath, ChatReceipt } from "../../chat/protocol";
+import { expect, test } from "./fixtures";
 
 const decodeFrame = Schema.decodeUnknownOption(Schema.fromJsonString(ChatEvent));
 const decodeSubmission = Schema.decodeUnknownSync(Schema.fromJsonString(TurnSubmission));
 const decodeReceipt = Schema.decodeUnknownSync(ChatReceipt);
+const decodeHistory = Schema.decodeUnknownSync(ChatPage);
 const control = "/__browser-smoke/chat";
-
-test.beforeEach(async ({ context, baseURL }) => {
-	await context.addCookies([
-		{ name: "trajan-fixture", value: crypto.randomUUID(), url: baseURL!, httpOnly: true },
-	]);
-});
 
 async function openChat(page: Page) {
 	await page.goto("/");
@@ -24,6 +20,41 @@ async function openChat(page: Page) {
 
 function toolCards(page: Page) {
 	return page.getByRole("main").locator(":scope > details");
+}
+
+function observeSubmissions(page: Page) {
+	const prompts: Array<string> = [];
+	page.on("request", (request) => {
+		if (request.method() === "POST" && new URL(request.url()).pathname === ChatPath) {
+			prompts.push(decodeSubmission(request.postData()).prompt);
+		}
+	});
+	return prompts;
+}
+
+async function makeRetryDue(request: APIRequestContext, retry: "inbox-wake" | "missed-schedule") {
+	await expect
+		.poll(async () => (await request.post(`${control}/retry-${retry}`)).status(), {
+			timeout: 10_000,
+		})
+		.toBe(204);
+}
+
+async function expectStoredReply(request: APIRequestContext, text: string) {
+	await expect
+		.poll(
+			async () => {
+				const response = await request.get(ChatHistoryPath);
+				if (!response.ok()) {
+					return 0;
+				}
+				return decodeHistory(await response.json()).entries.filter(
+					({ message }) => message.role === "assistant" && message.text === text,
+				).length;
+			},
+			{ timeout: 10_000 },
+		)
+		.toBe(1);
 }
 
 test("loads a skill saved in chat after the Worker restarts", async ({ page }) => {
@@ -91,6 +122,7 @@ test("uses the submission prompt limit for the composer", async ({ page }) => {
 });
 
 test("does not send while the initial snapshot is missing", async ({ page }) => {
+	const submissions = observeSubmissions(page);
 	let deliver: (() => void) | undefined;
 	await page.routeWebSocket("**/api/chat/live", (client) => {
 		const server = client.connectToServer();
@@ -105,12 +137,22 @@ test("does not send while the initial snapshot is missing", async ({ page }) => 
 	});
 	await page.goto("/");
 	const composer = page.getByRole("textbox", { name: "Message Trajan" });
-	await composer.fill("Remember milk");
-	await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
 	await expect.poll(() => deliver !== undefined).toBe(true);
+	await composer.fill("Remember the blocked draft");
+	await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
+	await composer.press("Enter");
+	await expect(composer).toHaveValue(/^Remember the blocked draft\n?$/);
+	expect(submissions).toEqual([]);
 	deliver?.();
 	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
+	expect(submissions).toEqual([]);
+	await composer.fill("Remember milk");
 	await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
+	await composer.press("Enter");
+	await expect(page.getByRole("main").getByText("Remembering milk", { exact: true })).toHaveCount(
+		1,
+	);
+	expect(submissions).toEqual(["Remember milk"]);
 });
 
 test("retries an uncorrelated receipt with the same operation ID and preserves a newer draft", async ({
@@ -284,19 +326,18 @@ test("shows animated progress with either motion preference", async ({ page }) =
 
 test("recovers a running exec without repeating its write", async ({ page }) => {
 	const composer = await openChat(page);
+	const card = toolCards(page).last();
+	const summary = card.locator(":scope > summary");
+	const writes = card.getByRole("listitem").filter({ hasText: /write.*Succeeded/ });
 	await composer.fill("Interrupt after writing.");
 	await composer.press("Enter");
 	await expect(page.getByText("Running exec", { exact: true })).toBeVisible();
-	await toolCards(page).last().locator(":scope > summary").click();
-	const activity = page.getByRole("list", { name: "Tool calls" });
-	await expect(activity.getByRole("listitem").filter({ hasText: /write.*Succeeded/ })).toHaveCount(
-		1,
-	);
+	await summary.click();
+	await expect(writes).toHaveCount(1);
 	await page.reload();
-	await toolCards(page).last().locator(":scope > summary").click();
-	await expect(activity.getByRole("listitem").filter({ hasText: /write.*Succeeded/ })).toHaveCount(
-		1,
-	);
+	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
+	await summary.click();
+	await expect(writes).toHaveCount(1);
 	await expect
 		.poll(async () => {
 			const response = await page.request.post(`${control}/state`);
@@ -307,10 +348,13 @@ test("recovers a running exec without repeating its write", async ({ page }) => 
 
 	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
 	const transcript = page.getByRole("main");
-	await expect(transcript.getByText('Wrote "once"', { exact: true })).toHaveCount(1);
-	await expect(activity.getByRole("listitem").filter({ hasText: /write.*Succeeded/ })).toHaveCount(
-		1,
-	);
+	const reply = transcript.getByText('Wrote "once"', { exact: true });
+	await expect(reply).toHaveCount(1);
+	await page.reload();
+	await expect(reply).toHaveCount(1);
+	await expect(toolCards(page)).toHaveCount(1);
+	await summary.click();
+	await expect(writes).toHaveCount(1);
 	await composer.fill("hello");
 	await composer.press("Enter");
 	await expect(transcript.getByText('Wrote "oncehello"', { exact: true })).toBeVisible();
@@ -628,7 +672,6 @@ test("an accepted send recovers after inbox wake retries fail with the chat clos
 	page,
 	context,
 }) => {
-	test.setTimeout(50_000);
 	const composer = await openChat(page);
 	expect((await page.request.post(`${control}/fail-inbox-wake`)).status()).toBe(204);
 	await composer.fill("Remember the inbox wake recovered");
@@ -639,11 +682,8 @@ test("an accepted send recovers after inbox wake retries fail with the chat clos
 	await admitted;
 	await page.close();
 
-	// No connection or request can revive the inbox during the first backoff.
-	await setTimeout(32_000);
-	const history = await context.request.get(`${ChatPath}/history`);
-	expect(history.ok()).toBe(true);
-	expect(await history.text()).toContain("Remembering the inbox wake recovered");
+	await makeRetryDue(context.request, "inbox-wake");
+	await expectStoredReply(context.request, "Remembering the inbox wake recovered");
 	const reopened = await context.newPage();
 	await openChat(reopened);
 	await expect(
@@ -661,11 +701,7 @@ test("runs a scheduled turn once across a restart with the chat closed", async (
 	await expect(page.getByRole("main").getByText(/^Scheduled \{/)).toBeVisible();
 	await page.close();
 	expect((await context.request.post(`${control}/crash`)).status()).toBe(500);
-	// Leave the Worker with no chat connection while the alarm and its retry run.
-	await setTimeout(4500);
-	const history = await context.request.get(`${ChatPath}/history`);
-	expect(history.ok()).toBe(true);
-	expect(await history.text()).toContain("The scheduled workspace check ran.");
+	await expectStoredReply(context.request, "The scheduled workspace check ran.");
 	const reopened = await context.newPage();
 	await openChat(reopened);
 	const transcript = reopened.getByRole("main");
@@ -694,7 +730,6 @@ test("a missed scheduled turn leaves a single notice that survives reload", asyn
 });
 
 test("shows the missed schedule after the notice write recovers", async ({ page }) => {
-	test.setTimeout(50_000);
 	const composer = await openChat(page);
 	expect((await page.request.post(`${control}/defer-missed-schedule`)).status()).toBe(204);
 	await composer.fill("Schedule a workspace check.");
@@ -702,7 +737,8 @@ test("shows the missed schedule after the notice write recovers", async ({ page 
 	const notice = page
 		.getByRole("main")
 		.getByText(/A scheduled task could not be queued after retries\./);
-	await expect(notice).toHaveCount(1, { timeout: 40_000 });
+	await makeRetryDue(page.request, "missed-schedule");
+	await expect(notice).toHaveCount(1);
 	await page.reload();
 	await expect(notice).toHaveCount(1);
 });
@@ -822,20 +858,24 @@ test("keeps the composer one row tall until the draft needs more space", async (
 });
 
 test("keeps IME confirmation separate from sending a message", async ({ page }) => {
+	const submissions = observeSubmissions(page);
 	const composer = await openChat(page);
 	const send = page.getByRole("button", { name: "Send message" });
 	const transcript = page.getByRole("main");
 	const draft = "Remember 日本語";
+	const composingDraft = "Remember にほんご";
 	await composer.dispatchEvent("compositionstart");
-	await composer.fill(draft);
+	await composer.fill(composingDraft);
 	await expect(send).toBeEnabled();
 	await composer.dispatchEvent("keydown", { key: "Enter", isComposing: true });
-	await expect(composer).toHaveValue(draft);
-	await expect(transcript).not.toContainText(draft);
+	await expect(composer).toHaveValue(composingDraft);
+	expect(submissions).toEqual([]);
+	await composer.fill(draft);
 	await composer.dispatchEvent("compositionend", { data: "日本語" });
 	await composer.press("Enter");
-	await expect(transcript).toContainText("Remembering 日本語");
+	await expect(transcript.getByText("Remembering 日本語", { exact: true })).toHaveCount(1);
 	await expect(composer).toHaveValue("");
+	expect(submissions).toEqual([draft]);
 });
 
 test("keeps the latest reply above a growing composer when following the transcript", async ({

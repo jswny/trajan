@@ -1,23 +1,25 @@
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 
-const origin = "http://127.0.0.1:5177";
 const root = fileURLToPath(new URL("../../../", import.meta.url));
+const results = join(root, "test-results");
+mkdirSync(results, { recursive: true });
+const runDirectory = (process.env.TRAJAN_BROWSER_RUN_DIRECTORY ??= mkdtempSync(
+	join(results, "browser-"),
+));
 
 export default defineConfig({
 	testDir: ".",
-	outputDir: fileURLToPath(new URL("../../../test-results/", import.meta.url)),
-	use: { ...devices["iPhone 17 Pro"], baseURL: origin, browserName: "chromium" },
+	outputDir: join(runDirectory, "artifacts"),
+	use: { ...devices["iPhone 17 Pro"], browserName: "chromium" },
 	webServer: {
 		command:
-			"mkdir -p .cloudflare && exec npm run dev -- -- --mode browser-smoke --host 127.0.0.1 --port 5177 --strictPort > .cloudflare/browser-smoke.log 2>&1",
+			'npm run dev -- -- --mode browser-smoke --host 127.0.0.1 --port 0 --strictPort 2>&1 | tee "$TRAJAN_BROWSER_RUN_DIRECTORY/worker.log"',
 		cwd: root,
-		env: {
-			CLOUDFLARE_DEV_REGISTRY_PATH: fileURLToPath(
-				new URL("../../../.cloudflare/browser-smoke-registry", import.meta.url),
-			),
-		},
-		url: `${origin}/__browser-smoke/ready`,
+		env: { CLOUDFLARE_DEV_REGISTRY_PATH: join(runDirectory, "registry") },
+		wait: { stdout: /Local:\s+http:\/\/127\.0\.0\.1:(?<TRAJAN_BROWSER_PORT>\d+)\// },
 		gracefulShutdown: { signal: "SIGTERM", timeout: 5000 },
 	},
 });

@@ -19,7 +19,7 @@ export default {
 			return stub.fetch(request);
 		}
 		const action =
-			/^\/__browser-smoke\/chat\/(pause|pause-between-tools|pause-replay|pause-replay-edit|pause-replay-git|pause-remote-push|fail-inbox-wake|miss-schedule|defer-missed-schedule|release|crash|state)$/.exec(
+			/^\/__browser-smoke\/chat\/(pause|pause-between-tools|pause-replay|pause-replay-edit|pause-replay-git|pause-remote-push|fail-inbox-wake|miss-schedule|defer-missed-schedule|retry-inbox-wake|retry-missed-schedule|release|crash|state)$/.exec(
 				url.pathname,
 			)?.[1];
 		if (action && fixture && request.method === "POST") {
@@ -52,6 +52,11 @@ export default {
 					await stub.setScheduledFailure("before-admission");
 					await stub.failMissedScheduleReports(1);
 					return new Response(null, { status: 204 });
+				case "retry-inbox-wake":
+				case "retry-missed-schedule": {
+					const retry = action === "retry-inbox-wake" ? "inbox-wake" : "missed-schedule";
+					return new Response(null, { status: (await stub.makeRetryDue(retry)) ? 204 : 409 });
+				}
 				case "release":
 					await stub.release();
 					return new Response(null, { status: 204 });

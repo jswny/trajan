@@ -62,9 +62,11 @@ export function Composer<M>(
 	{ submit, stop }: { readonly submit: M; readonly stop: M },
 ) {
 	const { canSubmit, submitting, running, stopping, status } = screen;
+	// Gate the event before the command can run against a later connection state.
+	const readySubmit = status === "open" ? submit : undefined;
 	return h.form
 		.attr("aria-busy", String(submitting))
-		.on("submit", submit, { preventDefault: true })
+		.on("submit", () => readySubmit, { preventDefault: true })
 		.class("flex items-end gap-2")
 		.children(
 			h.div
@@ -85,7 +87,7 @@ export function Composer<M>(
 						.on(
 							"keydown",
 							({ key, shift, composing }) =>
-								key === "Enter" && !shift && !composing ? submit : undefined,
+								key === "Enter" && !shift && !composing ? readySubmit : undefined,
 							{ preventDefault: true },
 						),
 				),

@@ -728,6 +728,33 @@ export default async function () {
 		return this.ctx.storage.put("inbox-wake-faults", attempts);
 	}
 
+	async makeRetryDue(retry: "inbox-wake" | "missed-schedule") {
+		const { storage } = this.ctx;
+		if (retry === "inbox-wake" && storage.kv.get("harness-inbox:wake-backoff") === undefined) {
+			return false;
+		}
+		const [capability, fn] =
+			retry === "inbox-wake"
+				? ["harness-inbox", "wake"]
+				: ["turn-schedules", "report-missed-scheduled-turn"];
+		const now = Date.now();
+		// Move a persisted retry deadline forward and let the normal alarm dispatch it.
+		const jobs = storage.sql
+			.exec(
+				"UPDATE cf_agents_jobs SET time = ? WHERE capability = ? AND fn = ? AND time > ? RETURNING id",
+				now,
+				capability,
+				fn,
+				now,
+			)
+			.toArray();
+		if (jobs.length === 0) {
+			return false;
+		}
+		await this.lifecycle.rearmAlarm();
+		return true;
+	}
+
 	onRequest(request: Request) {
 		return Effect.runPromise(this.chatRequest(request));
 	}
