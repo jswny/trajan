@@ -1,25 +1,14 @@
-import { codeModeError, defineTool } from "@trajan/code-mode";
-import { TurnSubmission } from "@trajan/harness";
-import type { TurnIoError } from "@trajan/harness";
+import { TurnIoError, TurnSubmission } from "@trajan/harness";
 import { LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJob, LifecycleJobContext } from "agents/lifecycle";
-import { Clock, DateTime, Effect, Schema, Semaphore } from "effect";
+import { Clock, DateTime, Effect, Schema } from "effect";
 import { nextWeeklyRun, ScheduledTurn } from "./schedule-plan";
 
-const ListInput = Schema.NullOr(Schema.Struct({ offset: Schema.optionalKey(Schema.Natural) }));
-const CancelInput = Schema.Struct({ id: Schema.NonEmptyString });
-const Schedule = Schema.Struct({
-	...ScheduledTurn.fields,
-	id: Schema.String,
-	nextRunAt: Schema.String,
-});
 const MissedOccurrence = Schema.Struct({
 	scheduleId: Schema.NonEmptyString,
 	scheduledFor: Schema.Natural,
 	submission: TurnSubmission,
 });
-// Return full prompts while keeping each list result within Code Mode's value limit.
-const pageSize = 5;
 const scheduleJob = "submit-scheduled-turn";
 const reportJob = "report-missed-scheduled-turn";
 const reportRetryDelayMs = 30_000;
@@ -55,14 +44,6 @@ function describe(job: LifecycleJob, { prompt, when }: typeof ScheduledTurn.Type
 	};
 }
 
-export const scheduleInstructions = [
-	"Scheduling tools are exported by codemode:tools.",
-	"scheduleTurn({ prompt, when: { type: 'once', at } }) schedules a turn at an ISO 8601 time with a UTC offset or Z. For relative times use await now() from codemode:runtime.",
-	"scheduleTurn({ prompt, when: { type: 'weekly', days, time, timeZone } }) repeats on the selected days (sun, mon, tue, wed, thu, fri, sat) at HH:MM in an IANA time zone.",
-	"listSchedules() lists upcoming schedules. Pass { offset: nextOffset } for more. cancelSchedule({ id }) stops future occurrences of that schedule.",
-	"Create or cancel schedules only when the user asks. Ask if the schedule's time zone is unclear. Scheduled results appear in this chat.",
-].join("\n");
-
 export class TurnSchedules extends LifecycleCapability {
 	constructor(
 		private readonly submit: (
@@ -76,86 +57,69 @@ export class TurnSchedules extends LifecycleCapability {
 		super("turn-schedules");
 	}
 
-	readonly tools = {
-		scheduleTurn: defineTool({
-			// The Lifecycle job and its Code Mode receipt share the Durable Object database.
-			replay: "atomic",
-			mutationLock: Semaphore.makeUnsafe(1),
-			input: ScheduledTurn,
-			output: Schedule,
-			run: Effect.fnUntraced(function* (
-				this: TurnSchedules,
-				plan: typeof ScheduledTurn.Type,
-				{ callId, signal }: { callId: string; signal: AbortSignal },
-			) {
-				const digest = yield* Effect.tryPromise(() =>
-					crypto.subtle.digest("SHA-256", new TextEncoder().encode(callId)),
-				);
-				const id = Array.from(new Uint8Array(digest), (byte) =>
-					byte.toString(16).padStart(2, "0"),
-				).join("");
-				const found = this.lifecycle.jobs.get(id);
-				if (found) {
-					yield* Effect.tryPromise(() => this.lifecycle.jobs.rearm());
-					return describe(found, plan);
-				}
-				const now = yield* Clock.currentTimeMillis;
-				const time =
-					plan.when.type === "once"
-						? DateTime.toEpochMillis(
-								yield* Schema.decodeEffect(Schema.DateTimeUtcFromString)(plan.when.at),
-							)
-						: nextWeeklyRun(plan.when, now);
-				if (time <= now) {
-					return yield* codeModeError("Choose a future time for a one-time schedule.");
-				}
-				const job = yield* Effect.tryPromise(() => {
-					signal.throwIfAborted();
-					return this.lifecycle.jobs.push({ id, fn: scheduleJob, time, payload: plan });
-				});
-				return describe(job, plan);
-			}).bind(this),
-		}),
-		listSchedules: defineTool({
-			replay: "safe",
-			input: ListInput,
-			output: Schema.Struct({
-				schedules: Schema.Array(Schedule),
-				nextOffset: Schema.NullOr(Schema.Int),
-			}),
-			run: Effect.fnUntraced(function* (this: TurnSchedules, input: typeof ListInput.Type) {
-				const { offset = 0 } = input ?? {};
-				const jobs = this.lifecycle.jobs.list().filter(({ fn }) => fn === scheduleJob);
-				const schedules = yield* Effect.forEach(jobs.slice(offset, offset + pageSize), (job) =>
-					Schema.decodeUnknownEffect(ScheduledTurn)(job.payload).pipe(
-						Effect.map((plan) => describe(job, plan)),
-					),
-				);
-				return {
-					schedules,
-					nextOffset: offset + pageSize < jobs.length ? offset + pageSize : null,
-				};
-			}).bind(this),
-		}),
-		cancelSchedule: defineTool({
-			replay: "safe",
-			input: CancelInput,
-			output: Schema.Struct({ id: Schema.String, status: Schema.Literal("inactive") }),
-			run: Effect.fnUntraced(function* (
-				this: TurnSchedules,
-				{ id }: typeof CancelInput.Type,
-				{ signal }: { signal: AbortSignal },
-			) {
-				yield* Effect.tryPromise(async () => {
-					signal.throwIfAborted();
-					if (this.lifecycle.jobs.get(id)?.fn === scheduleJob) {
-						await this.lifecycle.jobs.cancel(id);
-					}
-				});
-				return { id, status: "inactive" as const };
-			}).bind(this),
-		}),
-	};
+	readonly create = Effect.fnUntraced(function* (
+		this: TurnSchedules,
+		plan: typeof ScheduledTurn.Type,
+		callId: string,
+		signal: AbortSignal,
+	) {
+		const digest = yield* Effect.tryPromise(() =>
+			crypto.subtle.digest("SHA-256", new TextEncoder().encode(callId)),
+		);
+		const id = Array.from(new Uint8Array(digest), (byte) =>
+			byte.toString(16).padStart(2, "0"),
+		).join("");
+		const found = this.lifecycle.jobs.get(id);
+		if (found) {
+			yield* Effect.tryPromise(() => this.lifecycle.jobs.rearm());
+			return describe(found, plan);
+		}
+		const now = yield* Clock.currentTimeMillis;
+		const time =
+			plan.when.type === "once"
+				? DateTime.toEpochMillis(
+						yield* Schema.decodeEffect(Schema.DateTimeUtcFromString)(plan.when.at),
+					)
+				: nextWeeklyRun(plan.when, now);
+		if (time <= now) {
+			return yield* new TurnIoError({
+				operation: "create scheduled turn",
+				cause: "Choose a future time for a one-time schedule.",
+				message: "Choose a future time for a one-time schedule.",
+			});
+		}
+		const job = yield* Effect.tryPromise(() => {
+			signal.throwIfAborted();
+			return this.lifecycle.jobs.push({ id, fn: scheduleJob, time, payload: plan });
+		});
+		return describe(job, plan);
+	}).bind(this);
+
+	readonly list = Effect.fnUntraced(function* (this: TurnSchedules, offset: number, limit: number) {
+		const jobs = this.lifecycle.jobs.list().filter(({ fn }) => fn === scheduleJob);
+		const schedules = yield* Effect.forEach(jobs.slice(offset, offset + limit), (job) =>
+			Schema.decodeUnknownEffect(ScheduledTurn)(job.payload).pipe(
+				Effect.map((plan) => describe(job, plan)),
+			),
+		);
+		return {
+			schedules,
+			nextOffset: offset + limit < jobs.length ? offset + limit : null,
+		};
+	}).bind(this);
+
+	readonly cancel = Effect.fnUntraced(function* (
+		this: TurnSchedules,
+		id: string,
+		signal: AbortSignal,
+	) {
+		yield* Effect.tryPromise(async () => {
+			signal.throwIfAborted();
+			if (this.lifecycle.jobs.get(id)?.fn === scheduleJob) {
+				await this.lifecycle.jobs.cancel(id);
+			}
+		});
+	}).bind(this);
 
 	readonly #advance = Effect.fnUntraced(function* (
 		when: typeof ScheduledTurn.Type.when,
@@ -176,7 +140,12 @@ export class TurnSchedules extends LifecycleCapability {
 		// The queue keeps the same due time through retries of this occurrence.
 		const receipt = yield* this.submit(occurrence(job, plan.prompt));
 		if (receipt.runId === null) {
-			return yield* codeModeError(receipt.error ?? "Scheduled turn was rejected.");
+			const message = receipt.error ?? "Scheduled turn was rejected.";
+			return yield* new TurnIoError({
+				operation: "submit scheduled turn",
+				cause: message,
+				message,
+			});
 		}
 		return yield* this.#advance(plan.when, job.time);
 	});

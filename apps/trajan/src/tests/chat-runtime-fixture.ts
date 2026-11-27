@@ -14,6 +14,7 @@ import type { TurnModelEvent, TurnModelResponse } from "@trajan/harness";
 import { Cause, Effect, Exit, Layer, Option, Predicate, Schema, Stream } from "effect";
 import { TrajanChatObject } from "../chat/worker-host";
 import { createChatExec } from "../chat/exec";
+import { createScheduleTools, scheduleInstructions } from "../schedule-tools";
 import { createTrajanWorkspace, workspaceToolset } from "../workspace";
 import {
 	compactReference,
@@ -113,6 +114,7 @@ export class ChatTestObject extends TrajanChatObject {
 	readonly #instance = crypto.randomUUID();
 	#atomicFault: PausePoint | undefined;
 	readonly #workspace = createTrajanWorkspace(this.ctx);
+	readonly #scheduleTools = createScheduleTools(this.schedules);
 	protected readonly chatExec = this.#createTools();
 	readonly #responses = createOpenAiResponsesFixture(
 		this.chatExec.declaration,
@@ -169,86 +171,80 @@ export class ChatTestObject extends TrajanChatObject {
 				),
 		});
 		const branch = faultBeforeCommit(git.branch, "during-replay-git");
-		const scheduleTools = this.schedules.tools;
+		const scheduleTools = this.#scheduleTools;
 		const schedule = faultBeforeCommit(scheduleTools.scheduleTurn, "during-replay-schedule");
-		return createChatExec(
-			this.env.LOADER,
-			storage,
-			{
-				...scheduleTools,
-				scheduleTurn: {
-					...schedule,
-					run: (input, context) =>
-						scheduleTools.listSchedules.run(null, context).pipe(
-							Effect.tap((before) =>
-								Effect.sync(() => storage.kv.put("schedules-before-create", before)),
+		return createChatExec(this.env.LOADER, storage, {
+			instructions: `${instructions}\n${scheduleInstructions}`,
+			catalog: {
+				"codemode:tools": {
+					...files,
+					...scheduleTools,
+					scheduleTurn: {
+						...schedule,
+						run: (input, context) =>
+							scheduleTools.listSchedules.run(null, context).pipe(
+								Effect.tap((before) =>
+									Effect.sync(() => storage.kv.put("schedules-before-create", before)),
+								),
+								Effect.andThen(schedule.run(input, context)),
 							),
-							Effect.andThen(schedule.run(input, context)),
-						),
-				},
-			},
-			{
-				instructions,
-				catalog: {
-					"codemode:tools": {
-						...files,
-						write: faultBeforeCommit(files.write, "during-replay-write"),
-						edit: faultBeforeCommit(files.edit, "during-replay-edit"),
-						delete: faultBeforeCommit(files.delete, "during-replay-delete"),
-						read_first: read("first"),
-						read_second: read("second"),
-						wait_for_restart: {
-							replay: "safe",
-							run: (_input, { callId, signal }) =>
-								Effect.tryPromise({
-									try: async () => {
-										const key = `fixture-wait:${callId}`;
-										if (!storage.kv.get(key)) {
-											storage.kv.put(key, true);
-											await storage.put("pausedAt", "waiting-for-restart");
-											signal.throwIfAborted();
-											await new Promise<void>((resolve) => {
-												signal.addEventListener("abort", () => resolve(), { once: true });
-											});
-											signal.throwIfAborted();
-										}
-										return null;
-									},
-									catch: codeModeError,
-								}),
-						},
 					},
-					"codemode:git": {
-						...git,
-						push: {
-							...git.push,
-							run: (_input, { signal }) =>
-								Effect.tryPromise({
-									try: async () => {
-										storage.kv.put(
-											"git-push-attempts",
-											(storage.kv.get<number>("git-push-attempts") ?? 0) + 1,
-										);
-										await this.#pauseAt("during-remote-push", signal);
-										return null;
-									},
-									catch: codeModeError,
-								}),
-						},
-						branch: {
-							...branch,
-							run: (input, context) =>
-								Effect.sync(() => {
+					write: faultBeforeCommit(files.write, "during-replay-write"),
+					edit: faultBeforeCommit(files.edit, "during-replay-edit"),
+					delete: faultBeforeCommit(files.delete, "during-replay-delete"),
+					read_first: read("first"),
+					read_second: read("second"),
+					wait_for_restart: {
+						replay: "safe",
+						run: (_input, { callId, signal }) =>
+							Effect.tryPromise({
+								try: async () => {
+									const key = `fixture-wait:${callId}`;
+									if (!storage.kv.get(key)) {
+										storage.kv.put(key, true);
+										await storage.put("pausedAt", "waiting-for-restart");
+										signal.throwIfAborted();
+										await new Promise<void>((resolve) => {
+											signal.addEventListener("abort", () => resolve(), { once: true });
+										});
+										signal.throwIfAborted();
+									}
+									return null;
+								},
+								catch: codeModeError,
+							}),
+					},
+				},
+				"codemode:git": {
+					...git,
+					push: {
+						...git.push,
+						run: (_input, { signal }) =>
+							Effect.tryPromise({
+								try: async () => {
 									storage.kv.put(
-										"git-branch-attempts",
-										(storage.kv.get<number>("git-branch-attempts") ?? 0) + 1,
+										"git-push-attempts",
+										(storage.kv.get<number>("git-push-attempts") ?? 0) + 1,
 									);
-								}).pipe(Effect.andThen(branch.run(input, context))),
-						},
+									await this.#pauseAt("during-remote-push", signal);
+									return null;
+								},
+								catch: codeModeError,
+							}),
+					},
+					branch: {
+						...branch,
+						run: (input, context) =>
+							Effect.sync(() => {
+								storage.kv.put(
+									"git-branch-attempts",
+									(storage.kv.get<number>("git-branch-attempts") ?? 0) + 1,
+								);
+							}).pipe(Effect.andThen(branch.run(input, context))),
 					},
 				},
 			},
-		);
+		});
 	}
 
 	protected override submitEffect(input: unknown) {
@@ -808,12 +804,14 @@ export default async function () {
 
 	workspaceTool(name: string, input: Schema.Json, recovering = false): Promise<string> {
 		const runId = crypto.randomUUID();
-		const tools = createChatExec(
-			this.env.LOADER,
-			this.ctx.storage,
-			this.schedules.tools,
-			workspaceToolset(this.#workspace),
-		);
+		const { catalog, instructions } = workspaceToolset(this.#workspace);
+		const tools = createChatExec(this.env.LOADER, this.ctx.storage, {
+			catalog: {
+				...catalog,
+				"codemode:tools": { ...catalog["codemode:tools"], ...this.#scheduleTools },
+			},
+			instructions: `${instructions}\n${scheduleInstructions}`,
+		});
 		return Effect.runPromise(
 			tools.service
 				.execute(

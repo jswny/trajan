@@ -1,12 +1,11 @@
 import { describeTools } from "@trajan/code-mode";
 import { clearCodeModeRun, createCloudflareCodeMode } from "@trajan/code-mode-cloudflare";
-import type { CodeModeActivity, CodeModeCatalog, CodeModeTool } from "@trajan/code-mode";
+import type { CodeModeActivity, CodeModeCatalog } from "@trajan/code-mode";
 import { completedToolResult, TurnIoError } from "@trajan/harness";
 import type { ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
 import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
 import { execName, ExecInput } from "../exec-contract";
-import { scheduleInstructions } from "../turn-schedules";
 import { RECENT_TOOL_CALLS, toolActivity, uncertainToolEffects } from "./tool-activity";
 import type { ToolActivity } from "./tool-presentation";
 
@@ -63,14 +62,9 @@ function recordExecution(
 export function createChatExec(
 	loader: WorkerLoader,
 	storage: DurableObjectStorage,
-	scheduleTools: Readonly<Record<string, CodeModeTool>>,
 	{ catalog, instructions }: { catalog: CodeModeCatalog; instructions: string },
 ) {
-	const registry = {
-		...catalog,
-		"codemode:tools": { ...catalog["codemode:tools"], ...scheduleTools },
-	};
-	const codeMode = createCloudflareCodeMode(loader, storage, registry);
+	const codeMode = createCloudflareCodeMode(loader, storage, catalog);
 	const execute = Effect.fn("chat.exec")(
 		function* (...[call, attempt, publishActivity]: Parameters<TurnTools["Service"]["execute"]>) {
 			if (call.name !== Exec.name) {
@@ -159,8 +153,7 @@ export function createChatExec(
 				"Tools execute in call order. If a tool throws with code 'interrupted', inspect its effects before retrying. Base replay-sensitive branches and arguments on stable input and tool results.",
 				"Write large results to a workspace file and return the path.",
 				instructions,
-				scheduleInstructions,
-				...describeTools(registry),
+				...describeTools(catalog),
 			].join("\n"),
 			parameters: { ...Tool.getJsonSchema(Exec), additionalProperties: false },
 		},

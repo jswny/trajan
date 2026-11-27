@@ -9,6 +9,7 @@ import { TrajanChatObject } from "./chat/worker-host";
 import { createChatExec } from "./chat/exec";
 import { browserViewHeaders, createLiveBrowser } from "./live-browser";
 import { modelConfig } from "./model-config";
+import { createScheduleTools, scheduleInstructions } from "./schedule-tools";
 import { createTrajanWorkspace, WORKSPACE_PROMPT, workspaceToolset } from "./workspace";
 
 class ChatRouteError extends Data.TaggedError("ChatRouteError")<{ readonly cause: unknown }> {}
@@ -20,12 +21,7 @@ export class Trajan extends TrajanChatObject {
 	readonly #liveBrowser = createLiveBrowser(this.ctx.storage, this.#browser, this.env.BROWSER, () =>
 		this.publishBrowserAvailability(),
 	);
-	protected readonly chatExec = createChatExec(
-		this.env.LOADER,
-		this.ctx.storage,
-		this.schedules.tools,
-		this.#toolset(),
-	);
+	protected readonly chatExec = createChatExec(this.env.LOADER, this.ctx.storage, this.#toolset());
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -38,9 +34,13 @@ export class Trajan extends TrajanChatObject {
 		return {
 			catalog: {
 				...workspace.catalog,
-				"codemode:tools": { ...workspace.catalog["codemode:tools"], ...browser.tools },
+				"codemode:tools": {
+					...workspace.catalog["codemode:tools"],
+					...browser.tools,
+					...createScheduleTools(this.schedules),
+				},
 			},
-			instructions: `${workspace.instructions}\n${browser.instructions}`,
+			instructions: `${workspace.instructions}\n${browser.instructions}\n${scheduleInstructions}`,
 		};
 	}
 
