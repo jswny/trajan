@@ -1,4 +1,4 @@
-import { clearCodeModeRun } from "@trajan/code-mode";
+import { clearCodeModeRun } from "@trajan/code-mode-cloudflare";
 import type { CodeModeTool } from "@trajan/code-mode";
 import { createCodeModeFixture } from "./code-mode-fixture";
 import {

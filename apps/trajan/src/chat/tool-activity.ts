@@ -1,4 +1,4 @@
-import { clearCodeModeRun } from "@trajan/code-mode";
+import { clearCodeModeRun } from "@trajan/code-mode-cloudflare";
 import type { CodeModeActivity } from "@trajan/code-mode";
 import { ToolContent } from "@trajan/harness";
 import type { UncertainToolEffect } from "@trajan/harness";

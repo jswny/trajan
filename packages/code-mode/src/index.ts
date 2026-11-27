@@ -1,7 +1,5 @@
-import { RpcTarget } from "cloudflare:workers";
 import { Cause, Clock, Data, Effect, Exit, Fiber, Option, Random, Schema } from "effect";
 import type { Semaphore } from "effect";
-import { loadGuest } from "./guest";
 
 export class CodeModeError extends Data.TaggedError("CodeModeError")<{
 	readonly message: string;
@@ -13,7 +11,7 @@ export class CodeModeRejected extends Data.TaggedError("CodeModeRejected")<{
 
 type ToolPolicy =
 	| { readonly replay: "safe" | "unsafe" }
-	// Atomic tools may mutate only this Durable Object's storage.
+	// Atomic tools may mutate only storage shared with the execution journal.
 	| { readonly replay: "atomic"; readonly mutationLock: Semaphore.Semaphore };
 
 type ToolContext<D = Schema.Json> = {
@@ -112,9 +110,9 @@ const ToolCall = Schema.Struct({
 
 type ToolCall = typeof ToolCall.Type;
 type ToolNamespace = Readonly<Record<string, CodeModeTool>>;
-type Catalog = Partial<Record<`codemode:${string}`, ToolNamespace>>;
+export type CodeModeCatalog = Partial<Record<`codemode:${string}`, ToolNamespace>>;
 
-export function describeTools(catalog: Catalog) {
+export function describeTools(catalog: CodeModeCatalog) {
 	return Object.entries(catalog).flatMap(([module, tools]) =>
 		Object.entries(tools ?? {}).flatMap(([name, { parameters, description }]) =>
 			parameters === undefined
@@ -163,46 +161,58 @@ const ToolReply = Schema.Union([
 	Schema.Struct({ status: Schema.Literal("returned"), value: boundedJson }),
 	Schema.Struct({ status: Schema.Literals(["interrupted", "failed"]), message: Schema.String }),
 ]);
-type ToolReply = typeof ToolReply.Type;
-const Entry = Schema.Struct({
+export type ToolReply = typeof ToolReply.Type;
+const CallCheckpoint = Schema.Struct({
 	request: Schema.NonEmptyString,
 	replay: Schema.Literals(["safe", "unsafe", "atomic"]),
 	reply: Schema.optionalKey(ToolReply),
 	details: Schema.optionalKey(boundedJson),
 });
-type Entry = typeof Entry.Type;
-const Run = Schema.Struct({
+export type CallCheckpoint = typeof CallCheckpoint.Type;
+const RunCheckpoint = Schema.Struct({
 	source: Schema.String,
 	result: Schema.optionalKey(Schema.Struct({ value: boundedJson })),
 });
-type Run = typeof Run.Type;
-const decodeEntry = Schema.decodeUnknownOption(Schema.UndefinedOr(Entry));
+export type RunCheckpoint = typeof RunCheckpoint.Type;
+export const decodeCallCheckpoint = Schema.decodeUnknownOption(Schema.UndefinedOr(CallCheckpoint));
 const decodeDetails = Schema.decodeUnknownOption(boundedJson);
-const decodeRun = Schema.decodeUnknownEffect(Schema.UndefinedOr(Run));
-const readRun = Schema.decodeUnknownOption(Run);
+export const decodeRunCheckpoint = Schema.decodeUnknownOption(Schema.UndefinedOr(RunCheckpoint));
 const readCall = Schema.decodeUnknownOption(Schema.fromJsonString(ToolCall));
 
-function runPrefix(scope: string) {
-	return `code-mode:${encodeURIComponent(scope)}:`;
+type CallOutcome = {
+	readonly reply: ToolReply;
+	readonly committed?: CallCheckpoint | undefined;
+};
+
+export interface CodeModeJournal {
+	/** Stable across restarts and used to correlate tool activity with its receipt. */
+	readonly callId: (index: number) => string;
+	readonly readRun: () => Option.Option<RunCheckpoint | undefined>;
+	readonly readCall: (index: number) => Option.Option<CallCheckpoint | undefined>;
+	readonly start: (source: string) => void;
+	/** Both intent and outcome records are durable before this effect succeeds. */
+	readonly recordCall: (
+		index: number,
+		checkpoint: CallCheckpoint,
+	) => Effect.Effect<void, CodeModeError>;
+	readonly finish: (checkpoint: RunCheckpoint) => Effect.Effect<void, CodeModeError>;
+	/** Run against the journal's storage. Commit the mutation and receipt together,
+	 * or roll back when the callback returns no receipt or execution fails. */
+	readonly commitCall: (
+		index: number,
+		signal: AbortSignal,
+		invoke: Effect.Effect<ToolReply>,
+		receipt: (reply: ToolReply) => CallCheckpoint | undefined,
+	) => Effect.Effect<CallOutcome, CodeModeError>;
 }
 
-export function clearCodeModeRun(storage: DurableObjectStorage, scope: string) {
-	for (const [key] of Array.from(storage.kv.list({ prefix: runPrefix(scope) }))) {
-		storage.kv.delete(key);
-	}
-}
-
-class HostTools extends RpcTarget {
-	readonly #call: (call: unknown) => Promise<ToolReply>;
-
-	constructor(call: (call: unknown) => Promise<ToolReply>) {
-		super();
-		this.#call = call;
-	}
-
-	call(call: unknown) {
-		return this.#call(call);
-	}
+export interface CodeModeHost {
+	readonly openJournal: (scope: string, executionId: string) => CodeModeJournal;
+	readonly runGuest: (
+		source: string,
+		namespaces: ReadonlyMap<string, ReadonlyArray<string>>,
+		call: (input: unknown) => Promise<ToolReply>,
+	) => Promise<Schema.Json>;
 }
 
 const activity = (
@@ -233,11 +243,7 @@ const replyStatus = (tool: CodeModeTool | undefined, reply: ToolReply) =>
 			: "completed"
 		: reply.status;
 
-export function createCodeMode(
-	loader: WorkerLoader,
-	storage: DurableObjectStorage,
-	catalog: Catalog,
-) {
+export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 	const toolsByModule = new Map<string, ToolNamespace>(
 		Object.entries({ ...catalog, [runtimeModule]: runtimeTools }),
 	);
@@ -252,12 +258,12 @@ export function createCodeMode(
 	};
 
 	function readExecution(id: string, scope: string) {
-		const key = `${runPrefix(scope)}${encodeURIComponent(id)}`;
-		const saved = Option.getOrUndefined(readRun(storage.kv.get(key)));
+		const journal = host.openJournal(scope, id);
+		const saved = Option.getOrUndefined(journal.readRun());
 		const calls: Array<CodeModeActivity> = [];
 		for (let index = 0; index < maxCalls; index++) {
-			const callId = `${key}:call:${index}`;
-			const entry = Option.getOrUndefined(decodeEntry(storage.kv.get(callId)));
+			const callId = journal.callId(index);
+			const entry = Option.getOrUndefined(journal.readCall(index));
 			if (!entry) {
 				break;
 			}
@@ -293,11 +299,14 @@ export function createCodeMode(
 			Effect.mapError((error) => new CodeModeRejected({ message: error.message })),
 		);
 		const context = yield* Effect.context<never>();
-		const key = `${runPrefix(options.scope ?? id)}${encodeURIComponent(id)}`;
-		const entries = `${key}:call:`;
-		const saved = yield* decodeRun(storage.kv.get(key)).pipe(
-			Effect.mapError(() => new CodeModeError({ message: "Invalid Code Mode run checkpoint." })),
-		);
+		const runScope = options.scope ?? id;
+		const key = JSON.stringify([runScope, id]);
+		const journal = host.openJournal(runScope, id);
+		const checkpoint = journal.readRun();
+		if (Option.isNone(checkpoint)) {
+			return yield* new CodeModeError({ message: "Invalid Code Mode run checkpoint." });
+		}
+		const saved = checkpoint.value;
 		if (options.recovering && !saved) {
 			return yield* new CodeModeError({ message: "The Code Mode checkpoint is missing." });
 		}
@@ -326,7 +335,6 @@ export function createCodeMode(
 				let inFlight = false;
 				let next = 0;
 				let divergence: string | undefined;
-				const flush = Effect.tryPromise({ try: () => storage.sync(), catch: ioError });
 				const rejectReplay = (index: number) => {
 					divergence = `Code Mode replay diverged at call ${index + 1}.`;
 					return failed(divergence);
@@ -337,7 +345,7 @@ export function createCodeMode(
 						return failed(divergence ?? "Code Mode cannot admit this call.");
 					}
 					const index = next;
-					const callId = `${entries}${index}`;
+					const callId = journal.callId(index);
 					const input = yield* Schema.decodeUnknownEffect(ToolCall)(raw).pipe(
 						Effect.mapError(ioError),
 					);
@@ -345,7 +353,7 @@ export function createCodeMode(
 						yield* Schema.decodeEffect(boundedJson)(input).pipe(Effect.mapError(ioError)),
 					);
 					const tool = getTool(input);
-					const stored = decodeEntry(storage.kv.get(callId));
+					const stored = journal.readCall(index);
 					if (Option.isNone(stored)) {
 						divergence = `Invalid Code Mode checkpoint for call ${index + 1}.`;
 						return failed(divergence);
@@ -381,13 +389,12 @@ export function createCodeMode(
 						return prior.reply;
 					}
 
-					const entry: Entry = prior ?? { request, replay: tool.replay };
+					const entry: CallCheckpoint = prior ?? { request, replay: tool.replay };
 					inFlight = true;
 					return yield* Effect.gen(function* () {
 						if (!prior) {
 							// Flush the intent before the tool can change the workspace.
-							storage.kv.put(callId, entry);
-							yield* flush;
+							yield* journal.recordCall(index, entry);
 						}
 						if (prior?.replay !== "unsafe") {
 							yield* publish("running");
@@ -411,41 +418,29 @@ export function createCodeMode(
 								onFailure: (error) => failed(errorMessage(error)),
 							}),
 						);
-						const save = (reply: ToolReply): Entry => {
-							const checkpoint = {
-								...entry,
-								reply,
-								...(reply.status === "returned" && details !== undefined && { details }),
-							};
-							storage.kv.put(callId, checkpoint);
-							return checkpoint;
-						};
-						// Take the workspace lock before entering the storage transaction.
+						const checkpoint = (reply: ToolReply): CallCheckpoint => ({
+							...entry,
+							reply,
+							...(reply.status === "returned" && details !== undefined && { details }),
+						});
 						const attempt =
 							tool.replay === "atomic"
 								? tool.mutationLock.withPermit(
-										Effect.tryPromise({
-											try: () =>
-												storage.transaction(async (txn) => {
-													signal.throwIfAborted();
-													const reply = await Effect.runPromiseWith(context)(invoke);
-													// A failure can be returned after a partial mutation.
-													if (
-														!open ||
-														signal.aborted ||
-														reply.status !== "returned" ||
-														tool.isError?.(reply.value)
-													) {
-														txn.rollback();
-														details = undefined;
-														return { reply, committed: undefined };
-													}
-													return { reply, committed: save(reply) };
-												}),
-											catch: ioError,
+										journal.commitCall(index, signal, invoke, (reply) => {
+											// A tool can report a failure after mutating its local storage.
+											if (
+												!open ||
+												signal.aborted ||
+												reply.status !== "returned" ||
+												tool.isError?.(reply.value)
+											) {
+												details = undefined;
+												return undefined;
+											}
+											return checkpoint(reply);
 										}),
 									)
-								: invoke.pipe(Effect.map((reply) => ({ reply, committed: undefined })));
+								: invoke.pipe(Effect.map((reply): CallOutcome => ({ reply })));
 						// A mutation can finish after abort. Keep ownership until it settles.
 						const scopedInvoke =
 							tool.replay === "safe"
@@ -462,9 +457,11 @@ export function createCodeMode(
 						if (!open || signal.aborted) {
 							return yield* Effect.interrupt;
 						}
-						const checkpoint = committed ?? save(reply);
-						yield* flush;
-						yield* publishReply(reply, checkpoint.details);
+						const receipt = committed ?? checkpoint(reply);
+						if (!committed) {
+							yield* journal.recordCall(index, receipt);
+						}
+						yield* publishReply(reply, receipt.details);
 						return reply;
 					}).pipe(
 						Effect.ensuring(
@@ -477,10 +474,9 @@ export function createCodeMode(
 
 				try {
 					if (!saved) {
-						storage.kv.put(key, { source } satisfies Run);
+						journal.start(source);
 					}
-					const guest = loadGuest<HostTools>(loader, source, namespaces);
-					const host = new HostTools(async (raw) => {
+					const value = await host.runGuest(source, namespaces, async (raw) => {
 						const exit = await Effect.runPromiseExitWith(context)(
 							Effect.forkIn(call(raw), scope).pipe(Effect.flatMap(Fiber.join)),
 							{ signal },
@@ -493,9 +489,12 @@ export function createCodeMode(
 						}
 						throw Cause.squash(exit.cause);
 					});
-					const value = await guest.run(host);
 					signal.throwIfAborted();
-					if (divergence || storage.kv.get(`${entries}${next}`) !== undefined || inFlight) {
+					if (
+						divergence ||
+						!Option.exists(journal.readCall(next), (entry) => entry === undefined) ||
+						inFlight
+					) {
 						throw new CodeModeError({
 							message: divergence ?? "Code Mode ended before reaching its recovery checkpoint.",
 						});
@@ -510,15 +509,7 @@ export function createCodeMode(
 			Effect.timeout("30 seconds"),
 			Effect.flatMap(Schema.decodeEffect(boundedJson)),
 			Effect.mapError(ioError),
-			Effect.tap((value) =>
-				Effect.tryPromise({
-					try: async () => {
-						storage.kv.put(key, { source, result: { value } } satisfies Run);
-						await storage.sync();
-					},
-					catch: ioError,
-				}),
-			),
+			Effect.tap((value) => journal.finish({ source, result: { value } })),
 		);
 	}, Effect.scoped);
 

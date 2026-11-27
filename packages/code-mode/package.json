@@ -4,9 +4,14 @@
 	"private": true,
 	"type": "module",
 	"exports": "./src/index.ts",
+	"scripts": {
+		"test": "vp test run"
+	},
 	"devDependencies": {
-		"@cloudflare/workers-types": "^5.20261014.1",
-		"effect": "4.1.6"
+		"@effect/vitest": "4.1.6",
+		"effect": "4.1.6",
+		"vite-plus": "1.8.0",
+		"vitest": "5.1.1"
 	},
 	"peerDependencies": {
 		"effect": "^4.1.6"

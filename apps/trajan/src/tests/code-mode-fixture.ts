@@ -1,6 +1,7 @@
 import type { Workspace } from "@cloudflare/computer";
 import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
-import { CodeModeError, createCodeMode } from "@trajan/code-mode";
+import { CodeModeError } from "@trajan/code-mode";
+import { createCloudflareCodeMode } from "@trajan/code-mode-cloudflare";
 import type { CodeModeTool } from "@trajan/code-mode";
 import { Effect, Schema } from "effect";
 import { browserToolset } from "../browser";
@@ -167,7 +168,7 @@ export function createCodeModeFixture(
 	} satisfies Record<string, Record<string, CodeModeTool>>;
 
 	return {
-		run: createCodeMode(loader, storage, tools).run,
+		run: createCloudflareCodeMode(loader, storage, tools).run,
 		async seed() {
 			await workspace.fs.mkdir(dir, { recursive: true });
 			await workspace.fs.writeFile(path, "seed");

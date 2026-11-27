@@ -1,0 +1,17 @@
+{
+	"name": "@trajan/code-mode-cloudflare",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"exports": "./src/index.ts",
+	"dependencies": {
+		"@trajan/code-mode": "0.1.0"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^5.20261014.1",
+		"effect": "4.1.6"
+	},
+	"peerDependencies": {
+		"effect": "^4.1.6"
+	}
+}

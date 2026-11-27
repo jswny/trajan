@@ -1,5 +1,6 @@
-import { createCodeMode, describeTools } from "@trajan/code-mode";
-import type { CodeModeActivity, CodeModeTool } from "@trajan/code-mode";
+import { describeTools } from "@trajan/code-mode";
+import { createCloudflareCodeMode } from "@trajan/code-mode-cloudflare";
+import type { CodeModeActivity, CodeModeCatalog, CodeModeTool } from "@trajan/code-mode";
 import { completedToolResult, TurnIoError } from "@trajan/harness";
 import type { ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
 import { Effect, Schema } from "effect";
@@ -44,16 +45,13 @@ export function createChatTools(
 	loader: WorkerLoader,
 	storage: DurableObjectStorage,
 	scheduleTools: Readonly<Record<string, CodeModeTool>>,
-	{
-		catalog,
-		instructions,
-	}: { catalog: Parameters<typeof createCodeMode>[2]; instructions: string },
+	{ catalog, instructions }: { catalog: CodeModeCatalog; instructions: string },
 ) {
 	const registry = {
 		...catalog,
 		"codemode:tools": { ...catalog["codemode:tools"], ...scheduleTools },
 	};
-	const codeMode = createCodeMode(loader, storage, registry);
+	const codeMode = createCloudflareCodeMode(loader, storage, registry);
 	const execute = Effect.fn("chat.exec")(
 		function* (...[call, attempt, publishActivity]: Parameters<TurnTools["Service"]["execute"]>) {
 			if (call.name !== Exec.name) {
