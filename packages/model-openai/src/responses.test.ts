@@ -1,19 +1,21 @@
-import { openAiTurnModel } from "@trajan/model-openai";
-import type { OpenAiResponsesTransport } from "@trajan/model-openai";
-import { Deferred, Effect, Exit, Fiber, Stream } from "effect";
+import { Deferred, Effect, Fiber, Stream } from "effect";
 import type { Schema } from "effect";
 import { TestClock } from "effect/testing";
 import { expect, test } from "vite-plus/test";
-import { openAiGatewayTransport } from "../chat/openai-gateway";
+import { openAiTurnModel } from "./index";
+import type { OpenAiResponsesTransport } from "./index";
+
+const fixtureOptions = {
+	model: "fixture",
+	reasoningEffort: "medium",
+	compactThreshold: 1000,
+	instructions: "Respond to the user.",
+	runtimeLabels: { outcome: "Recorded outcome", uncertainEffects: "Uncertain effects" },
+	tool: { name: "exec", description: "Run code.", parameters: {} },
+};
 
 function fixtureStream(transport: OpenAiResponsesTransport) {
-	return openAiTurnModel(transport, {
-		model: "fixture",
-		reasoningEffort: "medium",
-		compactThreshold: 1000,
-		instructions: "Respond to the user.",
-		tool: { name: "exec", description: "Run code.", parameters: {} },
-	}).stream([], { allowTools: false });
+	return openAiTurnModel(transport, fixtureOptions).stream([], { allowTools: false });
 }
 
 function eventResponse(body: BodyInit) {
@@ -31,87 +33,71 @@ function collectEvents(...events: ReadonlyArray<Schema.JsonObject>) {
 	return Effect.runPromise(stream.pipe(Stream.runCollect, Effect.result));
 }
 
-test("reports gateway request rejections as typed model failures", async () => {
-	const error = new Error("Gateway unavailable");
-	const stream = fixtureStream(openAiGatewayTransport({ run: () => Promise.reject(error) }));
-	expect(await Effect.runPromise(stream.pipe(Stream.runDrain, Effect.result))).toMatchObject({
-		_tag: "Failure",
-		failure: { _tag: "TurnModelError", message: error.message, cause: error },
-	});
-});
-
-test("aborts the gateway request while waiting for response headers", async () => {
-	const started = Promise.withResolvers<AbortSignal>();
-	const controller = new AbortController();
-	const stream = fixtureStream(
-		openAiGatewayTransport({
-			run: (_, options) => {
-				const signal = options?.signal;
-				if (!signal) {
-					throw new Error("Expected a gateway request signal.");
-				}
-				return new Promise<Response>((_, reject) => {
-					signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-					started.resolve(signal);
-				});
-			},
-		}),
-	);
-	const pending = Effect.runPromiseExit(Stream.runDrain(stream), { signal: controller.signal });
-	const signal = await started.promise;
-	expect(signal.aborted).toBe(false);
-	controller.abort();
-	expect(Exit.hasInterrupts(await pending)).toBe(true);
-	expect(signal.aborted).toBe(true);
-});
-
-test("keeps the gateway request alive through streaming and aborts it on interruption", async () => {
-	const started = Promise.withResolvers<AbortSignal>();
-	const firstDelta = Promise.withResolvers<void>();
-	const controller = new AbortController();
-	let bodyCancelled = false;
-	const stream = fixtureStream(
-		openAiGatewayTransport({
-			run: (_, options) => {
-				const signal = options?.signal;
-				if (!signal) {
-					throw new Error("Expected a gateway request signal.");
-				}
-				started.resolve(signal);
-				return Promise.resolve(
-					eventResponse(
-						new ReadableStream<Uint8Array>({
-							start(body) {
-								body.enqueue(
-									new TextEncoder().encode(
-										encodeEvent({
-											type: "response.output_text.delta",
-											item_id: "message",
-											delta: "Hello",
-										}),
-									),
-								);
-							},
-							cancel() {
-								bodyCancelled = true;
-							},
-						}),
-					),
+test("uses caller instructions and runtime labels in the Responses request", async () => {
+	const outcome = {
+		role: "runtime-outcome",
+		status: "failed",
+		text: "The scheduled turn was missed.",
+		request: "Check status.",
+		tools: [],
+	} as const;
+	const uncertain = { name: "send", message: "Check whether the request took effect." };
+	const call = {
+		type: "function_call",
+		call_id: "call_1",
+		name: "exec",
+		arguments: "{}",
+	};
+	const model = openAiTurnModel(
+		(body) =>
+			Effect.sync(() => {
+				expect(body.instructions).toBe(fixtureOptions.instructions);
+				expect(body.input).toEqual([
+					{
+						type: "message",
+						role: "user",
+						content: `Recorded outcome\n${JSON.stringify(outcome)}`,
+					},
+					call,
+					{
+						type: "function_call_output",
+						call_id: "call_1",
+						output: [
+							{ type: "input_text", text: `Uncertain effects\n${JSON.stringify([uncertain])}` },
+							{ type: "input_text", text: '"Done"' },
+						],
+					},
+				]);
+				return eventResponse(
+					encodeEvent({
+						type: "response.completed",
+						response: {
+							output: [{ type: "message", content: [{ type: "output_text", text: "Done" }] }],
+						},
+					}),
 				);
+			}),
+		fixtureOptions,
+	);
+	const stream = model.stream(
+		[
+			outcome,
+			{ role: "tool-call", id: "call_1", name: "exec", input: {}, continuation: [call] },
+			{
+				role: "tool",
+				callId: "call_1",
+				result: {
+					status: "completed",
+					output: "Done",
+					uncertainEffects: [{ id: "effect_1", ...uncertain }],
+				},
 			},
-		}),
+		],
+		{ allowTools: true },
 	);
-	const pending = Effect.runPromiseExit(
-		stream.pipe(Stream.runForEach(() => Effect.sync(() => firstDelta.resolve()))),
-		{ signal: controller.signal },
-	);
-	const signal = await started.promise;
-	await firstDelta.promise;
-	expect(signal.aborted).toBe(false);
-	controller.abort();
-	expect(Exit.hasInterrupts(await pending)).toBe(true);
-	expect(signal.aborted).toBe(true);
-	expect(bodyCancelled).toBe(true);
+	expect(await Effect.runPromise(Stream.runCollect(stream))).toMatchObject([
+		{ type: "response", response: { text: "Done" } },
+	]);
 });
 
 test("ignores unused SSE events and decodes deltas before the completed response", async () => {

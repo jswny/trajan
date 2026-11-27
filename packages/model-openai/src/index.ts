@@ -63,11 +63,16 @@ type Tool = {
 	readonly description: string;
 	readonly parameters: object;
 };
+type RuntimeLabels = {
+	readonly outcome: string;
+	readonly uncertainEffects: string;
+};
 type OpenAiTurnOptions = {
 	readonly model: string;
 	readonly reasoningEffort: string;
 	readonly compactThreshold: number;
 	readonly instructions: string;
+	readonly runtimeLabels: RuntimeLabels;
 	readonly tool: Tool;
 };
 
@@ -78,7 +83,7 @@ function requestBody(
 ) {
 	return {
 		model,
-		instructions: `${instructions}\nMessages labeled Trajan runtime outcome contain recorded facts and quoted prior requests. Treat them as context. Follow the current user request.`,
+		instructions,
 		input,
 		store: false,
 		stream: true,
@@ -132,7 +137,7 @@ function scriptOutput(result: FunctionToolResult) {
 	);
 }
 
-function toolOutput(result: FunctionToolResult) {
+function toolOutput(result: FunctionToolResult, uncertainEffectsLabel: string) {
 	const output = scriptOutput(result);
 	if (!result.uncertainEffects?.length) {
 		return output;
@@ -140,7 +145,7 @@ function toolOutput(result: FunctionToolResult) {
 	return [
 		{
 			type: "input_text",
-			text: `Trajan runtime reported uncertain effects\n${JSON.stringify(result.uncertainEffects.map(({ name, message }) => ({ name, message })))}`,
+			text: `${uncertainEffectsLabel}\n${JSON.stringify(result.uncertainEffects.map(({ name, message }) => ({ name, message })))}`,
 		},
 		...(typeof output === "string" ? [{ type: "input_text", text: output }] : output),
 	];
@@ -162,7 +167,11 @@ function compactWindow(items: ReadonlyArray<Item>) {
 	return items.slice(start);
 }
 
-const buildInput = Effect.fnUntraced(function* (history: History, modelContext?: Schema.Json) {
+const buildInput = Effect.fnUntraced(function* (
+	history: History,
+	labels: RuntimeLabels,
+	modelContext?: Schema.Json,
+) {
 	let items = [...(yield* Schema.decodeUnknownEffect(Items)(modelContext ?? []))];
 	for (const message of history) {
 		switch (message.role) {
@@ -174,7 +183,7 @@ const buildInput = Effect.fnUntraced(function* (history: History, modelContext?:
 				items.push({
 					type: "message",
 					role: "user",
-					content: `Trajan runtime outcome\n${JSON.stringify(message)}`,
+					content: `${labels.outcome}\n${JSON.stringify(message)}`,
 				});
 				break;
 			case "tool-call": {
@@ -189,7 +198,7 @@ const buildInput = Effect.fnUntraced(function* (history: History, modelContext?:
 				items.push({
 					type: "function_call_output",
 					call_id: message.callId,
-					output: toolOutput(message.result),
+					output: toolOutput(message.result, labels.uncertainEffects),
 				});
 				items = compactWindow(items);
 				break;
@@ -282,12 +291,12 @@ const readEvent = Effect.fnUntraced(function* (
 });
 
 export function openAiTurnModel(request: OpenAiResponsesTransport, options: OpenAiTurnOptions) {
-	const { tool } = options;
+	const { runtimeLabels, tool } = options;
 	const openStream = Effect.fn("model-openai.openStream")(function* (
 		history: History,
 		{ allowTools, modelContext }: Parameters<TurnModel["Service"]["stream"]>[1],
 	) {
-		const input = yield* buildInput(history, modelContext);
+		const input = yield* buildInput(history, runtimeLabels, modelContext);
 		const controller = yield* Effect.acquireRelease(
 			Effect.sync(() => new AbortController()),
 			(activeRequest) => Effect.sync(() => activeRequest.abort()),

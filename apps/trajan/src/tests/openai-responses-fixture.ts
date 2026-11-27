@@ -145,6 +145,7 @@ export function createOpenAiResponsesFixture(
 			reasoningEffort: modelConfig.reasoningEffort,
 			compactThreshold: 1000,
 			instructions: "Local Responses fixture",
+			runtimeLabels: modelConfig.runtimeLabels,
 			tool,
 		},
 	);
