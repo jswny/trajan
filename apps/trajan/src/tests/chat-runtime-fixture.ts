@@ -152,6 +152,10 @@ export class ChatTestObject extends TrajanChatObject {
 		return this.chatExec.readSettledTools(runId);
 	}
 
+	readDraft(runId: string) {
+		return Effect.runPromise(this.readModelDraft(runId));
+	}
+
 	#createTools() {
 		const { catalog, instructions } = workspaceToolset(this.#workspace);
 		const files = catalog["codemode:tools"];

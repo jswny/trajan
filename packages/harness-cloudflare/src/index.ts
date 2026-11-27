@@ -19,6 +19,7 @@ import type {
 } from "@trajan/harness";
 import { Lifecycle, LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "agents/lifecycle";
+import { Streams } from "agents/streams";
 import { NonRetryableError, Tasks } from "agents/tasks";
 import type { TaskStep } from "agents/tasks";
 import { Clock, Effect, Option, Schedule, Schema } from "effect";
@@ -240,15 +241,12 @@ function taskJournal(
 							onHandoff("before-tool-handoff", signal),
 						);
 					}
-					yield* conversationEffect("commit tool handoff", () =>
-						storage.transactionSync(() => {
-							signal.throwIfAborted();
-							if (storage.kv.get(handoffKey) === undefined) {
-								storage.kv.put(handoffKey, encoded);
-								drafts.clearCheckpoint(runId, name);
-							}
-						}),
-					);
+					yield* drafts.applyDecision(runId, name, () => {
+						signal.throwIfAborted();
+						if (storage.kv.get(handoffKey) === undefined) {
+							storage.kv.put(handoffKey, encoded);
+						}
+					});
 					yield* lifecycleEffect("flush tool handoff", () => storage.sync());
 				}).pipe(
 					Effect.retry({
@@ -361,7 +359,7 @@ function taskJournal(
 				}
 				const decision = yield* Schema.decodeEffect(checkpointJson)(encoded);
 				if (kind === "model" && isToolCall(decision)) {
-					drafts.clearCheckpoint(runId, name);
+					yield* drafts.applyDecision(runId, name, () => {});
 				}
 				return decision;
 			}).pipe(Effect.withSpan("harness.checkpoint", { attributes: { runId, name } }));
@@ -379,7 +377,7 @@ export abstract class CloudflareHarness<
 	protected onStateChange?(update: {
 		readonly settledRunId?: string;
 		readonly historyChanged: boolean;
-	}): void;
+	}): void | Promise<void>;
 
 	/** Archives outcomes and clears run state in the transaction that settles the turn. */
 	protected settleRunState?(
@@ -394,7 +392,8 @@ export abstract class CloudflareHarness<
 		return { name, status };
 	}
 
-	readonly #drafts = new ModelDrafts(this.ctx.storage, (runId) =>
+	readonly #streams = new Streams();
+	readonly #drafts = new ModelDrafts(this.ctx.storage, this.#streams, (runId) =>
 		this.onProgress?.(runId, { type: "reset" }),
 	);
 	readonly #conversation = new ConversationStore(
@@ -405,10 +404,7 @@ export abstract class CloudflareHarness<
 			for (const [key] of Array.from(handoffs)) {
 				this.ctx.storage.kv.delete(key);
 			}
-			return [
-				...(this.settleRunState?.(runId, outcome) ?? []),
-				...this.#drafts.settle(runId, outcome !== "completed"),
-			];
+			return this.settleRunState?.(runId, outcome);
 		},
 		(activity) => this.describeRecoveredTool(activity),
 	);
@@ -428,7 +424,7 @@ export abstract class CloudflareHarness<
 				),
 		},
 	});
-	readonly lifecycle = Lifecycle.install(this).use(this.#tasks).use(this.#inbox);
+	readonly lifecycle = Lifecycle.install(this).use(this.#streams).use(this.#tasks).use(this.#inbox);
 	readonly #start = lifecycleEffect("start lifecycle", () => this.lifecycle.start());
 
 	#getTask(runId: string) {
@@ -437,7 +433,7 @@ export abstract class CloudflareHarness<
 
 	#notifyState(settledRunId?: string, historyChanged = settledRunId !== undefined) {
 		return publishUpdate("conversation state", () =>
-			Effect.sync(() =>
+			Effect.promise(async () =>
 				this.onStateChange?.({ historyChanged, ...(settledRunId && { settledRunId }) }),
 			),
 		);
@@ -471,7 +467,7 @@ export abstract class CloudflareHarness<
 				);
 				return { rescheduleAt: (yield* Clock.currentTimeMillis) + 250 };
 			}
-			yield* conversationEffect("cancel turn", () => this.#conversation.cancel(runId));
+			yield* this.#drafts.settle(runId, true, (settle) => this.#conversation.cancel(runId, settle));
 			yield* this.#notifyState(runId);
 			return "yield" as const;
 		}
@@ -489,7 +485,9 @@ export abstract class CloudflareHarness<
 			const message =
 				task.state === "failed" ? task.error.message : "The turn ended without a transcript.";
 			const code = task.state === "failed" ? failureCode(task.error.name) : task.state;
-			yield* conversationEffect("fail turn", () => this.#conversation.fail(runId, message));
+			yield* this.#drafts.settle(runId, true, (settle) =>
+				this.#conversation.fail(runId, message, settle),
+			);
 			yield* this.#notifyState(runId);
 			yield* Effect.logWarning("Harness turn ended without a transcript").pipe(
 				Effect.annotateLogs({ runId, code }),
@@ -549,17 +547,21 @@ export abstract class CloudflareHarness<
 		yield* Effect.promise(() =>
 			step.do("commit-transcript", { retries: { limit: 5, delay: "1 second" } }, ({ signal }) =>
 				runPromise(
-					Effect.try({
-						try: () => this.#conversation.commit(runId, transcript, outcomesThrough),
-						catch: (cause) =>
-							new TurnCommitError({
-								message:
-									"The model finished, but its reply could not be saved to the conversation.",
-								cause,
-							}),
-					}).pipe(
-						Effect.tapError(({ cause }) => Effect.logWarning("Transcript write failed", cause)),
-					),
+					this.#drafts
+						.settle(runId, false, (settle) =>
+							this.#conversation.commit(runId, transcript, outcomesThrough, settle),
+						)
+						.pipe(
+							Effect.mapError(
+								(cause) =>
+									new TurnCommitError({
+										message:
+											"The model finished, but its reply could not be saved to the conversation.",
+										cause,
+									}),
+							),
+							Effect.tapError(({ cause }) => Effect.logWarning("Transcript write failed", cause)),
+						),
 					{ signal },
 				),
 			),
@@ -575,6 +577,10 @@ export abstract class CloudflareHarness<
 
 	protected readModelDraft(runId: string) {
 		return this.#drafts.read(runId);
+	}
+
+	protected readInterruptedDrafts(runId: string) {
+		return this.#drafts.readInterrupted(runId);
 	}
 
 	protected snapshot() {

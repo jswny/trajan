@@ -1,5 +1,5 @@
 import { TurnSubmission } from "@trajan/harness";
-import type { TurnProgress } from "@trajan/harness";
+import type { TurnIoError, TurnProgress } from "@trajan/harness";
 import { CloudflareHarness } from "@trajan/harness-cloudflare";
 import { WebSockets } from "agents/websockets";
 import { Effect, Schema } from "effect";
@@ -47,11 +47,25 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 	}
 
 	#draft: typeof ChatPreview.Type | undefined;
+	#liveModelRunId: string | undefined;
+	readonly #joining = new WeakSet<WebSocket>();
 	readonly #sockets = new WebSockets({
 		protocol: false,
 		getConnectionTags: () => [chatTag],
 		handlers: {
-			onConnect: (socket) => sendChat(socket, chatEventJson(this.#snapshot())),
+			onConnect: (socket) => {
+				this.#joining.add(socket);
+				return Effect.runPromise(
+					this.#snapshot().pipe(
+						Effect.map((snapshot) => sendChat(socket, chatEventJson(snapshot))),
+						Effect.ensuring(
+							Effect.sync(() => {
+								this.#joining.delete(socket);
+							}),
+						),
+					),
+				);
+			},
 		},
 	});
 
@@ -79,9 +93,10 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 	}) {
 		if (settledRunId !== undefined && this.#draft?.runId === settledRunId) {
 			this.#draft = undefined;
+			this.#liveModelRunId = undefined;
 		}
 		if (historyChanged) {
-			this.#broadcastSnapshot();
+			return this.#broadcastSnapshot();
 		} else if (this.ctx.getWebSockets(chatTag).length > 0) {
 			this.#broadcast({ type: "run-state", ...this.runState() });
 		}
@@ -91,8 +106,9 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 		const draft = this.#draft?.runId === runId ? this.#draft : this.#savedPreview(runId);
 		switch (event.type) {
 			case "reset": {
-				const { interrupted } = this.readModelDraft(runId);
+				const interrupted = this.readInterruptedDrafts(runId);
 				this.#draft = { ...draft, text: "", interrupted };
+				this.#liveModelRunId = runId;
 				this.#broadcast({ type: "reset", runId, interrupted });
 				break;
 			}
@@ -129,38 +145,64 @@ export abstract class TrajanChatObject extends CloudflareHarness<Env> {
 	}
 
 	#savedPreview(runId: string): typeof ChatPreview.Type {
-		return { runId, ...this.readModelDraft(runId), tools: this.chatExec.readToolPreviews(runId) };
-	}
-
-	#snapshot(): typeof ChatSnapshot.Type {
-		const { page, active, queued } = this.snapshot();
-		const draft =
-			active &&
-			(this.#draft?.runId === active.runId ? this.#draft : this.#savedPreview(active.runId));
 		return {
-			type: "snapshot",
-			page,
-			active,
-			queued,
-			preview:
-				draft && (draft.text || draft.tools.length || draft.interrupted.length) ? draft : null,
-			browserWatch: this.browserWatch,
+			runId,
+			text: "",
+			interrupted: this.readInterruptedDrafts(runId),
+			tools: this.chatExec.readToolPreviews(runId),
 		};
 	}
+
+	readonly #snapshot = Effect.fnUntraced(function* (
+		this: TrajanChatObject,
+	): Effect.fn.Return<typeof ChatSnapshot.Type, TurnIoError> {
+		while (true) {
+			const readingRun = this.runState().active?.runId;
+			const saved =
+				readingRun && this.#liveModelRunId !== readingRun
+					? yield* this.readModelDraft(readingRun)
+					: undefined;
+			const { page, active, queued } = this.snapshot();
+			const runId = active?.runId;
+			const live = this.#draft?.runId === runId ? this.#draft : undefined;
+			// The turn can change while the SDK reads its durable chunks.
+			if (runId && runId !== readingRun && this.#liveModelRunId !== runId) {
+				continue;
+			}
+			const draft = runId && {
+				...(live ?? this.#savedPreview(runId)),
+				// Replayed tool progress can exist before this isolate starts a model attempt.
+				...(this.#liveModelRunId !== runId && saved),
+			};
+			return {
+				type: "snapshot",
+				page,
+				active,
+				queued,
+				preview:
+					draft && (draft.text || draft.tools.length || draft.interrupted.length) ? draft : null,
+				browserWatch: this.browserWatch,
+			};
+		}
+	});
 
 	#broadcast(event: typeof ChatEvent.Type) {
 		const sockets = this.ctx.getWebSockets(chatTag);
 		if (sockets.length > 0) {
 			const data = chatEventJson(event);
 			for (const socket of sockets) {
-				sendChat(socket, data);
+				if (!this.#joining.has(socket)) {
+					sendChat(socket, data);
+				}
 			}
 		}
 	}
 
 	#broadcastSnapshot() {
 		if (this.ctx.getWebSockets(chatTag).length > 0) {
-			this.#broadcast(this.#snapshot());
+			return Effect.runPromise(
+				this.#snapshot().pipe(Effect.map((snapshot) => this.#broadcast(snapshot))),
+			);
 		}
 	}
 

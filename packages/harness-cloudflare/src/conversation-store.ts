@@ -6,6 +6,7 @@ import {
 } from "@trajan/harness";
 import type { RuntimeOutcome, ToolActivity, TurnCompletion, TurnSubmission } from "@trajan/harness";
 import { Option, Schema } from "effect";
+import type { DraftSettlement } from "./model-drafts";
 
 const historyByteLimit = 1024 * 1024;
 const contextTurnLimit = 16;
@@ -289,23 +290,29 @@ export class ConversationStore {
 		};
 	}
 
-	commit(runId: string, transcript: TurnCompletion, outcomesThrough: number) {
-		return this.storage.transactionSync(() => {
-			const row = this.#find(runId);
-			if (row?.submission_id !== transcript.submissionId) {
-				throw new Error("Transcript submission does not match its run.");
-			}
-			if (row.state === "completed" || row.state === "stopping") {
-				return;
-			}
-			if (row.state !== "running") {
-				throw new Error("The turn is not running.");
-			}
+	commit(
+		runId: string,
+		transcript: TurnCompletion,
+		outcomesThrough: number,
+		settle: DraftSettlement,
+	) {
+		const row = this.#find(runId);
+		if (row?.submission_id !== transcript.submissionId) {
+			throw new Error("Transcript submission does not match its run.");
+		}
+		if (row.state === "completed" || row.state === "stopping") {
+			return;
+		}
+		if (row.state !== "running") {
+			throw new Error("The turn is not running.");
+		}
 
+		settle((drafts) => {
 			const recovered = this.settleRunState(runId, "completed") ?? [];
 			this.#appendEntries(row.seq, [
 				...transcript.messages.slice(0, -1),
 				...recovered,
+				...drafts,
 				...transcript.messages.slice(-1),
 			]);
 			this.storage.sql.exec(
@@ -321,8 +328,8 @@ export class ConversationStore {
 		});
 	}
 
-	fail(runId: string, error: string) {
-		this.#end(runId, "failed", error || "The turn failed.");
+	fail(runId: string, error: string, settle: DraftSettlement) {
+		this.#end(runId, "failed", error || "The turn failed.", settle);
 	}
 
 	requestStop(runId: string) {
@@ -339,21 +346,21 @@ export class ConversationStore {
 		});
 	}
 
-	cancel(runId: string) {
-		this.#end(runId, "cancelled", "Stopped");
+	cancel(runId: string, settle: DraftSettlement) {
+		this.#end(runId, "cancelled", "Stopped", settle);
 	}
 
-	#end(runId: string, status: "failed" | "cancelled", text: string) {
-		this.storage.transactionSync(() => {
-			const row = this.#find(runId);
-			if (
-				!row ||
-				(status === "cancelled"
-					? row.state !== "stopping"
-					: row.state !== "pending" && row.state !== "running")
-			) {
-				return;
-			}
+	#end(runId: string, status: "failed" | "cancelled", text: string, settle: DraftSettlement) {
+		const row = this.#find(runId);
+		if (
+			!row ||
+			(status === "cancelled"
+				? row.state !== "stopping"
+				: row.state !== "pending" && row.state !== "running")
+		) {
+			return;
+		}
+		settle((drafts) => {
 			this.storage.sql.exec(
 				"UPDATE harness_submissions SET state = ?, error = ? WHERE seq = ?",
 				status,
@@ -363,6 +370,7 @@ export class ConversationStore {
 			this.#appendEntries(row.seq, [
 				{ role: "user", text: row.prompt },
 				...(this.settleRunState(runId, status) ?? []),
+				...drafts,
 				{ role: "notice", status, text },
 			]);
 		});

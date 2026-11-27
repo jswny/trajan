@@ -228,6 +228,19 @@ function openFixture() {
 	return env.CHAT_TEST.getByName(crypto.randomUUID());
 }
 
+function draftStreamCount(stub: ReturnType<typeof openFixture>, runId: string) {
+	return runInDurableObject(
+		stub,
+		(_, { storage }) =>
+			storage.sql
+				.exec<{ count: number }>(
+					"SELECT COUNT(*) AS count FROM cf_agents_streams WHERE tag = ?",
+					`harness-draft:${runId}`,
+				)
+				.one().count,
+	);
+}
+
 async function waitForRestart(stub: ReturnType<typeof openFixture>, instance: string) {
 	await expect
 		.poll(async () => (await env.CHAT_TEST.get(stub.id).state()).instance)
@@ -553,13 +566,14 @@ test("an ordinary model retry and resets share the attempt budget and preserve p
 	expect((await stub.state()).text).toBe("Retry after append.");
 }, 15_000);
 
-test("batches streamed drafts, archives an interrupted attempt, and gives the next request only the final reply", async () => {
+test("recovers SDK stream chunks, archives the interrupted attempt, and keeps it out of model context", async () => {
 	let stub = openFixture();
 	await stub.pause("during-reply");
 	const { runId } = await submit(stub, { id: "draft", prompt: draftPrompt });
-	const savedDraft = () =>
-		runInDurableObject(stub, (_, { storage }) => storage.kv.get(`harness-draft:live:${runId}`));
-	await expect.poll(savedDraft, { timeout: 5000 }).toMatchObject({ text: draftExcerpt });
+	await expect
+		.poll(() => stub.readDraft(runId), { timeout: 5000 })
+		.toEqual({ text: draftExcerpt, interrupted: [] });
+	expect(await draftStreamCount(stub, runId)).toBe(1);
 	const interrupted = {
 		role: "interrupted",
 		attemptId: "model:0:1",
@@ -571,14 +585,12 @@ test("batches streamed drafts, archives an interrupted attempt, and gives the ne
 		.poll(
 			async () => ({
 				state: await stub.taskState(runId),
-				draft: await runInDurableObject(stub, (_, { storage }) => ({
-					live: storage.kv.get(`harness-draft:live:${runId}`),
-					interrupted: storage.kv.get(`harness-draft:interrupted:${runId}`),
-				})),
+				draft: await stub.readDraft(runId),
+				streams: await draftStreamCount(stub, runId),
 			}),
 			{ timeout: 5000 },
 		)
-		.toEqual({ state: "waiting", draft: { live: undefined, interrupted: [interrupted] } });
+		.toEqual({ state: "waiting", draft: { text: "", interrupted: [interrupted] }, streams: 0 });
 	await stub.release();
 	await expect
 		.poll(() => readTurn(stub, runId), { timeout: 5000 })
@@ -592,12 +604,8 @@ test("batches streamed drafts, archives an interrupted attempt, and gives the ne
 				],
 			},
 		});
-	expect(
-		await runInDurableObject(
-			stub,
-			(_, { storage }) => Array.from(storage.kv.list({ prefix: "harness-draft:" })).length,
-		),
-	).toBe(0);
+	expect(await stub.readDraft(runId)).toEqual({ text: "", interrupted: [] });
+	expect(await draftStreamCount(stub, runId)).toBe(0);
 	const followUp = await submit(stub, {
 		id: "context",
 		prompt: "Which assistant replies did you receive?",
@@ -1978,6 +1986,8 @@ test("retries a rolled-back transcript write across a restart without replaying 
 	expect(await stub.turn(first.runId)).toMatchObject({ state: "running", transcript: null });
 	expect(await stub.turn(followUp.runId)).toMatchObject({ state: "pending" });
 	expect((await stub.history({})).entries).toEqual([]);
+	expect(await draftStreamCount(stub, first.runId)).toBe(1);
+	expect(await stub.readDraft(first.runId)).toMatchObject({ text: 'Wrote "hello"' });
 	const { instance, text } = await stub.state();
 	expect(text).toBe("hello");
 
@@ -1995,6 +2005,7 @@ test("retries a rolled-back transcript write across a restart without replaying 
 			},
 		});
 	expect(await stub.turn(first.runId)).toMatchObject({ state: "completed", failure: null });
+	expect(await draftStreamCount(stub, first.runId)).toBe(0);
 	expect(await stub.state()).toMatchObject({ text: "hello" });
 	const history = (await stub.history({})).entries.map(({ message }) =>
 		Schema.decodeSync(messageJson)(message),
@@ -2131,13 +2142,8 @@ test("preserves a partial reply and completed tool when the Worker restarts duri
 	let stub = openFixture();
 	const { runId } = await submit(stub, { id: "stream-retry", prompt: retryStreamPrompt });
 	await expect.poll(() => stub.taskState(runId), { timeout: 5000 }).toBe("waiting");
-	expect(
-		await runInDurableObject(stub, (_, { storage }) => ({
-			live: storage.kv.get(`harness-draft:live:${runId}`),
-			interrupted: storage.kv.get(`harness-draft:interrupted:${runId}`),
-		})),
-	).toEqual({
-		live: undefined,
+	expect(await stub.readDraft(runId)).toEqual({
+		text: "",
 		interrupted: [{ role: "interrupted", attemptId: "model:1:1", text: "Wrote", truncated: false }],
 	});
 	const { instance } = await stub.state();

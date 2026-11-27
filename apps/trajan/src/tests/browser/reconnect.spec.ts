@@ -328,6 +328,35 @@ test("restores a live draft and keeps its interrupted attempt without repeating 
 	await expect(transcript.getByText('Wrote "hello"', { exact: true })).toHaveCount(1);
 });
 
+test("restores persisted model chunks before a restarted turn resumes", async ({ page }) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/pause`)).status()).toBe(204);
+	await composer.fill("Stream a draft recovery example.");
+	await composer.press("Enter");
+	const live = page.getByRole("main").locator('[data-streaming="true"]');
+	await expect(live).toContainText("I saved the checklist.");
+	expect((await page.request.post(`${control}/pause-before-turn`)).status()).toBe(204);
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+
+	await openChat(page);
+	await expect(live).toContainText("The workspace is ready.");
+	await expect(live).toContainText("I saved the checklist.");
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await openChat(page);
+	await expect(live).toContainText("The workspace is ready.");
+	await expect(live).toContainText("I saved the checklist.");
+
+	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
+	await expect(
+		page.getByRole("main").getByText("The final check passed.", { exact: true }),
+	).toBeVisible();
+	await expect(live).toHaveCount(0);
+	const interrupted = page.getByRole("main").locator("[data-interrupted-reply]");
+	await expect(interrupted).toHaveCount(1);
+	await interrupted.locator("summary").click();
+	await expect(interrupted).toContainText("I saved the checklist.");
+});
+
 test("shows animated progress with either motion preference", async ({ page }) => {
 	await page.emulateMedia({ reducedMotion: "reduce" });
 	const composer = await openChat(page);
