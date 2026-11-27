@@ -2,10 +2,11 @@ import { toolPreviewBytes } from "../chat/tool-presentation";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/harness";
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../chat/protocol";
 import { toolActivity } from "../chat/tool-activity";
+import { createLiveBrowser } from "../live-browser";
 import { nextWeeklyRun } from "../schedule-plan";
 import { FileMutationReceipt } from "@trajan/workspace-cloudflare";
 import { appendExecInput, skillExecInput } from "./chat-runtime-fixture";
@@ -1627,4 +1628,74 @@ test("settles a failed model turn and proceeds to the next queued submission", a
 			{ role: "notice", status: "failed", text: "The fixture model failed." },
 		],
 	);
+});
+
+const liveViewUrl = "https://live.browser.run/ui/view?mode=tab&wss=fixture";
+
+test.each([
+	{ mode: "readonly", expected: 200, status: "open" },
+	{ mode: "unguarded", expected: 502, status: undefined },
+	{ mode: "replaced", expected: 200, status: "closed" },
+] as const)("handles a $mode Live View lease", async ({ mode, expected, status }) => {
+	const stub = openFixture();
+	const reply = await runInDurableObject(stub, async (_, { storage }) => {
+		let request: Parameters<Env["BROWSER"]["getLiveView"]> | undefined;
+		const getLiveView: Env["BROWSER"]["getLiveView"] = async (...args) => {
+			request = args;
+			if (mode === "replaced") {
+				await Effect.runPromise(live.changeAvailability("reopened"));
+			}
+			return {
+				id: "lease",
+				devtoolsFrontendUrl: liveViewUrl,
+				webSocketDebuggerUrl: "wss://browser.invalid",
+				options: {
+					mode: "tab",
+					...(mode !== "unguarded" && { guardrails: { mode: "readonly" } }),
+				},
+			};
+		};
+		const live = createLiveBrowser(
+			storage,
+			{
+				liveView: () =>
+					Promise.resolve({
+						sessionId: "session",
+						expiresInMs: 60_000,
+						targets: [
+							{ type: "page", targetId: "tab", url: liveViewUrl, pageUrl: "https://example.com/" },
+						],
+					}),
+			},
+			{ getLiveView },
+			() => {},
+		);
+		await Effect.runPromise(live.changeAvailability("open"));
+		const response = await Effect.runPromise(
+			live.requestView(
+				new Request("https://trajan.invalid/api/chat/browser-view", {
+					method: "POST",
+					body: JSON.stringify({ id: live.watch()?.id }),
+				}),
+			),
+		);
+		const payload: unknown = response.ok ? await response.json() : undefined;
+		return {
+			status: response.status,
+			cache: response.headers.get("Cache-Control"),
+			payload,
+			request,
+		};
+	});
+	expect(reply.status).toBe(expected);
+	expect(reply.cache).toBe("no-store");
+	expect(reply.request).toEqual([
+		"session",
+		{ targetId: "tab", mode: "tab", expiresInMs: 60_000, guardrails: { mode: "readonly" } },
+	]);
+	if (status === undefined) {
+		expect(reply.payload).toBeUndefined();
+	} else {
+		expect(reply.payload).toMatchObject({ status, ...(status === "open" && { url: liveViewUrl }) });
+	}
 });
