@@ -79,7 +79,7 @@ export function defineTool<A, B extends Schema.Json, D extends Schema.Json = nev
 					}),
 				),
 				Effect.flatMap(Schema.decodeEffect(output)),
-				Effect.mapError(ioError),
+				Effect.mapError(codeModeError),
 			),
 	};
 }
@@ -133,14 +133,15 @@ const interrupted: ToolReply = {
 };
 const failed = (message: string): ToolReply => ({ status: "failed", message });
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
-const ioError = (error: unknown) => new CodeModeError({ message: errorMessage(error) });
+export const codeModeError = (error: unknown) =>
+	new CodeModeError({ message: errorMessage(error) });
 const decodeRuntimeInput = Schema.decodeUnknownEffect(Schema.Null);
 
 function runtimeTool(sample: Effect.Effect<Schema.Json>): CodeModeTool {
 	return {
 		replay: "safe",
 		run: (input) =>
-			decodeRuntimeInput(input).pipe(Effect.mapError(ioError), Effect.andThen(sample)),
+			decodeRuntimeInput(input).pipe(Effect.mapError(codeModeError), Effect.andThen(sample)),
 	};
 }
 
@@ -347,10 +348,10 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 					const index = next;
 					const callId = journal.callId(index);
 					const input = yield* Schema.decodeUnknownEffect(ToolCall)(raw).pipe(
-						Effect.mapError(ioError),
+						Effect.mapError(codeModeError),
 					);
 					const request = JSON.stringify(
-						yield* Schema.decodeEffect(boundedJson)(input).pipe(Effect.mapError(ioError)),
+						yield* Schema.decodeEffect(boundedJson)(input).pipe(Effect.mapError(codeModeError)),
 					);
 					const tool = getTool(input);
 					const stored = journal.readCall(index);
@@ -504,11 +505,11 @@ export function createCodeMode(host: CodeModeHost, catalog: CodeModeCatalog) {
 					open = false;
 				}
 			},
-			catch: ioError,
+			catch: codeModeError,
 		}).pipe(
 			Effect.timeout("30 seconds"),
 			Effect.flatMap(Schema.decodeEffect(boundedJson)),
-			Effect.mapError(ioError),
+			Effect.mapError(codeModeError),
 			Effect.tap((value) => journal.finish({ source, result: { value } })),
 		);
 	}, Effect.scoped);

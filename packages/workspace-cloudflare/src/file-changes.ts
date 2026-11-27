@@ -1,8 +1,6 @@
 import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
 import type { Workspace } from "@cloudflare/computer";
 import type { PiToolCall, ToolCallContext } from "@cloudflare/computer/tools/pi-ai";
-import type { FileChange } from "./chat/tool-presentation";
-import { fileDiffBytes } from "./chat/tool-presentation";
 import { formatPatch, structuredPatch } from "diff";
 import { Effect, Predicate, Schema } from "effect";
 
@@ -14,6 +12,12 @@ export const FileMutationReceipt = Schema.Union([
 	}),
 	Schema.Struct({ isError: Schema.Literal(true), text: Schema.String }),
 ]);
+
+type FileChange = {
+	readonly path: string;
+	readonly kind: "added" | "modified" | "unchanged";
+	readonly diff?: string;
+};
 
 const snapshotBytes = 32 * 1024;
 const encoder = new TextEncoder();
@@ -56,7 +60,8 @@ function describeChange(
 	path: string,
 	before: Awaited<ReturnType<typeof snapshot>>,
 	bytes: Uint8Array,
-): typeof FileChange.Type | undefined {
+	maxDiffBytes: number,
+): FileChange | undefined {
 	if (!before) {
 		return undefined;
 	}
@@ -82,7 +87,7 @@ function describeChange(
 			{ context: 3, timeout: 30 },
 		);
 		const diff = patch && formatPatch({ ...patch, isGit: true, isCreate: !before.exists });
-		return diff && encoder.encode(diff).byteLength <= fileDiffBytes ? { ...change, diff } : change;
+		return diff && encoder.encode(diff).byteLength <= maxDiffBytes ? { ...change, diff } : change;
 	} catch {
 		return change;
 	}
@@ -91,10 +96,10 @@ function describeChange(
 type ObservedWrite = {
 	readonly path: string;
 	readonly bytesWritten: number;
-	readonly change?: typeof FileChange.Type;
+	readonly change?: FileChange;
 };
 
-export function workspaceFileTools(workspace: Workspace, root: string) {
+export function workspaceFileTools(workspace: Workspace, root: string, maxDiffBytes: number) {
 	const fs = workspace.fs;
 	let observeWrite: ((write: ObservedWrite) => void) | undefined;
 	// Computer still validates arguments, confines paths, and applies the write or edit.
@@ -114,7 +119,7 @@ export function workspaceFileTools(workspace: Workspace, root: string) {
 			const before = observe && (await snapshot(fs, path));
 			await fs.writeFile(path, bytes, options);
 			if (observe) {
-				const change = describeChange(path, before, bytes);
+				const change = describeChange(path, before, bytes, maxDiffBytes);
 				observe({ path, bytesWritten: bytes.byteLength, ...(change && { change }) });
 			}
 		},

@@ -1,3 +1,4 @@
+import { codeModeError } from "@trajan/code-mode";
 import { clearCodeModeRun } from "@trajan/code-mode-cloudflare";
 import type { CodeModeTool } from "@trajan/code-mode";
 import { createCodeModeFixture } from "./code-mode-fixture";
@@ -13,7 +14,7 @@ import type { TurnModelEvent, TurnModelResponse } from "@trajan/harness";
 import { Cause, Effect, Exit, Layer, Option, Predicate, Schema, Stream } from "effect";
 import { TrajanChatObject } from "../chat/worker-host";
 import { createChatExec } from "../chat/exec";
-import { codeModeError, createTrajanWorkspace, workspaceToolset } from "../workspace";
+import { createTrajanWorkspace, workspaceToolset } from "../workspace";
 import {
 	compactReference,
 	compactResumePrompt,

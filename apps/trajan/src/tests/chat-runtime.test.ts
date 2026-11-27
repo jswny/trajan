@@ -7,7 +7,7 @@ import { expect, test } from "vite-plus/test";
 import { ChatEvent, ChatPath } from "../chat/protocol";
 import { toolActivity } from "../chat/tool-activity";
 import { nextWeeklyRun } from "../schedule-plan";
-import { FileMutationReceipt } from "../workspace-file-changes";
+import { FileMutationReceipt } from "@trajan/workspace-cloudflare";
 import { appendExecInput, skillExecInput } from "./chat-runtime-fixture";
 import {
 	compactReference,

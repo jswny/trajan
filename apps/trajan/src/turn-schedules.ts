@@ -1,11 +1,10 @@
-import { defineTool } from "@trajan/code-mode";
+import { codeModeError, defineTool } from "@trajan/code-mode";
 import { TurnSubmission } from "@trajan/harness";
 import type { TurnIoError } from "@trajan/harness";
 import { LifecycleCapability } from "agents/lifecycle";
 import type { LifecycleJob, LifecycleJobContext } from "agents/lifecycle";
 import { Clock, DateTime, Effect, Schema, Semaphore } from "effect";
 import { nextWeeklyRun, ScheduledTurn } from "./schedule-plan";
-import { codeModeError } from "./workspace";
 
 const ListInput = Schema.NullOr(Schema.Struct({ offset: Schema.optionalKey(Schema.Natural) }));
 const CancelInput = Schema.Struct({ id: Schema.NonEmptyString });

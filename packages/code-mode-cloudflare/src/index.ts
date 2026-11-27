@@ -1,6 +1,6 @@
 import { RpcTarget } from "cloudflare:workers";
 import {
-	CodeModeError,
+	codeModeError,
 	createCodeMode,
 	decodeCallCheckpoint,
 	decodeRunCheckpoint,
@@ -8,9 +8,6 @@ import {
 import type { CodeModeCatalog, CodeModeJournal, ToolReply } from "@trajan/code-mode";
 import { Effect } from "effect";
 import { loadGuest } from "./guest";
-
-const storageError = (cause: unknown) =>
-	new CodeModeError({ message: cause instanceof Error ? cause.message : String(cause) });
 
 function runPrefix(scope: string) {
 	return `code-mode:${encodeURIComponent(scope)}:`;
@@ -36,7 +33,7 @@ function openJournal(storage: DurableObjectStorage, scope: string, id: string): 
 					storage.kv.put(callId(index), checkpoint);
 					return storage.sync();
 				},
-				catch: storageError,
+				catch: codeModeError,
 			}),
 		finish: (checkpoint) =>
 			Effect.tryPromise({
@@ -44,7 +41,7 @@ function openJournal(storage: DurableObjectStorage, scope: string, id: string): 
 					storage.kv.put(key, checkpoint);
 					return storage.sync();
 				},
-				catch: storageError,
+				catch: codeModeError,
 			}),
 		commitCall: Effect.fnUntraced(function* (index, signal, invoke, receipt) {
 			const context = yield* Effect.context<never>();
@@ -67,7 +64,7 @@ function openJournal(storage: DurableObjectStorage, scope: string, id: string): 
 					}
 					return outcome;
 				},
-				catch: storageError,
+				catch: codeModeError,
 			});
 		}),
 	};

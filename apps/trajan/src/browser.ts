@@ -1,9 +1,8 @@
 import { isIP } from "node:net";
-import { CodeModeError, defineTool } from "@trajan/code-mode";
+import { CodeModeError, codeModeError, defineTool } from "@trajan/code-mode";
 import { publishUpdate } from "@trajan/harness";
 import type { BrowserSession, BrowserSessionReport } from "agents/browser";
 import { Effect, Result, Schema } from "effect";
-import { codeModeError } from "./workspace";
 
 type Session = Pick<BrowserSession, "send" | "lock" | "close">;
 type BrowserHost = {

@@ -1,3 +1,4 @@
+import { codeModeError } from "@trajan/code-mode";
 import { TurnModel, TurnTools } from "@trajan/harness";
 import { openAiTurnModel } from "@trajan/model-openai";
 import { Browser, browserRun } from "agents/browser";
@@ -15,12 +16,7 @@ import {
 import { TrajanChatObject } from "./chat/worker-host";
 import { createChatExec } from "./chat/exec";
 import { modelConfig } from "./model-config";
-import {
-	codeModeError,
-	createTrajanWorkspace,
-	WORKSPACE_PROMPT,
-	workspaceToolset,
-} from "./workspace";
+import { createTrajanWorkspace, WORKSPACE_PROMPT, workspaceToolset } from "./workspace";
 
 class ChatRouteError extends Data.TaggedError("ChatRouteError")<{ readonly cause: unknown }> {}
 const decodeBrowserView = Schema.decodeUnknownEffect(BrowserViewResponse);
