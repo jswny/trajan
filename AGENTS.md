@@ -6,7 +6,7 @@ Keep this file focused on durable decisions that contributors cannot infer from 
 
 - Build an Effect-native custom harness for Cloudflare Workers.
 - Follow Cloudflare’s [custom harness guidance](https://developers.cloudflare.com/agents/harnesses/build-your-own/) and prefer native Agents SDK capabilities wherever they support the harness’s goals.
-- Use Pi Durable as the design reference for durability guarantees in turn execution, replay, and recovery.
+- Use Pi Durable as the design reference for durability guarantees in turn execution, replay, and recovery. Use the [Pi Durable implementation on Cloudflare](https://developers.cloudflare.com/agents/harnesses/pi/) as the reference for how those guarantees fit the Workers runtime and Agents SDK lifecycle.
 - Build an Effect-native frontend for the harness. Design Trajan as a personal assistant, with OpenAI Dots and Meta Muse as product references.
 
 ## Contributor guidance
