@@ -1,10 +1,11 @@
+import { tracing } from "cloudflare:workers";
 import { describeTools } from "@trajan/code-mode";
 import { clearCodeModeRun, createCloudflareCodeMode } from "@trajan/code-mode-cloudflare";
 import type { CodeModeSandboxBinding } from "@trajan/code-mode-cloudflare";
 import type { CodeModeActivity, CodeModeCatalog } from "@trajan/code-mode";
 import { completedToolResult, TurnIoError } from "@trajan/harness";
-import type { ToolCall, ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
-import { Effect, Schema } from "effect";
+import type { StepAttempt, ToolCall, ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
+import { Console, Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
 import { execName, ExecInput } from "../exec-contract";
 import type { ChatToolPreview } from "./protocol";
@@ -39,6 +40,37 @@ function settledActivity(calls: ReadonlyArray<CodeModeActivity>, limit = calls.l
 		...(calls.length > 0 && { activity: calls.slice(-limit).map(toolActivity) }),
 		...(uncertainEffects.length > 0 && { uncertainEffects }),
 	};
+}
+
+function observeExec<A extends typeof ToolResult.Type, E>(
+	call: typeof ToolCall.Type,
+	{ runId, idempotencyKey: executionId, exhaustedRestartLimit }: StepAttempt,
+	work: Effect.Effect<A, E>,
+) {
+	const fields = { runId, executionId, toolCallId: call.id };
+	return Effect.suspend(() => {
+		const span = tracing.getActiveSpan();
+		span?.setAttributes(fields);
+		return work.pipe(
+			Effect.tap((result) =>
+				Effect.gen(function* () {
+					span?.setAttribute("toolStatus", result.status);
+					if (exhaustedRestartLimit !== undefined) {
+						yield* Console.warn({
+							event: "exec:restart-limit",
+							...fields,
+							toolStatus: result.status,
+						});
+					}
+					for (const { id, name } of result.uncertainEffects ?? []) {
+						const details = { ...fields, nestedCallId: id, toolName: name };
+						tracing.enterSpan("exec:effect:uncertain", (span) => span.setAttributes(details));
+						yield* Console.warn({ event: "exec:effect:uncertain", ...details });
+					}
+				}),
+			),
+		);
+	});
 }
 
 const executionsKey = (runId: string) => `chat-tool-executions:${runId}`;
@@ -230,6 +262,11 @@ export function createChatExec(
 			].join("\n"),
 			parameters: { ...Tool.getJsonSchema(Exec), additionalProperties: false },
 		},
-		service: { execute, recover },
+		service: {
+			execute: (...args: Parameters<typeof execute>) =>
+				observeExec(args[0], args[1], execute(...args)),
+			recover: (...args: Parameters<typeof recover>) =>
+				observeExec(args[0], args[1], recover(...args)),
+		},
 	};
 }

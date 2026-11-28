@@ -47,6 +47,7 @@ function gitPacket(value: string) {
 }
 
 test("a recovered exec retains a push that aged out of the live preview", async () => {
+	using diagnostics = vi.spyOn(console, "warn");
 	let stub = openFixture();
 	const { instance } = await stub.state();
 	await stub.pause("during-remote-push");
@@ -84,6 +85,20 @@ test("a recovered exec retains a push that aged out of the live preview", async 
 		});
 	const run = await readTurn(stub, runId);
 	const tool = run.result?.messages.find((message) => message.role === "tool");
+	expect(diagnostics).toHaveBeenCalledWith({
+		event: "task:attempt:interrupted",
+		runId,
+		step: "tool:0",
+		taskAttempt: 1,
+	});
+	expect(diagnostics).toHaveBeenCalledWith({
+		event: "exec:effect:uncertain",
+		runId,
+		executionId: `${runId}:tool:0`,
+		toolCallId: "call_remote_push",
+		nestedCallId: tool?.result.uncertainEffects?.[0]?.id,
+		toolName: "git.push",
+	});
 	expect(tool?.result.activity?.map(({ name }) => name)).toEqual([
 		"git.push",
 		...Array.from({ length: 9 }, () => "read_first"),
@@ -474,12 +489,19 @@ test("rejects reuse of a submission ID with a different prompt", async () => {
 });
 
 test("retries a model step after a successful tool without running the tool again", async () => {
+	using diagnostics = vi.spyOn(console, "warn");
 	const stub = openFixture();
 	const { runId } = await submit(stub, { id: "retry", prompt: "Retry after append." });
 	await expect
 		.poll(() => stub.turn(runId), { timeout: 5000 })
 		.toMatchObject({ state: "completed" });
 	expect(await stub.state()).toMatchObject({ text: "Retry after append." });
+	expect(diagnostics).toHaveBeenCalledWith({
+		event: "task:step:retry",
+		runId,
+		step: "model:1",
+		stepAttempt: 2,
+	});
 });
 
 const modelInterruptedMessage =
@@ -496,6 +518,7 @@ test.each([
 ] as const)(
 	"settles a repeatedly interrupted $work and runs the queued follow-up",
 	async ({ attempts, code, point, text }) => {
+		using diagnostics = vi.spyOn(console, "warn");
 		let stub = openFixture();
 		await stub.pause(point);
 		const input = { id: "repeated-reset", prompt: "Append hello, then world." };
@@ -512,6 +535,11 @@ test.each([
 		}
 		const failure = { code, message: text };
 		await expect.poll(() => stub.turn(first.runId)).toMatchObject({ state: "failed", failure });
+		expect(diagnostics).toHaveBeenCalledWith({
+			event: "task:failed",
+			runId: first.runId,
+			errorName: "ModelInterruptedError",
+		});
 		await expect
 			.poll(() => readTurn(stub, followUp.runId))
 			.toMatchObject({
@@ -595,6 +623,7 @@ test("uses an acknowledged exec result at the restart limit and continues the tu
 }, 15_000);
 
 test("continues after a partial exec at the restart limit with its saved tool receipts", async () => {
+	using diagnostics = vi.spyOn(console, "warn");
 	let stub = openFixture();
 	await stub.pause("during-replay-read");
 	const { runId } = await submit(stub, { id: "partial-exec", prompt: restartLimitPrompt });
@@ -633,6 +662,13 @@ test("continues after a partial exec at the restart limit with its saved tool re
 			},
 		});
 	await expect.poll(() => stub.turn(followUp.runId)).toMatchObject({ state: "completed" });
+	expect(diagnostics).toHaveBeenCalledWith({
+		event: "exec:restart-limit",
+		runId,
+		executionId: `${runId}:tool:0`,
+		toolCallId: "exec-restart-limit",
+		toolStatus: "unknown",
+	});
 	const { second } = await stub.replayCalls();
 	expect(second).toHaveLength(5);
 	expect(new Set(second).size).toBe(1);

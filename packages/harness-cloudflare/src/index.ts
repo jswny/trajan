@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, tracing } from "cloudflare:workers";
 import {
 	publishUpdate,
 	restoreModelContext,
@@ -27,9 +27,11 @@ import type { Layer } from "effect";
 import { ConversationStore } from "./conversation-store";
 import type { HistoryQuery } from "./conversation-store";
 import { ModelDrafts } from "./model-drafts";
+import { observeTurnTasks } from "./task-diagnostics";
 
 // Tasks and jobs use these names to look up work persisted by prior isolates.
 const turnDefinition = "turn@v3";
+observeTurnTasks(turnDefinition);
 const inboxWakeJob = "harness-inbox:wake";
 const inboxBackoffKey = "harness-inbox:wake-backoff";
 const taskJournalPruneJob = "harness-task-retention:prune";
@@ -359,28 +361,35 @@ function taskJournal(
 								idempotencyKey,
 								recovering: interrupted !== null || attempt > 1,
 							};
-							return runPromise(
-								restartBudget.pipe(
-									Effect.flatMap((exhaustedRestartLimit) =>
-										kind === "model"
-											? drafts.capture(runId, name, attempt, (recordText) =>
-													run({ ...input, recordText }),
-												)
-											: run({ ...input, ...(exhaustedRestartLimit && { exhaustedRestartLimit }) }),
-									),
-									Effect.flatMap(Schema.decodeUnknownEffect(result)),
-									Effect.flatMap((value) => saveDecision(value, signal)),
-									Effect.mapError((error) =>
-										error instanceof TurnModelError && !error.retryable
-											? new NonRetryableModelError(error)
-											: error,
-									),
-									Effect.withSpan("harness.step.attempt", {
-										attributes: { runId, name, attempt },
-									}),
+							const work = restartBudget.pipe(
+								Effect.flatMap((exhaustedRestartLimit) =>
+									kind === "model"
+										? drafts.capture(runId, name, attempt, (recordText) =>
+												run({ ...input, recordText }),
+											)
+										: run({ ...input, ...(exhaustedRestartLimit && { exhaustedRestartLimit }) }),
 								),
-								{ signal },
+								Effect.flatMap(Schema.decodeUnknownEffect(result)),
+								Effect.flatMap((value) => saveDecision(value, signal)),
+								Effect.mapError((error) =>
+									error instanceof TurnModelError && !error.retryable
+										? new NonRetryableModelError(error)
+										: error,
+								),
+								Effect.withSpan("harness.step.attempt", {
+									attributes: { runId, name, attempt },
+								}),
 							);
+							return tracing.enterSpan("harness.step.attempt", (span) => {
+								span.setAttributes({
+									runId,
+									step: name,
+									stepAttempt: attempt,
+									recovering: input.recovering,
+									...(kind === "tool" && { executionId: idempotencyKey }),
+								});
+								return runPromise(work, { signal });
+							});
 						},
 					),
 				).pipe(
