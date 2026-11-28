@@ -395,6 +395,63 @@ test("deduplicates a submission and retains one complete transcript", async () =
 	expect(await stub.state()).toMatchObject({ text: "hello" });
 });
 
+test("prunes old completed task journals only when the conversation is settled", async () => {
+	const stub = openFixture();
+	const old = await submit(stub, { id: "old-journal", prompt: "hello" });
+	const failed = await submit(stub, { id: "failed-journal", prompt: "Fail this turn." });
+	const recent = await submit(stub, { id: "recent-journal", prompt: "world" });
+	await expect.poll(() => stub.taskState(recent.runId)).toBe("completed");
+	await expect
+		.poll(() => stub.turn(failed.runId))
+		.toMatchObject({ state: "failed", failure: { code: "model" } });
+	await runInDurableObject(stub, (_, { storage }) => {
+		storage.sql.exec(
+			"UPDATE cf_agents_task_runs SET settled_at = ? WHERE run_id IN (?, ?)",
+			1,
+			old.runId,
+			failed.runId,
+		);
+	});
+	const runRetention = async () => {
+		await runInDurableObject(stub, async (instance, { storage }) => {
+			storage.sql.exec(
+				"UPDATE cf_agents_jobs SET time = ? WHERE capability = 'harness-task-retention'",
+				Date.now(),
+			);
+			await instance.lifecycle.rearmAlarm();
+		});
+		await runDurableObjectAlarm(stub);
+	};
+
+	await stub.pause("during-reply");
+	const active = await submit(stub, { id: "active-journal", prompt: "again" });
+	await expect.poll(() => stub.state()).toMatchObject({ pausedAt: "during-reply" });
+	await runRetention();
+	expect(await stub.taskState(old.runId)).toBe("completed");
+	expect(await stub.taskState(active.runId)).toBe("running");
+	await stub.release();
+	await expect.poll(() => stub.taskState(active.runId)).toBe("completed");
+
+	await runRetention();
+	expect(await stub.taskState(old.runId)).toBe("missing");
+	expect(await stub.taskState(recent.runId)).toBe("completed");
+	expect(await stub.turn(failed.runId)).toMatchObject({ failure: { code: "model" } });
+	expect(await readTurn(stub, old.runId)).toMatchObject({
+		state: "completed",
+		result: { submissionId: "old-journal" },
+	});
+	expect(await stub.submit({ id: "old-journal", prompt: "hello" })).toMatchObject({
+		accepted: false,
+		runId: old.runId,
+	});
+	const steps = await runInDurableObject(stub, (_, { storage }) =>
+		storage.sql
+			.exec("SELECT step_name FROM cf_agents_task_steps WHERE run_id = ?", old.runId)
+			.toArray(),
+	);
+	expect(steps).toEqual([]);
+});
+
 test("validates a submission before it can start a task", async () => {
 	const stub = openFixture();
 	expect(await stub.submit({ id: "", prompt: "hello" })).toMatchObject({

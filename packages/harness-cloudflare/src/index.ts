@@ -32,6 +32,10 @@ import { ModelDrafts } from "./model-drafts";
 const turnDefinition = "turn@v3";
 const inboxWakeJob = "harness-inbox:wake";
 const inboxBackoffKey = "harness-inbox:wake-backoff";
+const taskJournalPruneJob = "harness-task-retention:prune";
+const dayMs = 24 * 60 * 60 * 1000;
+const taskJournalRetentionMs = 7 * dayMs;
+const taskJournalPruneLimit = 50;
 const inboxHeartbeatMs = 30_000;
 const maxInboxBackoffMs = 10 * 60_000;
 const stepRestartLimit = 5;
@@ -161,6 +165,52 @@ class InboxWake extends LifecycleCapability {
 					);
 					return { rescheduleAt: now + backoffMs };
 				}),
+			);
+		}
+	}
+}
+
+class TaskJournalRetention extends LifecycleCapability {
+	constructor(private readonly prune: (settledBefore: Date) => Effect.Effect<number, TurnIoError>) {
+		super("harness-task-retention");
+	}
+
+	onStart() {
+		return Effect.runPromise(
+			publishUpdate("schedule task journal retention", () =>
+				Effect.gen({ self: this }, function* () {
+					if (this.lifecycle.jobs.get(taskJournalPruneJob) === undefined) {
+						const now = yield* Clock.currentTimeMillis;
+						yield* lifecycleEffect("schedule task journal retention", () =>
+							this.lifecycle.jobs.push({ id: taskJournalPruneJob, fn: "prune", time: now + dayMs }),
+						);
+					}
+				}),
+			),
+		);
+	}
+
+	onJob({ job }: LifecycleJobContext) {
+		if (job.id === taskJournalPruneJob) {
+			return Effect.runPromise(
+				Effect.gen({ self: this }, function* () {
+					const now = yield* Clock.currentTimeMillis;
+					const count = yield* this.prune(new Date(now - taskJournalRetentionMs));
+					return count === taskJournalPruneLimit
+						? ("yield" as const)
+						: { rescheduleAt: now + dayMs };
+				}),
+			);
+		}
+	}
+
+	onJobError({ job }: LifecycleJobContext, error: unknown) {
+		if (job.id === taskJournalPruneJob) {
+			return Effect.runPromise(
+				Effect.logWarning("Task journal cleanup failed", error).pipe(
+					Effect.andThen(Clock.currentTimeMillis),
+					Effect.map((now) => ({ rescheduleAt: now + dayMs })),
+				),
 			);
 		}
 	}
@@ -424,7 +474,26 @@ export abstract class CloudflareHarness<
 				),
 		},
 	});
-	readonly lifecycle = Lifecycle.install(this).use(this.#streams).use(this.#tasks).use(this.#inbox);
+	readonly #taskJournalRetention = new TaskJournalRetention((settledBefore) =>
+		lifecycleEffect("prune task journals", () =>
+			this.ctx.blockConcurrencyWhile(async () => {
+				// A terminal SDK task can still be evidence needed to settle the inbox head.
+				if (this.#conversation.head()) {
+					return 0;
+				}
+				return this.#tasks.delete({
+					status: ["completed"],
+					settledBefore,
+					limit: taskJournalPruneLimit,
+				});
+			}),
+		),
+	);
+	readonly lifecycle = Lifecycle.install(this)
+		.use(this.#streams)
+		.use(this.#tasks)
+		.use(this.#inbox)
+		.use(this.#taskJournalRetention);
 	readonly #start = lifecycleEffect("start lifecycle", () => this.lifecycle.start());
 
 	#getTask(runId: string) {
