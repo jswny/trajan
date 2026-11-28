@@ -4,7 +4,7 @@ import { env } from "cloudflare:workers";
 import { ToolResult, TurnMessage, TurnTranscript } from "@trajan/harness";
 import { Effect, Option, Schema } from "effect";
 import { expect, test, vi } from "vite-plus/test";
-import { ChatEvent, ChatLivePath } from "../chat/protocol";
+import { ChatAgentPrefix, ChatEvent, ChatLivePath, ChatName } from "../chat/protocol";
 import { toolActivity } from "../chat/tool-activity";
 import { createLiveBrowser } from "../live-browser";
 import { nextWeeklyRun } from "../schedule-plan";
@@ -29,6 +29,7 @@ import {
 	scheduleOutcomePrompt,
 } from "./openai-responses-fixture";
 import { createTrajanWorkspace, workspaceToolset } from "../workspace";
+import worker from "../server";
 
 const submission = { id: "submission-1", prompt: "hello" };
 const prompt = { role: "user", text: submission.prompt };
@@ -1403,14 +1404,23 @@ test("stops only the active run and drains a queued follow-up", async () => {
 	]);
 });
 
-test("a chat socket restores a completed transcript from durable history", async () => {
-	const stub = openFixture();
+test("the SDK route restores the singleton chat from durable history", async () => {
+	const stub = env.CHAT_TEST.getByName(ChatName);
 	const { runId } = await submit(stub, { id: "seen", prompt: "Remember milk" });
 	await expect.poll(() => stub.turn(runId)).toMatchObject({ state: "completed" });
 	await expect(stub.crash()).rejects.toThrow(/forced chat fixture restart|reset/i);
-	const response = await env.CHAT_TEST.get(stub.id).fetch(
-		new Request(`https://fixture${ChatLivePath}`, { headers: { Upgrade: "websocket" } }),
-	);
+	const bindings = { Trajan: env.CHAT_TEST };
+	const route = (path: string, origin = "https://fixture") =>
+		worker.fetch(
+			new Request(`https://fixture${path}`, { headers: { Upgrade: "websocket", Origin: origin } }),
+			bindings,
+		);
+	expect((await route(`/${ChatAgentPrefix}/trajan/elsewhere`)).status).toBe(404);
+	expect((await route(`/${ChatAgentPrefix}/code-mode-sandbox/${ChatName}`)).status).toBe(404);
+	expect((await route(`${ChatLivePath}?name=elsewhere`)).status).toBe(404);
+	expect((await route(ChatLivePath, "https://elsewhere.invalid")).status).toBe(403);
+	const response = await route(`${ChatLivePath}?_pk=fixture-client`);
+	expect(response.status).toBe(101);
 	const socket = response.webSocket;
 	if (!socket) {
 		throw new Error("Expected a chat socket");

@@ -39,11 +39,14 @@ async function mockLiveBrowser(page: Page) {
 	const now = () => page.evaluate(() => Date.now());
 	const watch = async (id: string) => ({ id, expiresAt: (await now()) + 120_000 });
 
-	await page.routeWebSocket(`**${ChatLivePath}`, (client) => {
-		const send = (event: typeof ChatEvent.Type) => client.send(JSON.stringify(event));
-		send(snapshot);
-		connected.resolve(send);
-	});
+	await page.routeWebSocket(
+		(url) => url.pathname === ChatLivePath,
+		(client) => {
+			const send = (event: typeof ChatEvent.Type) => client.send(JSON.stringify(event));
+			send(snapshot);
+			connected.resolve(send);
+		},
+	);
 	await page.route(`**${BrowserViewPath}`, async (route) => {
 		expect(route.request().method()).toBe("POST");
 		const { id } = decodeViewRequest(route.request().postDataJSON());

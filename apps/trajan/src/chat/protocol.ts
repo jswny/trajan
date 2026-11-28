@@ -2,7 +2,10 @@ import { InterruptedReply, ToolActivity, ToolCall, ToolResult, TurnMessage } fro
 import { Schema } from "effect";
 
 export const ChatPath = "/api/chat";
-export const ChatLivePath = `${ChatPath}/live`;
+export const ChatAgent = "trajan";
+export const ChatName = "main";
+export const ChatAgentPrefix = "api/agents";
+export const ChatLivePath = `/${ChatAgentPrefix}/${ChatAgent}/${ChatName}`;
 export const ChatHistoryPath = `${ChatPath}/history`;
 export const ChatStopPath = `${ChatPath}/stop`;
 export const BrowserViewPath = `${ChatPath}/browser-view`;

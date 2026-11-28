@@ -2,9 +2,9 @@ import { TurnSubmission } from "@trajan/harness";
 import { Context, Effect, Exit, Layer, Option, Queue, Schema, Scope, Stream } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { KeyValueStore } from "effect/persistence";
-import { Socket } from "effect/socket";
 import { TestClock } from "effect/testing";
 import { expect, test } from "vite-plus/test";
+import { ChatConnection } from "../chat/connection";
 import { ChatHttp } from "../chat/http-client";
 import { ChatSnapshot } from "../chat/protocol";
 import { ChatSession, INITIAL_CHAT, mergeChatPage, receiveChatEvent } from "../chat-session";
@@ -83,18 +83,35 @@ const decodeSubmission = Schema.decodeUnknownSync(Schema.fromJsonString(TurnSubm
 const socketFixture = Effect.fnUntraced(function* () {
 	const opened = yield* Queue.unbounded<void>();
 	const closed = yield* Queue.unbounded<void>();
-	const frames = yield* Queue.unbounded<[string]>();
-	const socket = Socket.make({
-		reader: Effect.acquireRelease(Queue.offer(opened, undefined), () =>
-			Queue.offer(closed, undefined),
-		).pipe(Effect.as({ pull: Queue.take(frames), upgrade: () => Effect.void })),
-		writer: Effect.succeed({ write: () => Effect.void, writeAll: () => Effect.void }),
-	});
-	return { socket, opened, closed, sendSnapshot: Queue.offer(frames, [snapshot]) };
+	const reconnected = yield* Queue.unbounded<void>();
+	const frames = yield* Queue.unbounded<Stream.Success<ChatConnection["Service"]["events"]>>();
+	const open = Queue.offer(frames, { type: "open" }).pipe(
+		Effect.andThen(Queue.offer(opened, undefined)),
+	);
+	const connection = Layer.effect(
+		ChatConnection,
+		Effect.acquireRelease(open, () => Queue.offer(closed, undefined)).pipe(
+			Effect.as({
+				events: Stream.fromQueue(frames),
+				reconnect: Queue.offer(frames, { type: "close" }).pipe(
+					Effect.andThen(Queue.offer(reconnected, undefined)),
+					Effect.asVoid,
+				),
+			}),
+		),
+	);
+	return {
+		connection,
+		opened,
+		closed,
+		reconnected,
+		open,
+		sendSnapshot: Queue.offer(frames, { type: "frame", data: snapshot }),
+	};
 });
 
 const sessionFixture = Effect.fnUntraced(function* (
-	socket: Socket.Socket,
+	connection: Layer.Layer<ChatConnection>,
 	fetch: typeof globalThis.fetch,
 ) {
 	const http = Layer.effect(
@@ -110,7 +127,7 @@ const sessionFixture = Effect.fnUntraced(function* (
 	const layer = ChatSession.layer.pipe(
 		Layer.provide([
 			ChatHttp.layer.pipe(Layer.provide(http)),
-			Layer.succeed(Socket.Socket, socket),
+			connection,
 			KeyValueStore.layerMemory,
 		]),
 	);
@@ -139,22 +156,19 @@ test("reconnects after the initial snapshot times out and holds submissions unti
 		Effect.gen(function* () {
 			const socket = yield* socketFixture();
 			let requests = 0;
-			const { session } = yield* sessionFixture(socket.socket, () => {
+			const { session } = yield* sessionFixture(socket.connection, () => {
 				requests++;
 				return Promise.reject(new Error("Unexpected HTTP request"));
 			});
 			yield* Queue.take(socket.opened);
 			session.dispatch(submitDraft);
 			yield* TestClock.adjust(4999);
-			expect(yield* Queue.size(socket.closed)).toBe(0);
+			expect(yield* Queue.size(socket.reconnected)).toBe(0);
 			yield* TestClock.adjust(1);
-			expect(yield* Queue.size(socket.closed)).toBe(1);
+			expect(yield* Queue.size(socket.reconnected)).toBe(1);
 			const state = yield* waitForState(session, (state) => state.status === "reconnecting");
 			expect(state.submission).toBeNull();
-			yield* TestClock.adjust(749);
-			expect(yield* Queue.size(socket.opened)).toBe(0);
-			yield* TestClock.adjust(1);
-			yield* Queue.take(socket.opened);
+			yield* socket.open;
 			yield* socket.sendSnapshot;
 			yield* waitForState(session, (state) => state.status === "open");
 			expect(requests).toBe(0);
@@ -170,7 +184,7 @@ test("retries a timed-out submission with the same ID and accepts its receipt", 
 				signal: AbortSignal;
 			}>();
 			let requests = 0;
-			const { session } = yield* sessionFixture(socket.socket, async (url, init) => {
+			const { session } = yield* sessionFixture(socket.connection, async (url, init) => {
 				const signal = init?.signal;
 				if (!signal) {
 					throw new Error("Expected a scoped HTTP request signal");
@@ -216,7 +230,7 @@ test("closing the session aborts an open HTTP response body and the socket", () 
 			const socket = yield* socketFixture();
 			const bodyReads = yield* Queue.unbounded<AbortSignal>();
 			let requests = 0;
-			const { session, close } = yield* sessionFixture(socket.socket, (_, init) => {
+			const { session, close } = yield* sessionFixture(socket.connection, (_, init) => {
 				const signal = init?.signal;
 				if (!signal) {
 					throw new Error("Expected a scoped HTTP request signal");
@@ -257,6 +271,7 @@ test("closing the session aborts an open HTTP response body and the socket", () 
 			expect(yield* Queue.size(socket.closed)).toBe(1);
 			yield* TestClock.adjust("1 minute");
 			expect(yield* Queue.size(socket.opened)).toBe(0);
+			expect(yield* Queue.size(socket.reconnected)).toBe(0);
 			expect(requests).toBe(1);
 		}),
 	));

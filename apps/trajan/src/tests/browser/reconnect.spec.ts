@@ -3,7 +3,14 @@ import { TurnSubmission } from "@trajan/harness";
 import { devices } from "@playwright/test";
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { Schema } from "effect";
-import { ChatEvent, ChatHistoryPath, ChatPage, ChatPath, ChatReceipt } from "../../chat/protocol";
+import {
+	ChatEvent,
+	ChatHistoryPath,
+	ChatLivePath,
+	ChatPage,
+	ChatPath,
+	ChatReceipt,
+} from "../../chat/protocol";
 import { expect, test } from "./fixtures";
 
 const decodeFrame = Schema.decodeUnknownOption(Schema.fromJsonString(ChatEvent));
@@ -133,32 +140,47 @@ test("uses the submission prompt limit for the composer", async ({ page }) => {
 	await expect(send).toBeDisabled();
 });
 
-test("does not send while the initial snapshot is missing", async ({ page }) => {
+test("waits for the chat snapshot on first connect and after a socket drop", async ({ page }) => {
 	const submissions = observeSubmissions(page);
-	let deliver: (() => void) | undefined;
-	await page.routeWebSocket("**/api/chat/live", (client) => {
-		const server = client.connectToServer();
-		server.onMessage((data) => {
-			const frame = decodeFrame(String(data));
-			if (frame._tag === "Some" && frame.value.type === "snapshot" && deliver === undefined) {
-				deliver = () => client.send(data);
-			} else {
-				client.send(data);
-			}
-		});
-	});
+	let nextSnapshot = Promise.withResolvers<() => void>();
+	let disconnect: (() => Promise<void>) | undefined;
+	let holdSnapshot = true;
+	await page.routeWebSocket(
+		(url) => url.pathname === ChatLivePath,
+		(client) => {
+			const server = client.connectToServer();
+			disconnect ??= () => client.close({ code: 1012, reason: "Restart" });
+			server.onMessage((data) => {
+				const frame = decodeFrame(String(data));
+				if (frame._tag === "Some" && frame.value.type === "snapshot" && holdSnapshot) {
+					holdSnapshot = false;
+					nextSnapshot.resolve(() => client.send(data));
+				} else {
+					client.send(data);
+				}
+			});
+		},
+	);
 	await page.goto("/");
 	const composer = page.getByRole("textbox", { name: "Message Trajan" });
-	await expect.poll(() => deliver !== undefined).toBe(true);
+	const deliver = await nextSnapshot.promise;
 	await composer.fill("Remember the blocked draft");
 	await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
 	await composer.press("Enter");
 	await expect(composer).toHaveValue(/^Remember the blocked draft\n?$/);
 	expect(submissions).toEqual([]);
-	deliver?.();
+	deliver();
 	await expect(page.locator("header").getByRole("status")).toHaveText("Live");
 	expect(submissions).toEqual([]);
 	await composer.fill("Remember milk");
+	holdSnapshot = true;
+	nextSnapshot = Promise.withResolvers<() => void>();
+	await disconnect?.();
+	await expect(page.locator("header").getByRole("status")).toHaveText("Reconnecting");
+	const deliverAfterReconnect = await nextSnapshot.promise;
+	await expect(composer).toHaveValue("Remember milk");
+	await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
+	deliverAfterReconnect();
 	await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
 	await composer.press("Enter");
 	await expect(page.getByRole("main").getByText("Remembering milk", { exact: true })).toHaveCount(

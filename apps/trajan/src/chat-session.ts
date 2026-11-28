@@ -1,10 +1,21 @@
 import { TurnSubmission } from "@trajan/harness";
-import { Context, Effect, Layer, Option, Queue, Schedule, Schema, SubscriptionRef } from "effect";
+import {
+	Context,
+	Effect,
+	FiberHandle,
+	Layer,
+	Option,
+	Queue,
+	Schedule,
+	Schema,
+	Stream,
+	SubscriptionRef,
+} from "effect";
 import { KeyValueStore } from "effect/persistence";
-import { Socket } from "effect/socket";
+import { ChatConnection } from "./chat/connection";
 import { ChatHttp, ChatRequestError } from "./chat/http-client";
 import { updateToolPreview } from "./chat/preview";
-import { ChatEvent, ChatLivePath } from "./chat/protocol";
+import { ChatEvent } from "./chat/protocol";
 import type { ChatPage, ChatSnapshot } from "./chat/protocol";
 
 export type PromptDraft = { readonly text: string };
@@ -130,7 +141,7 @@ export function receiveChatEvent(state: ChatState, event: typeof ChatEvent.Type)
 
 const openChatSession = Effect.fn("chat.session")(function* () {
 	const http = yield* ChatHttp;
-	const socket = yield* Socket.Socket;
+	const connection = yield* ChatConnection;
 	const pending = KeyValueStore.toSchemaStore(yield* KeyValueStore.KeyValueStore, TurnSubmission);
 	const restored = yield* pending
 		.get(pendingSendKey)
@@ -143,6 +154,7 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 	});
 	let recoveryId = restored?.id;
 	const scope = yield* Effect.scope;
+	const snapshotTimer = yield* FiberHandle.make();
 	const commands = yield* Queue.unbounded<ChatCommand>();
 	yield* Effect.addFinalizer(() => Queue.shutdown(commands));
 
@@ -169,41 +181,39 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 					)
 			: Effect.succeed(current);
 	});
-	const receive = (frame: string) =>
-		decodeFrame(frame).pipe(
-			Effect.flatMap((event) =>
-				SubscriptionRef.update(state, (current) => receiveChatEvent(current, event)).pipe(
-					Effect.andThen(
-						event.type === "snapshot" || event.type === "run-state"
-							? reconcileDelivery
-							: Effect.void,
-					),
-				),
-			),
-		);
-	const connection = Effect.gen(function* () {
-		const pull = yield* Socket.readerString(socket);
-		const read = pull.pipe(Effect.flatMap(Effect.forEach(receive, { discard: true })));
-		yield* Effect.gen(function* () {
-			while ((yield* SubscriptionRef.get(state)).status !== "open") {
-				yield* read;
-			}
-		}).pipe(Effect.timeout("5 seconds"));
-		if (recoveryId !== undefined) {
+	const receive = Effect.fnUntraced(function* (frame: string) {
+		const event = yield* decodeFrame(frame);
+		if (event.type === "snapshot") {
+			yield* FiberHandle.clear(snapshotTimer);
+		}
+		yield* SubscriptionRef.update(state, (current) => receiveChatEvent(current, event));
+		if (event.type === "snapshot" || event.type === "run-state") {
+			yield* reconcileDelivery;
+		}
+		if (event.type === "snapshot" && recoveryId !== undefined) {
 			const id = recoveryId;
 			recoveryId = undefined;
 			yield* Queue.offer(commands, { type: "retry", id });
 		}
-		return yield* Effect.forever(
-			pull.pipe(Effect.flatMap(Effect.forEach(receive, { discard: true }))),
-		);
-	}).pipe(
-		Effect.scoped,
-		Effect.ensuring(update({ status: "reconnecting" })),
-		Effect.catch(() => Effect.sleep("750 millis")),
-		Effect.forever,
+	});
+	yield* connection.events.pipe(
+		Stream.runForEach((event) => {
+			switch (event.type) {
+				case "open":
+					return FiberHandle.run(
+						snapshotTimer,
+						Effect.sleep("5 seconds").pipe(Effect.andThen(connection.reconnect)),
+					).pipe(Effect.asVoid);
+				case "close":
+					return FiberHandle.clear(snapshotTimer).pipe(
+						Effect.andThen(update({ status: "reconnecting" })),
+					);
+				case "frame":
+					return receive(event.data).pipe(Effect.catchTag("SchemaError", () => Effect.void));
+			}
+		}),
+		Effect.forkScoped,
 	);
-	yield* Effect.forkScoped(connection);
 
 	const submit = Effect.fn("chat.submit")(function* (
 		command: Extract<ChatCommand, { type: "submit" | "retry" }>,
@@ -331,15 +341,6 @@ const openChatSession = Effect.fn("chat.session")(function* () {
 	};
 });
 
-const chatSocket = Socket.layerWebSocket(
-	Effect.sync(() => {
-		const url = new URL(ChatLivePath, window.location.href);
-		url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-		return url.href;
-	}),
-	{ openTimeout: "5 seconds" },
-).pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal));
-
 const pendingSends = Layer.unwrap(
 	Effect.try(() => window.sessionStorage).pipe(
 		Effect.match({
@@ -357,5 +358,7 @@ export class ChatSession extends Context.Service<
 	}
 >()("trajan/ChatSession") {
 	static readonly layer = Layer.effect(ChatSession, openChatSession());
-	static readonly live = this.layer.pipe(Layer.provide([ChatHttp.live, chatSocket, pendingSends]));
+	static readonly live = this.layer.pipe(
+		Layer.provide([ChatHttp.live, ChatConnection.live, pendingSends]),
+	);
 }

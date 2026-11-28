@@ -7,7 +7,7 @@ assert.equal(health.status, 200);
 assert.deepEqual(await health.json(), { ok: true, service: "trajan" });
 const marker = `trajan-smoke-${crypto.randomUUID()}`;
 const file = `/workspace/${marker}.txt`;
-const socketUrl = new URL("/api/chat/live", base);
+const socketUrl = new URL("/api/agents/trajan/main", base);
 socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
 
 function watch(accept) {

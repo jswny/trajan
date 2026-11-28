@@ -1,11 +1,18 @@
 import { TurnModel, TurnTools } from "@trajan/harness";
 import { openAiTurnModel } from "@trajan/model-openai";
 import { Browser, browserRun } from "agents/browser";
+import { routeAgentRequest } from "agents/routing";
 import { Data, Effect, Layer } from "effect";
 import { browserKeepAliveMs, browserToolset } from "./browser";
 import { createChatExec } from "./chat/exec";
 import { openAiGatewayTransport } from "./chat/openai-gateway";
-import { BrowserViewPath, ChatLivePath, isChatPath } from "./chat/protocol";
+import {
+	BrowserViewPath,
+	ChatAgentPrefix,
+	ChatLivePath,
+	ChatName,
+	isChatPath,
+} from "./chat/protocol";
 import { TrajanChatObject } from "./chat/worker-host";
 import { browserViewHeaders, createLiveBrowser } from "./live-browser";
 import { modelConfig } from "./model-config";
@@ -77,7 +84,10 @@ export class Trajan extends TrajanChatObject {
 }
 
 export default {
-	async fetch(request: Request, env: Env): Promise<Response> {
+	async fetch(
+		request: Request,
+		env: { readonly Trajan: DurableObjectNamespace },
+	): Promise<Response> {
 		const url = new URL(request.url);
 		if (url.pathname === "/api/health") {
 			return Response.json({ ok: true, service: "trajan" });
@@ -96,12 +106,27 @@ export default {
 			return new Response(null, { status: 403, headers: browserViewHeaders });
 		}
 		const socket = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
-		if (socket !== (url.pathname === ChatLivePath) || (socket && url.search !== "")) {
+		if (socket !== (url.pathname === ChatLivePath)) {
+			return new Response("Not found", { status: 404 });
+		}
+		if (
+			socket &&
+			url.searchParams.size > 0 &&
+			!(url.searchParams.size === 1 && url.searchParams.has("_pk"))
+		) {
 			return new Response("Not found", { status: 404 });
 		}
 		return Effect.runPromise(
 			Effect.tryPromise({
-				try: () => env.Trajan.getByName("main").fetch(request),
+				try: async () => {
+					if (!socket) {
+						return env.Trajan.getByName(ChatName).fetch(request);
+					}
+					return (
+						(await routeAgentRequest(request, env, { prefix: ChatAgentPrefix })) ??
+						new Response("Not found", { status: 404 })
+					);
+				},
 				catch: (cause) => new ChatRouteError({ cause }),
 			}).pipe(
 				Effect.catch((error) =>
