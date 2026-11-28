@@ -17,6 +17,7 @@ import {
 	handoffPrompt,
 	longDraftPrompt,
 	retryStreamPrompt,
+	restartLimitPrompt,
 	skillExecInput,
 } from "./chat-runtime-fixture";
 import {
@@ -492,13 +493,6 @@ test.each([
 		code: "model_interrupted",
 		text: modelInterruptedMessage,
 	},
-	{
-		work: "tool step",
-		point: "after-write",
-		attempts: 5,
-		code: "restart_limit",
-		text: "The turn stopped after 5 consecutive interruptions of the same tool step.",
-	},
 ] as const)(
 	"settles a repeatedly interrupted $work and runs the queued follow-up",
 	async ({ attempts, code, point, text }) => {
@@ -570,6 +564,80 @@ test.each([
 	},
 	15_000,
 );
+
+test("uses an acknowledged exec result at the restart limit and continues the turn", async () => {
+	let stub = openFixture();
+	await stub.pause("after-write");
+	const { runId } = await submit(stub);
+	for (let count = 0; count < 5; count++) {
+		stub = await interruptPausedTurn(stub, "after-write");
+	}
+	await expect
+		.poll(() => readTurn(stub, runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					prompt,
+					toolCall,
+					{
+						role: "tool",
+						result: {
+							...completedTool,
+							activity: [{ name: "read" }, { name: "write", status: "completed" }],
+						},
+					},
+					{ role: "assistant", text: 'Wrote "hello"' },
+				],
+			},
+		});
+	expect((await stub.state()).text).toBe("hello");
+}, 15_000);
+
+test("continues after a partial exec at the restart limit with its saved tool receipts", async () => {
+	let stub = openFixture();
+	await stub.pause("during-replay-read");
+	const { runId } = await submit(stub, { id: "partial-exec", prompt: restartLimitPrompt });
+	const followUp = await submit(stub, {
+		id: "after-partial-exec",
+		prompt: "Remember the follow-up.",
+	});
+	for (let count = 0; count < 5; count++) {
+		stub = await interruptPausedTurn(stub, "during-replay-read");
+	}
+	const receipt = '{"name":"write","status":"completed","path":"/workspace/turn.txt"}';
+	await expect
+		.poll(() => readTurn(stub, runId))
+		.toMatchObject({
+			state: "completed",
+			result: {
+				messages: [
+					{ role: "user", text: restartLimitPrompt },
+					{ role: "tool-call", name: "exec" },
+					{
+						role: "tool",
+						result: {
+							status: "unknown",
+							message: expect.stringContaining(receipt),
+							activity: [
+								{
+									name: "write",
+									status: "completed",
+									fileChange: { diff: expect.stringContaining("+written") },
+								},
+							],
+						},
+					},
+					{ role: "assistant", text: expect.stringContaining(receipt) },
+				],
+			},
+		});
+	await expect.poll(() => stub.turn(followUp.runId)).toMatchObject({ state: "completed" });
+	const { second } = await stub.replayCalls();
+	expect(second).toHaveLength(5);
+	expect(new Set(second).size).toBe(1);
+	expect((await stub.state()).text).toBe("written");
+}, 15_000);
 
 test("the next checkpoint starts with its own restart budget", async () => {
 	let stub = openFixture();

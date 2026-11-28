@@ -8,7 +8,12 @@ import { Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
 import { execName, ExecInput } from "../exec-contract";
 import type { ChatToolPreview } from "./protocol";
-import { RECENT_TOOL_CALLS, toolActivity, uncertainToolEffects } from "./tool-activity";
+import {
+	describeRecoveredTool,
+	RECENT_TOOL_CALLS,
+	toolActivity,
+	uncertainToolEffects,
+} from "./tool-activity";
 import type { ToolActivity } from "./tool-presentation";
 
 const Exec = Tool.make(execName, { parameters: ExecInput, success: Schema.Json });
@@ -123,6 +128,31 @@ export function createChatExec(
 			}),
 		),
 	);
+	const recover = Effect.fn("chat.exec.recover")(function* (
+		...[, { runId, idempotencyKey }, limit]: Parameters<
+			NonNullable<TurnTools["Service"]["recover"]>
+		>
+	) {
+		const { saved, calls } = yield* Effect.try({
+			try: () => codeMode.readExecution(idempotencyKey, runId, "settled"),
+			catch: executionError,
+		});
+		const activity = settledActivity(calls);
+		if (saved?.result) {
+			return { ...completedToolResult(saved.result.value), ...activity };
+		}
+		const recorded = calls
+			.filter(({ reply }) => reply?.status === "returned" || reply?.status === "failed")
+			.slice(-RECENT_TOOL_CALLS)
+			.map((entry) => describeRecoveredTool(toolActivity(entry)));
+		const message = `The script was interrupted ${limit} times and stopped before returning a result.`;
+		return {
+			...unknownOutcome(
+				recorded.length ? `${message} Recorded calls: ${JSON.stringify(recorded)}.` : message,
+			),
+			...activity,
+		};
+	});
 
 	function readRecordedExecutions(runId: string, view: "live" | "settled") {
 		return readExecutions(storage, runId).flatMap(({ executionId, callId }) => {
@@ -200,6 +230,6 @@ export function createChatExec(
 			].join("\n"),
 			parameters: { ...Tool.getJsonSchema(Exec), additionalProperties: false },
 		},
-		service: { execute },
+		service: { execute, recover },
 	};
 }

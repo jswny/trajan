@@ -71,6 +71,7 @@ type PausePoint =
 const workspaceFile = "/workspace/turn.txt";
 const replayPrompt = "Replay two reads.";
 const replayCall = "exec-replay";
+export const restartLimitPrompt = "Recover an exec after repeated restarts.";
 const writeReplayPrompt = "Recover an interrupted write.";
 const editReplayPrompt = "Recover an interrupted edit.";
 const editReplayCall = "exec-replay-edit";
@@ -448,6 +449,20 @@ export default async function () {
 					code: `import { read_first, read_second } from "codemode:tools";
 export default async function () {
   return [await read_first(), await read_second()];
+}`,
+				},
+			};
+		}
+		if (last?.role === "user" && last.text === restartLimitPrompt) {
+			return {
+				role: "tool-call",
+				id: "exec-restart-limit",
+				name: "exec",
+				input: {
+					code: `import { write, read_second } from "codemode:tools";
+export default async function () {
+  await write({ path: ${JSON.stringify(workspaceFile)}, content: "written" });
+  return await read_second();
 }`,
 				},
 			};
@@ -834,7 +849,10 @@ sequenceDiagram
 				},
 			}),
 		),
-		Layer.succeed(TurnTools, TurnTools.of({ execute: (...args) => this.#execute(...args) })),
+		Layer.succeed(
+			TurnTools,
+			TurnTools.of({ ...this.chatExec.service, execute: (...args) => this.#execute(...args) }),
+		),
 	);
 
 	protected override async onTurnPhase(

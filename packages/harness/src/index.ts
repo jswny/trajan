@@ -216,6 +216,8 @@ export interface StepAttempt {
 	readonly idempotencyKey: string;
 	/** An earlier attempt may have started this step's external work. */
 	readonly recovering: boolean;
+	/** Only recorded outcomes may be inspected after the restart budget is exhausted. */
+	readonly exhaustedRestartLimit?: number;
 	readonly recordText?: (delta: string) => Effect.Effect<void>;
 }
 
@@ -278,6 +280,11 @@ export class TurnTools extends Context.Service<
 			call: typeof ToolCall.Type,
 			attempt: StepAttempt,
 			publishActivity: (activity: ReadonlyArray<typeof ToolActivity.Type>) => Effect.Effect<void>,
+		) => Effect.Effect<typeof ToolResult.Type, TurnError>;
+		readonly recover?: (
+			call: typeof ToolCall.Type,
+			attempt: StepAttempt,
+			restartLimit: number,
 		) => Effect.Effect<typeof ToolResult.Type, TurnError>;
 	}
 >()("@trajan/harness/TurnTools") {}
@@ -363,13 +370,21 @@ export const runTurn = Effect.fn("harness.runTurn")(function* (
 
 		const { continuation: _continuation, ...call } = decision;
 		const result = yield* journal.checkpoint(toolStep, ToolResult, (attempt) =>
-			notify({ type: "tool", call }).pipe(
-				Effect.andThen(
-					tools.execute(call, attempt, (activity) =>
-						notify({ type: "tool-activity", callId: call.id, activity }),
-					),
-				),
-			),
+			Effect.gen(function* () {
+				yield* notify({ type: "tool", call });
+				const limit = attempt.exhaustedRestartLimit;
+				if (limit !== undefined) {
+					return tools.recover
+						? yield* tools.recover(call, attempt, limit)
+						: {
+								status: "unknown",
+								message: `The tool was interrupted ${limit} times. Inspect its effects before repeating it.`,
+							};
+				}
+				return yield* tools.execute(call, attempt, (activity) =>
+					notify({ type: "tool-activity", callId: call.id, activity }),
+				);
+			}),
 		);
 		yield* notify({ type: "tool-result", call, result });
 		history.push(decision, { role: "tool", callId: call.id, result });

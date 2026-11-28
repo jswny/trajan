@@ -39,6 +39,7 @@ const taskJournalPruneLimit = 50;
 const inboxHeartbeatMs = 30_000;
 const maxInboxBackoffMs = 10 * 60_000;
 const stepRestartLimit = 5;
+const stepRecoveryAttemptLimit = 2;
 const modelAttemptLimit = 4;
 const modelRetryDelayMs = 1000;
 const decodeInboxBackoff = Schema.decodeUnknownOption(Schema.Natural);
@@ -315,11 +316,14 @@ function taskJournal(
 			const restartBudget =
 				interrupted && kind === "tool"
 					? recordInterruption(storage, runId, interrupted).pipe(
-							Effect.flatMap((count) =>
-								count >= stepRestartLimit ? Effect.fail(new StepRestartLimitError()) : Effect.void,
-							),
+							Effect.flatMap((count) => {
+								if (count >= stepRestartLimit + stepRecoveryAttemptLimit) {
+									return Effect.fail(new StepRestartLimitError());
+								}
+								return Effect.succeed(count >= stepRestartLimit ? stepRestartLimit : undefined);
+							}),
 						)
-					: Effect.void;
+					: Effect.undefined;
 			return Effect.gen(function* () {
 				const savedHandoff = yield* readHandoff;
 				if (kind === "model" && interrupted && savedHandoff === undefined) {
@@ -357,12 +361,12 @@ function taskJournal(
 							};
 							return runPromise(
 								restartBudget.pipe(
-									Effect.flatMap(() =>
+									Effect.flatMap((exhaustedRestartLimit) =>
 										kind === "model"
 											? drafts.capture(runId, name, attempt, (recordText) =>
 													run({ ...input, recordText }),
 												)
-											: run(input),
+											: run({ ...input, ...(exhaustedRestartLimit && { exhaustedRestartLimit }) }),
 									),
 									Effect.flatMap(Schema.decodeUnknownEffect(result)),
 									Effect.flatMap((value) => saveDecision(value, signal)),

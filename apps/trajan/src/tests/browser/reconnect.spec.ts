@@ -596,6 +596,53 @@ test("restores a completed exec while its turn is still active", async ({ page }
 	await expect(first).toHaveAttribute("open");
 });
 
+test("keeps the partial exec and its write visible after five Worker restarts", async ({
+	page,
+}) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/pause-replay`)).status()).toBe(204);
+	await composer.fill("Recover an exec after repeated restarts.");
+	await composer.press("Enter");
+	const decodePause = Schema.decodeUnknownSync(
+		Schema.Struct({ instance: Schema.String, pausedInstance: Schema.optionalKey(Schema.String) }),
+	);
+	let previous: string | undefined;
+	for (let count = 0; count < 5; count++) {
+		await expect
+			.poll(
+				async () => {
+					const response = await page.request.post(`${control}/state`);
+					if (!response.ok()) {
+						return false;
+					}
+					const { instance, pausedInstance } = decodePause(await response.json());
+					if (instance === previous || instance !== pausedInstance) {
+						return false;
+					}
+					previous = instance;
+					return true;
+				},
+				{ timeout: 7000 },
+			)
+			.toBe(true);
+		expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+		await openChat(page);
+	}
+	const card = toolCards(page).first();
+	await expect(toolActivity(page)).toHaveText(/Outcome unknown/);
+	await expect(card.locator(":scope > summary")).toHaveText("execOutcome unknown");
+	await openToolCard(card);
+	const write = card.getByRole("listitem").filter({ hasText: /write.*Succeeded/ });
+	await write.locator("summary").click();
+	await expect(write.getByRole("region", { name: "File changes" })).toContainText("written");
+	await expect(
+		page
+			.getByRole("main")
+			.getByText(/script was interrupted 5 times/)
+			.first(),
+	).toBeVisible();
+});
+
 test("shows an exhausted model retry budget and keeps the completed write after reconnecting", async ({
 	page,
 }) => {
