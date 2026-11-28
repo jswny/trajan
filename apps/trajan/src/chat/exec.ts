@@ -3,8 +3,8 @@ import { describeTools } from "@trajan/code-mode";
 import { clearCodeModeRun, createCloudflareCodeMode } from "@trajan/code-mode-cloudflare";
 import type { CodeModeSandboxBinding } from "@trajan/code-mode-cloudflare";
 import type { CodeModeActivity, CodeModeCatalog } from "@trajan/code-mode";
-import { completedToolResult, TurnIoError } from "@trajan/harness";
-import type { StepAttempt, ToolCall, ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
+import { completedToolResult, ToolCall, TurnIoError } from "@trajan/harness";
+import type { StepAttempt, ToolResult, TurnMessage, TurnTools } from "@trajan/harness";
 import { Console, Effect, Schema } from "effect";
 import { Tool } from "effect/ai";
 import { execName, ExecInput } from "../exec-contract";
@@ -74,6 +74,17 @@ function observeExec<A extends typeof ToolResult.Type, E>(
 }
 
 const executionsKey = (runId: string) => `chat-tool-executions:${runId}`;
+const failureKey = (runId: string, executionId: string) =>
+	`chat-tool-failures:${runId}:${executionId}`;
+const decodeFailure = Schema.decodeUnknownSync(
+	Schema.UndefinedOr(
+		Schema.Struct({
+			call: ToolCall,
+			status: Schema.Literals(["failed", "unknown"]),
+			message: Schema.String,
+		}),
+	),
+);
 const decodeExecutions = Schema.decodeUnknownSync(
 	Schema.UndefinedOr(
 		Schema.Array(
@@ -185,10 +196,61 @@ export function createChatExec(
 			...activity,
 		};
 	});
+	const settleExec = Effect.fnUntraced(function* (
+		call: typeof ToolCall.Type,
+		{ runId, idempotencyKey, recovering }: StepAttempt,
+		work: Effect.Effect<typeof ToolResult.Type, TurnIoError>,
+	) {
+		const key = failureKey(runId, idempotencyKey);
+		if (recovering) {
+			const saved = yield* Effect.try({
+				try: () => decodeFailure(storage.kv.get(key)),
+				catch: executionError,
+			});
+			if (saved) {
+				const { calls } = yield* Effect.try({
+					try: () => codeMode.readExecution(idempotencyKey, runId, "settled"),
+					catch: executionError,
+				});
+				return { status: saved.status, message: saved.message, ...settledActivity(calls) };
+			}
+		}
+		const result = yield* work;
+		if (result.status !== "completed") {
+			// Code Mode already stores successful returns and nested receipts.
+			// Save the terminal error before handing the outcome back to the turn.
+			const { status, message } = result;
+			yield* Effect.tryPromise({
+				try: (signal) => {
+					signal.throwIfAborted();
+					storage.transactionSync(() => {
+						recordExecution(storage, runId, idempotencyKey, call.id);
+						storage.kv.put(key, { call, status, message });
+					});
+					return storage.sync();
+				},
+				catch: executionError,
+			});
+		}
+		return result;
+	});
 
 	function readRecordedExecutions(runId: string, view: "live" | "settled") {
-		return readExecutions(storage, runId).flatMap(({ executionId, callId }) => {
-			const { saved, calls } = codeMode.readExecution(executionId, runId, view);
+		return readExecutions(storage, runId).flatMap<{
+			call: typeof ToolCall.Type;
+			calls: ReadonlyArray<CodeModeActivity>;
+			result: typeof ToolResult.Type | undefined;
+		}>(({ executionId, callId }) => {
+			const failure = decodeFailure(storage.kv.get(failureKey(runId, executionId)));
+			const { saved, calls } = codeMode.readExecution(
+				executionId,
+				runId,
+				failure ? "settled" : view,
+			);
+			if (failure) {
+				const { call, status, message } = failure;
+				return [{ call, calls, result: { status, message } }];
+			}
 			if (!saved) {
 				return [];
 			}
@@ -198,7 +260,7 @@ export function createChatExec(
 				name: Exec.name,
 				input: { code: saved.source },
 			};
-			return [{ call, calls, result: saved.result }];
+			return [{ call, calls, result: saved.result && completedToolResult(saved.result.value) }];
 		});
 	}
 
@@ -209,7 +271,7 @@ export function createChatExec(
 						call,
 						activity: [],
 						result: {
-							...completedToolResult(result.value),
+							...result,
 							...settledActivity(calls, RECENT_TOOL_CALLS),
 						},
 					}
@@ -222,9 +284,7 @@ export function createChatExec(
 			if (!saved && calls.length === 0) {
 				return [];
 			}
-			const result = saved
-				? completedToolResult(saved.value)
-				: unknownOutcome("The script ended without a completed result.");
+			const result = saved ?? unknownOutcome("The script ended without a completed result.");
 			return [
 				call,
 				{
@@ -244,6 +304,9 @@ export function createChatExec(
 		readSettledTools,
 		settleRun(runId: string, outcome: "completed" | "failed" | "cancelled") {
 			const messages = outcome === "completed" ? undefined : readSettledTools(runId);
+			for (const { executionId } of readExecutions(storage, runId)) {
+				storage.kv.delete(failureKey(runId, executionId));
+			}
 			storage.kv.delete(executionsKey(runId));
 			clearCodeModeRun(storage, runId);
 			return messages;
@@ -264,9 +327,9 @@ export function createChatExec(
 		},
 		service: {
 			execute: (...args: Parameters<typeof execute>) =>
-				observeExec(args[0], args[1], execute(...args)),
+				observeExec(args[0], args[1], settleExec(args[0], args[1], execute(...args))),
 			recover: (...args: Parameters<typeof recover>) =>
-				observeExec(args[0], args[1], recover(...args)),
+				observeExec(args[0], args[1], settleExec(args[0], args[1], recover(...args))),
 		},
 	};
 }

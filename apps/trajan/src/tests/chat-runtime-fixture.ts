@@ -646,6 +646,19 @@ export default async function () {
 		if (last?.role === "user" && last.text.endsWith(scheduledPrompt)) {
 			return { role: "assistant", text: "The scheduled workspace check ran." };
 		}
+		if (last?.role === "user" && last.text === "Fail Code Mode with an uncertain push.") {
+			return {
+				role: "tool-call",
+				id: "exec-uncertain-failure",
+				name: "exec",
+				input: {
+					code: `import { push } from "codemode:git";
+export default async function () {
+  return await push({ dir: "/workspace/repo", remote: "upstream", remoteRef: "refs/heads/review" });
+}`,
+				},
+			};
+		}
 		if (last?.role === "user" && last.text === "Fail Code Mode after a write.") {
 			return {
 				role: "tool-call",

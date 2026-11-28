@@ -722,6 +722,22 @@ test("shows an exhausted model retry budget and keeps the completed write after 
 	await expect(toolActivity(page)).toHaveText("Tool activity");
 });
 
+async function expectState(
+	request: APIRequestContext,
+	runId: string | null,
+	state: "waiting" | "completed",
+) {
+	expect(runId).not.toBeNull();
+	await expect
+		.poll(async () => {
+			const response = await request.post(`${control}/task-state`, {
+				params: { runId: runId ?? "" },
+			});
+			return response.ok() ? response.text() : undefined;
+		})
+		.toBe(state);
+}
+
 async function sendAndWaitForRetry(page: Page, composer: Locator, prompt: string) {
 	await composer.fill(prompt);
 	const submission = page.waitForResponse(
@@ -730,15 +746,7 @@ async function sendAndWaitForRetry(page: Page, composer: Locator, prompt: string
 	);
 	await composer.press("Enter");
 	const { runId } = decodeReceipt(await (await submission).json());
-	expect(runId).not.toBeNull();
-	await expect
-		.poll(async () => {
-			const response = await page.request.post(`${control}/task-state`, {
-				params: { runId: runId ?? "" },
-			});
-			return response.ok() ? response.text() : undefined;
-		})
-		.toBe("waiting");
+	await expectState(page.request, runId, "waiting");
 }
 
 test("restores the partial and final replies after a restart during model backoff", async ({
@@ -1182,6 +1190,83 @@ test("warns about a partial Code Mode outcome when a script fails after writing"
 	await composer.fill("hello");
 	await composer.press("Enter");
 	await expect(transcript.getByText('Wrote "writtenhello"', { exact: true })).toBeVisible();
+});
+
+test("restores a settled exec failure before the restarted turn can finish", async ({ page }) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/fail-transcript-write`)).status()).toBe(204);
+	const receipt = page.waitForResponse(
+		(response) => new URL(response.url()).pathname === ChatPath && response.status() === 202,
+	);
+	await composer.fill("Fail Code Mode after a write.");
+	await composer.press("Enter");
+	const { runId } = decodeReceipt(await (await receipt).json());
+	const card = toolCards(page).first();
+	const header = card.locator(":scope > summary");
+	await expect(header).toHaveText("execOutcome unknown");
+	await expectState(page.request, runId, "waiting");
+
+	expect((await page.request.post(`${control}/pause-before-turn`)).status()).toBe(204);
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await openChat(page);
+	await expect(header).toHaveText("execOutcome unknown");
+	await openToolCard(card);
+	await expect(
+		card.getByText(/Script failed after writing.*Inspect it before repeating/),
+	).toBeVisible();
+	const write = card.getByRole("listitem").filter({ hasText: /write.*Succeeded/ });
+	await write.locator("summary").click();
+	await expect(write.getByRole("region", { name: "File changes" })).toContainText("written");
+
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await openChat(page);
+	await expect(header).toHaveText("execOutcome unknown");
+	expect((await page.request.post(`${control}/restore-transcript-write`)).status()).toBe(204);
+	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
+	await expectState(page.request, runId, "completed");
+	await expect(toolCards(page)).toHaveCount(1);
+	await expect(header).toHaveText("execOutcome unknown");
+});
+
+test("restores uncertain effects from a failed exec before replaying the turn", async ({
+	page,
+}) => {
+	const composer = await openChat(page);
+	expect((await page.request.post(`${control}/pause-remote-push`)).status()).toBe(204);
+	expect((await page.request.post(`${control}/fail-transcript-write`)).status()).toBe(204);
+	const receipt = page.waitForResponse(
+		(response) => new URL(response.url()).pathname === ChatPath && response.status() === 202,
+	);
+	await composer.fill("Fail Code Mode with an uncertain push.");
+	await composer.press("Enter");
+	const { runId } = decodeReceipt(await (await receipt).json());
+	const pausedAt = Schema.decodeUnknownSync(
+		Schema.Struct({ pausedAt: Schema.optionalKey(Schema.String) }),
+	);
+	await expect
+		.poll(async () => pausedAt(await (await page.request.post(`${control}/state`)).json()).pausedAt)
+		.toBe("during-remote-push");
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await openChat(page);
+	const card = toolCards(page).first();
+	await expect(card.locator(":scope > summary")).toHaveText("execOutcome unknown");
+	await expectState(page.request, runId, "waiting");
+
+	expect((await page.request.post(`${control}/pause-before-turn`)).status()).toBe(204);
+	expect((await page.request.post(`${control}/crash`)).status()).toBe(500);
+	await openChat(page);
+	await expect(card.locator(":scope > summary")).toHaveText("execOutcome unknown");
+	await openToolCard(card);
+	await expect(
+		card.getByText(/Remote outcome unknown.*refs\/heads\/review.*upstream/),
+	).toBeVisible();
+	await expect(
+		card.getByRole("listitem").filter({ hasText: /git\.push.*Interrupted/ }),
+	).toBeVisible();
+
+	expect((await page.request.post(`${control}/restore-transcript-write`)).status()).toBe(204);
+	expect((await page.request.post(`${control}/release`)).status()).toBe(204);
+	await expectState(page.request, runId, "completed");
 });
 
 test("changes the theme without moving the transcript on a short iPhone viewport", async ({
